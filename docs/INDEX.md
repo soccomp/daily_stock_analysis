@@ -16,6 +16,13 @@
 | 处理数据源失败或降级 | [数据源稳定性与故障处理图示](data-source-stability.md) | [FAQ](FAQ.md) |
 | 参与开发或提交 PR | [贡献指南](CONTRIBUTING.md) | [API 规格](architecture/api_spec.json) |
 
+## Single Brain 治理
+
+| 文档 | 内容 |
+| --- | --- |
+| [Single Brain 架构宪章](SINGLE_BRAIN_CONSTITUTION.md) | DSA Brain 与 Athena Trading Spine 的权责边界、正式协议、安全规则和跨仓变更治理 |
+| [Single Brain P0.1 实施状态](SINGLE_BRAIN_P0_IMPLEMENTATION_STATUS.md) | DSA P0 已交付范围、源码位置、验证证据、兼容性和后续阶段的规范交接入口 |
+
 ## 快速开始
 
 | 文档 | 内容 |
