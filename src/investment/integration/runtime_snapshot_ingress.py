@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import Protocol
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -39,6 +40,7 @@ class CanonicalHttpPortfolioSnapshotSource:
         url: str,
         timeout_seconds: float = 5.0,
         opener: Callable[..., object] | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         parsed = urlsplit(str(url or "").strip())
         if (
@@ -58,8 +60,17 @@ class CanonicalHttpPortfolioSnapshotSource:
         self._url = parsed.geturl()
         self._timeout_seconds = float(timeout_seconds)
         self._opener = opener or build_opener(_RejectRedirects()).open
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._last_response_received_at: datetime | None = None
+
+    @property
+    def last_response_received_at(self) -> datetime | None:
+        """Consumer receipt time sampled only after the full HTTP response."""
+
+        return self._last_response_received_at
 
     def capture_snapshot(self) -> PortfolioSnapshot:
+        self._last_response_received_at = None
         request = Request(
             self._url,
             method="GET",
@@ -74,6 +85,16 @@ class CanonicalHttpPortfolioSnapshotSource:
                 if status != 200:
                     raise SnapshotIngressError(f"snapshot endpoint returned HTTP {status}")
                 payload = response.read(self.MAX_RESPONSE_BYTES + 1)
+            received_at = self._clock()
+            if (
+                not isinstance(received_at, datetime)
+                or received_at.tzinfo is None
+                or received_at.utcoffset() is None
+            ):
+                raise SnapshotIngressError(
+                    "snapshot response receipt clock must be timezone-aware"
+                )
+            self._last_response_received_at = received_at.astimezone(timezone.utc)
         except SnapshotIngressError:
             raise
         except Exception as exc:

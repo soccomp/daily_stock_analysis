@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from src.investment.integration.runtime_snapshot_ingress import (
     _RejectRedirects,
 )
 from tests.test_investment_shadow_wiring_p1a import _snapshot
+from tests.test_investment_shadow_wiring_p1a import NOW
 
 
 URL = "http://127.0.0.1:18761/v1/simulation/portfolio-snapshot"
@@ -54,6 +56,59 @@ def test_ingress_gets_exact_loopback_canonical_contract_without_decimal_loss():
 
     assert observed == _snapshot()
     assert seen == [(URL, "GET", 3.0)]
+
+
+def test_ingress_records_receipt_after_full_response_without_mutating_contract():
+    events = []
+    previous = _snapshot(as_of=NOW - timedelta(seconds=1))
+    snapshot = type(previous).build(
+        **previous.model_dump(
+            exclude={
+                "content_hash",
+                "snapshot_id",
+                "as_of",
+                "created_at",
+                "revision",
+                "supersedes_id",
+            }
+        ),
+        snapshot_id="snapshot-p1a-b",
+        as_of=NOW + timedelta(milliseconds=60),
+        created_at=NOW + timedelta(milliseconds=60),
+        revision=previous.revision + 1,
+        supersedes_id=previous.snapshot_id,
+    )
+    canonical_json = snapshot.canonical_json()
+
+    class _ObservedResponse(_Response):
+        def read(self, limit):
+            events.append("read")
+            return super().read(limit)
+
+        def __exit__(self, *_args):
+            events.append("closed")
+            return None
+
+    def receipt_clock():
+        assert events == ["read", "closed"]
+        events.append("receipt-clock")
+        return NOW
+
+    source = CanonicalHttpPortfolioSnapshotSource(
+        url=URL,
+        opener=lambda *_args, **_kwargs: _ObservedResponse(canonical_json.encode("utf-8")),
+        clock=receipt_clock,
+    )
+
+    observed = source.capture_snapshot()
+
+    assert events == ["read", "closed", "receipt-clock"]
+    assert source.last_response_received_at == NOW
+    assert observed.canonical_json() == canonical_json
+    assert observed.content_hash == snapshot.content_hash
+    assert observed.as_of == snapshot.as_of
+    assert observed.revision == previous.revision + 1
+    assert observed.supersedes_id == previous.snapshot_id
 
 
 @pytest.mark.parametrize(

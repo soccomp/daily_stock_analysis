@@ -1,10 +1,10 @@
 # Single Brain P0/P1 Implementation Status — DSA
 
-**Status date:** 2026-08-08
+**Status date:** 2026-08-09
 
 **Repository role:** Research and sole Investment Decision Brain
 
-**Lifecycle state:** M2 MISSION COMPLETE — READY FOR ARCHITECTURE REVIEW
+**Lifecycle state:** M2 SNAPSHOT CLOCK REPAIR — READY FOR ARCHITECTURE REVIEW
 
 **Normative architecture:** [Single Brain Architecture Constitution](SINGLE_BRAIN_CONSTITUTION.md)
 
@@ -32,6 +32,27 @@ The existing DSA agent, screening, portfolio, API, and Web flows remain in place
 - An additive SQLite operational checkpoint uses unique cycle/symbol keys and stores only immutable Snapshot A and RiskPolicy mirrors plus scheduler recovery facts. It is not an account ledger or parallel scorecard. Duplicate/restart work reuses the exact bound inputs, while conflicting Snapshot, policy hash, policy content, or symbol scope fails closed.
 - The real DSA `StockAnalysisPipeline` remains the analysis producer. M2 disables all pre-existing P1 investment runtime hooks during that analysis, reconstructs the persisted completion deterministically, revalidates authority/freshness after analysis, and then invokes only the DSA Brain shadow service. Runtime mandate creation and all execution transport are absent.
 - Focused M2B ingress/scheduler/analysis/dedupe tests: **32 passed** at the phase checkpoint.
+
+## M2 Authoritative Snapshot Clock Repair
+
+- Athena remains the sole owner of canonical `PortfolioSnapshot.as_of`,
+  `created_at`, factual account state, revision, and supersession. DSA never
+  rewrites those fields and consumer receipt metadata is excluded from the
+  contract and content hash.
+- The canonical loopback HTTP ingress records its UTC response receipt clock
+  only after the complete response body has been read and the response closed.
+- M2 authority validation applies a fixed one-second cross-host infrastructure
+  clock-skew budget. A producer observation ahead by at most one second is
+  accepted with freshness age clamped to zero only for that calculation;
+  greater future skew remains fail-closed and the five-minute stale limit is
+  unchanged.
+- Focused DSA P0/P1/M2, contract, architecture, restart/deduplication, and
+  cross-repository regression: **106 passed**. Full DSA backend gate: **5,846
+  passed, 4 deselected, 501 subtests passed**. Paired Athena contract,
+  runtime-snapshot, and architecture compatibility: **46 passed**.
+- The repair is isolated on `codex/snapshot-clock-ordering-repair` for Draft PR
+  review. It is not deployed or merged; M2 recurring scheduling remains OFF and
+  Deployment Smoke remains stopped.
 
 ## P1A Shadow Wiring
 

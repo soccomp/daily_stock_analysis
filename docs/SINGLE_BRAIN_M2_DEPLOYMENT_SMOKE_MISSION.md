@@ -1,10 +1,10 @@
 # Single Brain M2 Deployment Smoke Mission
 
-**Version:** 1.2
+**Version:** 1.3
 
 **Approved:** 2026-08-09
 
-**Mission status:** HARD STOP — SNAPSHOT TIME CONTRACT DECISION REQUIRED
+**Mission status:** SNAPSHOT CLOCK REPAIR READY FOR REVIEW — SMOKE REMAINS STOPPED
 
 **Normative parents:**
 
@@ -312,3 +312,33 @@ Safety closeout remained unchanged: `LIVE_TRADING=false`, simulation-only,
 recurring M2/P1A/P1B OFF, and the one historical order/execution evidence digest
 unchanged. No submit, cancel, retry, reconcile, portfolio mutation, service
 restart, credential, password, plist, or environment change occurred.
+
+## 13. Owner-approved Snapshot clock semantics and repair — 2026-08-09
+
+The Owner resolved the Section 12 contract decision without changing the Single
+Brain authority boundary:
+
+- `PortfolioSnapshot.as_of` remains Athena's authoritative factual observation
+  time and `created_at` remains the producer-side canonical object creation
+  time. DSA does not rewrite either value.
+- Snapshot causal ordering remains the monotonic `revision` / `supersedes_id`
+  chain rather than exact cross-host wall-clock equality.
+- DSA records a consumer-only UTC receipt clock only after the complete
+  canonical HTTP response has been received.
+- M2 authority validation has a fixed one-second cross-host infrastructure
+  clock-skew budget. An `as_of` ahead of receipt by at most one second is
+  accepted with freshness age zero for that calculation only; a value more than
+  one second ahead still fails closed. The existing five-minute stale limit is
+  unchanged.
+
+The integration-derived DSA repair changes no canonical schema, serialization,
+hash input, portfolio authority, RiskPolicy, investment sizing, scheduler
+enablement, or execution path. Focused DSA P0/P1/M2, contract, architecture,
+restart/deduplication, and cross-repository regression completed with **106
+passed**. The full DSA backend gate completed with **5,846 passed, 4 deselected,
+501 subtests passed**. Paired Athena canonical-contract, M2 runtime-snapshot,
+and architecture compatibility regression completed with **46 passed**.
+
+The repair is review-only. It has not been deployed or merged, Deployment Smoke
+has not resumed, recurring M2 remains OFF, and no submit, cancel, retry,
+reconcile, or portfolio mutation operation was performed.
