@@ -1113,6 +1113,22 @@ class DecisionSignalRecord(Base):
     )
 
 
+class SingleDecisionScorecardRecord(Base):
+    """Immutable P1 Single Decision lineage keyed by decision_id."""
+
+    __tablename__ = "single_decision_scorecards"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    decision_id = Column(String(160), nullable=False, unique=True, index=True)
+    trace_id = Column(String(128), nullable=False, index=True)
+    account_id = Column(String(160), nullable=False, index=True)
+    symbol = Column(String(64), nullable=False, index=True)
+    action = Column(String(16), nullable=False, index=True)
+    payload_hash = Column(String(64), nullable=False)
+    payload_json = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+
+
 class DecisionSignalOutcomeRecord(Base):
     """Signal-level forward outcome for Issue #1390 P5."""
 

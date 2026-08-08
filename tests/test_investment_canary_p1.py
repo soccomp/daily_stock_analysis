@@ -59,6 +59,21 @@ class ForbiddenTransport:
         raise AssertionError("disabled or non-allowlisted canary reached execution")
 
 
+class RecordingScorecardService:
+    def __init__(self):
+        self.artifacts = None
+
+    def persist_canary(self, artifacts):
+        self.artifacts = artifacts
+        return {
+            "item": {
+                "decision_id": artifacts.investment_decision.decision_id,
+                "read_only": True,
+            },
+            "created": True,
+        }
+
+
 def _hold_snapshot() -> PortfolioSnapshot:
     as_of = NOW - timedelta(minutes=1)
     return PortfolioSnapshot.build(
@@ -217,6 +232,8 @@ def test_real_dsa_analysis_completion_executes_exact_local_athena_canary(tmp_pat
     pipeline.config.investment_canary_enabled = True
     pipeline.config.investment_canary_account_id = "simulation-account-1"
     pipeline.config.investment_canary_symbols = ["600519"]
+    scorecard_service = RecordingScorecardService()
+    pipeline._investment_scorecard_service = scorecard_service
     phase_context = SimpleNamespace(to_dict=lambda: _phase_payload())
 
     with LocalAthenaCanaryTransport.for_athena_worktree(
@@ -269,3 +286,9 @@ def test_real_dsa_analysis_completion_executes_exact_local_athena_canary(tmp_pat
     assert execution.portfolio_snapshot_after_id == snapshot_b.snapshot_id
     assert execution.portfolio_snapshot_after_hash == snapshot_b.content_hash
     assert "_investment_canary_artifacts" not in result.to_dict()
+    assert scorecard_service.artifacts is artifacts
+    assert result._investment_scorecard == {
+        "decision_id": decision.decision_id,
+        "read_only": True,
+    }
+    assert "_investment_scorecard" not in result.to_dict()

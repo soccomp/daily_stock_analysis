@@ -105,6 +105,7 @@ if TYPE_CHECKING:
     from src.investment.integration.canary_transport import AthenaCanaryTransport
     from src.investment.contracts.portfolio_snapshot import PortfolioSnapshot
     from src.investment.contracts.risk_policy import RiskPolicy
+    from src.services.decision_scorecard_service import DecisionScorecardService
 
 
 logger = logging.getLogger(__name__)
@@ -233,6 +234,7 @@ class StockAnalysisPipeline:
         investment_shadow_risk_policy: Optional["RiskPolicy"] = None,
         investment_shadow_clock: Optional[Callable[[], datetime]] = None,
         investment_canary_transport: Optional["AthenaCanaryTransport"] = None,
+        investment_scorecard_service: Optional["DecisionScorecardService"] = None,
     ):
         """
         初始化调度器
@@ -264,6 +266,7 @@ class StockAnalysisPipeline:
         self._investment_shadow_risk_policy = investment_shadow_risk_policy
         self._investment_shadow_clock = investment_shadow_clock
         self._investment_canary_transport = investment_canary_transport
+        self._investment_scorecard_service = investment_scorecard_service
         
         # 初始化各模块
         self.db = get_db()
@@ -2831,6 +2834,26 @@ class StockAnalysisPipeline:
                 allowed_symbols=allowed_symbols,
             )
             setattr(result, "_investment_canary_artifacts", artifacts)
+            setattr(result, "_investment_scorecard", None)
+            try:
+                from src.services.decision_scorecard_service import (
+                    DecisionScorecardService,
+                )
+
+                scorecard_service = (
+                    getattr(self, "_investment_scorecard_service", None)
+                    or DecisionScorecardService(db_manager=self.db)
+                )
+                scorecard_payload = scorecard_service.persist_canary(artifacts)
+                setattr(result, "_investment_scorecard", scorecard_payload["item"])
+            except Exception as scorecard_error:
+                logger.warning(
+                    "Investment scorecard persistence failed after canary: query_id=%s decision_id=%s error_type=%s reason=%s",
+                    query_id,
+                    artifacts.investment_decision.decision_id,
+                    type(scorecard_error).__name__,
+                    scorecard_error,
+                )
             execution_result = artifacts.execution_result
             logger.info(
                 "Investment canary completed: query_id=%s stock_code=%s decision_id=%s action=%s execution_status=%s",

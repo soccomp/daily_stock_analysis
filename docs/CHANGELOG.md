@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] P1C 为每个 `decision_id` 持久化一份不可变 Single Decision Scorecard，并通过只读 API 返回 Research、Snapshot A、RiskPolicy、Decision、DecisionSignal、Mandate、ExecutionResult、Snapshot B 与即时执行诊断的完整 lineage。
 - [新功能] 新增默认关闭且独立于 P1A 的 Single Brain P1B 本地模拟 canary：DSA Brain 以风险预算确定目标仓位，通过 canonical JSON 边界向 Athena Trading Spine 发送 exact-quantity LIMIT mandate，并提供显式 allowlist、UNKNOWN 禁止自动重试和开发工作树 one-shot 入口。
 - [改进] 新增默认关闭的 Single Brain P1A analysis-completion shadow wiring：仅使用实际 DSA 分析结果与显式注入的 authoritative Athena PortfolioSnapshot/RiskPolicy 生成内部 ResearchBundle、InvestmentDecision 和只读 DecisionSignal 投影；不持久化 shadow 产物、不连接 Athena runtime 且不具备任何执行能力。
 - [新功能] 新增 DSA Single Brain P0 纵向闭环的六份不可变版本化协议、ResearchBundle 适配、唯一 InvestmentDecision 定量引擎及 DecisionSignal/ExecutionMandate 确定性投影；最终交易数量在 DSA 内按 authoritative Athena 模拟组合与显式 RiskPolicy 生成，执行投影不提供改量入口且保持 simulation-only。

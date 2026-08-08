@@ -4,7 +4,7 @@
 
 **Repository role:** Research and sole Investment Decision Brain
 
-**Lifecycle state:** P0 and P1A verified; P1B Simulation Canary implemented on the P1 Mission branch
+**Lifecycle state:** P0 and P1A verified; P1B Simulation Canary and P1C Single Decision Scorecard implemented on the P1 Mission branch
 
 **Normative architecture:** [Single Brain Architecture Constitution](SINGLE_BRAIN_CONSTITUTION.md)
 
@@ -46,6 +46,15 @@ P1A adds one internal, default-off hook after a real legacy or Agent analysis re
 - A development-only one-shot runner requires an explicit simulation confirmation, the default-off feature flag, an account match, an allowlisted symbol, and a canonical policy file. It does not touch launchd or a plist.
 - P1B artifacts remain private runtime objects pending P1C scorecard persistence.
 
+## P1C Minimal Single Decision Scorecard
+
+- Every completed P1B canary lineage is persisted once in the existing DSA SQLAlchemy database, keyed uniquely by `decision_id`; the stored canonical payload is immutable and content-hashed.
+- The one scorecard reconstructs `ResearchBundle`, authoritative Snapshot A mirror, `RiskPolicy`, `InvestmentDecision`, `DecisionSignal`, optional `ExecutionMandate`, `ExecutionResult`, and authoritative Snapshot B mirror.
+- Immediate diagnostics record requested, submitted, filled, and remaining quantity; average fill; fees; slippage; execution state; and reconciliation state without introducing performance judgment.
+- An additive GET-only endpoint, `/api/v1/decision-scorecards/{decision_id}`, exposes the lineage through existing DSA API conventions. There is no scorecard mutation endpoint.
+- Scorecard persistence occurs only after P1B returns observed artifacts. A storage failure is reported without changing the decision, retrying execution, or mutating portfolio truth.
+- The scorecard package imports neither the Brain engine nor the mandate projector and exposes no decide, submit, retry, reconcile, or portfolio-mutation operation.
+
 ## Implementation map
 
 | Responsibility | Location |
@@ -67,6 +76,9 @@ P1A adds one internal, default-off hook after a real legacy or Agent analysis re
 | P1B canary orchestration and invariant checks | `src/investment/canary.py` |
 | Narrow canonical local Athena transport | `src/investment/integration/canary_transport.py` |
 | Explicit development one-shot runner | `scripts/run_p1_simulation_canary.py` |
+| Immutable Single Decision Scorecard model | `src/investment/scorecard.py` |
+| Write-once scorecard persistence | `src/repositories/decision_scorecard_repo.py` |
+| Read-only scorecard service and API | `src/services/decision_scorecard_service.py`, `api/v1/endpoints/decision_scorecards.py` |
 
 ## Authority proof
 
@@ -87,6 +99,9 @@ P1A validation completed on the stacked branch:
 - The P1B integration test drives a real saved DSA `AnalysisResult`, produces risk-derived ADD 200, transports the canonical mandate to the sibling Athena worker, observes exact submit 200, and validates authoritative Snapshot B quantity 500.
 - Cross-repository invariant: `decision.delta_quantity == mandate.quantity == execution.requested_quantity == execution.submitted_quantity == 200`; reconciled position equals Snapshot A quantity plus observed fill.
 - Critical lint and diff checks passed.
+- P1C scorecard/canary/P1A/architecture/storage/config focused suite — **108 passed**.
+- The P1C integration test starts from an actual sibling Athena canary result, persists the complete canonical lineage in DSA SQLite, and reads it back by `decision_id` with exact execution diagnostics.
+- Write-once conflict, GET-only route, not-found handling, and no-decision/no-execution architecture assertions pass.
 
 ## Compatibility
 
@@ -96,6 +111,7 @@ P1A validation completed on the stacked branch:
 - No live-trading path or broker SDK dependency was added to DSA.
 - P1A adds no persistence, dispatch, retry, order submission, portfolio mutation, API, or UI path.
 - P1B is opt-in, local, simulation-only, allowlisted, and adds no deployed runtime or public API/UI behavior.
+- P1C adds one read-only API and one additive table; it does not change existing routes, portfolio authority, execution behavior, or UI behavior.
 
 ## Publication and upstream policy
 
@@ -112,8 +128,8 @@ P1A validation completed on the stacked branch:
 - Live trading, message queues, service decomposition, or repository merger.
 - Full Decision Scorecard UI and broad DSA Web UI integration.
 - Retirement of legacy DSA or Athena investment paths.
-- P1C persistent Single Decision Scorecard and read-only retrieval API.
 - Any live, Windows-worker, launchd, or deployed-runtime canary.
+- Long-term 1/5/20-day outcome evaluation, broad Scorecard UI, and mutable scorecard revisions.
 
 ## Canonical next-phase handoff
 
