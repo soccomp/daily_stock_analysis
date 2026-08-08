@@ -4,7 +4,7 @@
 
 **Approved:** 2026-08-08
 
-**Mission status:** APPROVED — NOT STARTED
+**Mission status:** MISSION COMPLETE — READY FOR ARCHITECTURE REVIEW
 
 **Normative parents:**
 
@@ -305,3 +305,30 @@ Final closeout must:
 - leave all PRs unmerged.
 
 Do not begin implementation merely because this document exists. Implementation starts only when the owner explicitly instructs Codex to execute the approved M2 Mission.
+
+## 15. Mission closeout evidence
+
+M2A through M2G are implemented on the canonical integration-derived branches and published for architecture review:
+
+- DSA Draft PR: [soccomp/daily_stock_analysis#4](https://github.com/soccomp/daily_stock_analysis/pull/4), base `athena-integration`, head `codex/m2-shadow-operations`.
+- Athena Draft PR: [soccomp/athena#3](https://github.com/soccomp/athena/pull/3), base `integration`, head `codex/m2-shadow-operations`.
+- Both PRs are cross-linked, Draft, and unmerged.
+
+Verification completed on 2026-08-08:
+
+- DSA required `./scripts/ci_gate.sh`: syntax, critical flake8, deterministic code/YFinance checks, then **5,839 passed, 4 deselected, 501 subtests passed**.
+- DSA M2 focused auth, architecture, resilience, holdings, cross-repository, scheduler, and burn-in suite: **52 passed**.
+- Athena full regression: **916 passed**.
+- Athena M2A plus Trading Spine/worker focused suite: **92 passed**.
+- The deterministic burn-in completed 20 successful cycles across three symbols, persisted 60 unique BUY/ADD/HOLD shadow scorecards, exercised duplicate/restart and stale/unavailable cases, and produced no mandate, result, Snapshot B, submission, cancellation, retry, or reconciliation side effect.
+- Cross-repository wire proof observed changing Athena runtime projections, preserved canonical IDs, Decimal strings, timezone-aware timestamps and content hashes in DSA, and recorded zero submissions/cancellations.
+- Default configuration registers no M2 work. Enabled M2 remains `execution_authorization=OFF`; `LIVE_TRADING` remains exactly false in the Athena boundary.
+
+Known gaps intentionally remain outside M2:
+
+- The feature is not enabled in any deployed DSA or Athena service; no launchd/plist/runtime configuration was changed.
+- Weakening holdings remain HOLD with explicit risk/invalidation evidence because SELL/REDUCE authority and execution are outside M2.
+- Recovery/idempotency uses the existing single-database SQLite deployment model; distributed workers, queues, and cross-host coordination remain out of scope.
+- Operator visibility is the authenticated read-only API; no broad UI was added.
+- Athena `main` promotion and synchronization to the sanitized public `soccomp/audit-athena` snapshot remain separate governance decisions.
+- Any future execution-capable phase requires a new explicit mission and architecture acceptance; M2 itself grants no execution authority.

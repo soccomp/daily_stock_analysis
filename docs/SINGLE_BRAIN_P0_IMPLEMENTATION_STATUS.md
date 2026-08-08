@@ -4,7 +4,7 @@
 
 **Repository role:** Research and sole Investment Decision Brain
 
-**Lifecycle state:** M2 IN PROGRESS — M2G COMPLETE, CLOSEOUT PENDING
+**Lifecycle state:** M2 MISSION COMPLETE — READY FOR ARCHITECTURE REVIEW
 
 **Normative architecture:** [Single Brain Architecture Constitution](SINGLE_BRAIN_CONSTITUTION.md)
 
@@ -103,6 +103,14 @@ P1A adds one internal, default-off hook after a real legacy or Agent analysis re
 - Every burn-in scorecard has one unique `decision_id`, one canonical cycle lineage, authoritative/read-only Snapshot A, no mandate, no result, no Snapshot B, and `execution_authorization=OFF`. Cross-repository wire proof observed two actual Athena runtime projections with zero submissions/cancellations and parsed them with identical canonical hashes in DSA.
 - Complete DSA M2 focused, architecture, auth, cross-repository, resilience, holdings, and burn-in checkpoint: **51 passed**.
 
+## M2 Governance and Regression Closeout
+
+- Canonical DSA review is Draft PR [soccomp/daily_stock_analysis#4](https://github.com/soccomp/daily_stock_analysis/pull/4), based on `athena-integration`. It is cross-linked to Athena Draft PR [soccomp/athena#3](https://github.com/soccomp/athena/pull/3), based on `integration`. Both remain unmerged.
+- The final DSA M2 focused suite, including the restored legacy CLI scheduler compatibility proof, is **52 passed**.
+- The required DSA backend gate is green: syntax, critical flake8, deterministic code/YFinance checks, then **5,839 passed, 4 deselected, 501 subtests passed**.
+- The paired Athena full/focused regressions are **916 / 92 passed**. Cross-repository canonical snapshot parsing, architecture dependency guards, default-off behavior, and zero-execution isolation are green.
+- No Single Brain Constitution or authority boundary changed. No feature was enabled in deployed configuration, no launchd/plist changed, and no PR was merged.
+
 ## Implementation map
 
 | Responsibility | Location |
@@ -152,6 +160,9 @@ P1A adds one internal, default-off hook after a real legacy or Agent analysis re
 - Post-architecture-review auth regression — **113 passed** for the relevant P1/auth suite. The real `create_app` + global `AuthMiddleware` path returns 401 for a missing or forged `dsa_session`; a real `/api/v1/auth/login` signed admin session reaches the Scorecard GET endpoint and returns 200.
 - Final P1 DSA required backend gate — **5793 passed, 4 deselected, 501 subtests passed**.
 - Paired Athena full/focused regressions — **883 / 45 passed**.
+- Final M2 DSA required backend gate — **5,839 passed, 4 deselected, 501 subtests passed**, with syntax, critical flake8, and deterministic checks green.
+- Final M2 DSA focused auth/architecture/resilience/holdings/cross-repository/burn-in suite — **52 passed**.
+- Final paired Athena full/focused regressions — **916 / 92 passed**.
 
 ## Compatibility
 
@@ -172,15 +183,16 @@ P1A adds one internal, default-off hook after a real legacy or Agent analysis re
 - Governance is system-specific and must not be upstreamed independently without upstream agreement on the Single Brain constitution.
 - A future upstream proposal should be a separately authored extraction rather than a direct merge of the Athena-integration history.
 
-## Intentionally out of P1
+## Intentionally out of M2
 
-- Multiple simultaneous symbols or decision-cycle portfolio allocation.
-- SELL/REDUCE execution, complex conditional stops, and take-profit automation.
+- Execution-capable runtime wiring of any kind; M2 persists no mandate, result, or Snapshot B.
+- SELL/REDUCE execution, complex conditional stops, and take-profit automation. Weakening holding evidence remains a non-executing HOLD.
 - Live trading, message queues, service decomposition, or repository merger.
 - Full Decision Scorecard UI and broad DSA Web UI integration.
 - Retirement of legacy DSA or Athena investment paths.
 - Any live, Windows-worker, launchd, or deployed-runtime canary.
 - Long-term 1/5/20-day outcome evaluation, broad Scorecard UI, and mutable scorecard revisions.
+- Distributed scheduler/idempotency coordination beyond the existing SQLite deployment model.
 
 ## P1 Baseline Promotion
 
@@ -197,5 +209,7 @@ The canonical paired Athena baseline is `integration`, whose accepted P1 merge b
 ## Canonical next-phase handoff
 
 Future DSA missions must branch from **`athena-integration`** and read [P1 Mission](SINGLE_BRAIN_P1_MISSION.md) plus the Constitution before implementation. The paired Athena branch is **`integration`**.
+
+Until architecture acceptance, the canonical M2 handoff is the cross-linked, unmerged Draft PR pair [DSA #4](https://github.com/soccomp/daily_stock_analysis/pull/4) and [Athena #3](https://github.com/soccomp/athena/pull/3), together with [M2 Mission](SINGLE_BRAIN_M2_MISSION.md).
 
 Any cross-repository contract or authority change requires coordinated DSA and Athena changes, explicit wire-compatibility evidence, and matching constitutional amendments when the authority boundary changes. Athena mainline promotion remains a separate governance decision and must not be folded into an unrelated mission.
