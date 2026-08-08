@@ -235,6 +235,7 @@ class StockAnalysisPipeline:
         investment_shadow_clock: Optional[Callable[[], datetime]] = None,
         investment_canary_transport: Optional["AthenaCanaryTransport"] = None,
         investment_scorecard_service: Optional["DecisionScorecardService"] = None,
+        investment_runtime_paths_disabled: bool = False,
     ):
         """
         初始化调度器
@@ -267,6 +268,7 @@ class StockAnalysisPipeline:
         self._investment_shadow_clock = investment_shadow_clock
         self._investment_canary_transport = investment_canary_transport
         self._investment_scorecard_service = investment_scorecard_service
+        self._investment_runtime_paths_disabled = bool(investment_runtime_paths_disabled)
         
         # 初始化各模块
         self.db = get_db()
@@ -2708,6 +2710,9 @@ class StockAnalysisPipeline:
         context_snapshot: Dict[str, Any],
     ) -> None:
         """Run at most one default-off P1A/P1B investment path."""
+
+        if getattr(self, "_investment_runtime_paths_disabled", False):
+            return
 
         canary_enabled = bool(
             getattr(self.config, "investment_canary_enabled", False)

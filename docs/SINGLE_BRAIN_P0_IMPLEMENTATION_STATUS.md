@@ -4,7 +4,7 @@
 
 **Repository role:** Research and sole Investment Decision Brain
 
-**Lifecycle state:** P1 BASELINE ACCEPTED AND MERGED
+**Lifecycle state:** M2 IN PROGRESS — M2B COMPLETE
 
 **Normative architecture:** [Single Brain Architecture Constitution](SINGLE_BRAIN_CONSTITUTION.md)
 
@@ -22,6 +22,16 @@ DSA now implements the Brain half of the minimal one-account, one-stock, one BUY
 - A cross-repository subprocess integration test that proves DSA ADD 200 becomes Athena exact submit 200 and reconciles Snapshot B.
 
 The existing DSA agent, screening, portfolio, API, and Web flows remain in place. This is an additive P0/P1 path; DSA's existing local portfolio service is not used as authoritative truth for an Athena-integrated account.
+
+## M2B Recurring Brain Shadow Loop
+
+- `DSA_SINGLE_BRAIN_M2_ENABLED=false` is a separate default-off switch. Disabled mode registers no M2 scheduler task and performs no Athena observation, research, decision, or persistence work.
+- The existing API/Web/Desktop runtime scheduler and CLI schedule mode both register the same bounded M2 background task and share the existing global analysis lock. No second scheduler, launchd/plist edit, or deployed enablement was introduced.
+- DSA reads only canonical `PortfolioSnapshot` JSON from Athena's exact loopback `GET /v1/simulation/portfolio-snapshot` route. The client rejects alternate paths, credentials, queries, redirects before follow-up contact, oversized payloads, and invalid hashes/contracts; it imports no Athena or broker implementation.
+- Every logical time slot has a deterministic `decision_cycle_id`; each bounded CN symbol has a deterministic analysis query and decision identity. Current Athena holdings are deduplicated with the explicit allowlist under a configurable cap.
+- An additive SQLite operational checkpoint uses unique cycle/symbol keys and stores only immutable Snapshot A and RiskPolicy mirrors plus scheduler recovery facts. It is not an account ledger or parallel scorecard. Duplicate/restart work reuses the exact bound inputs, while conflicting Snapshot, policy hash, policy content, or symbol scope fails closed.
+- The real DSA `StockAnalysisPipeline` remains the analysis producer. M2 disables all pre-existing P1 investment runtime hooks during that analysis, reconstructs the persisted completion deterministically, revalidates authority/freshness after analysis, and then invokes only the DSA Brain shadow service. Runtime mandate creation and all execution transport are absent.
+- Focused M2B ingress/scheduler/analysis/dedupe tests: **32 passed** at the phase checkpoint.
 
 ## P1A Shadow Wiring
 

@@ -97,6 +97,80 @@ def build_agent_event_monitor_background_tasks(
     }]
 
 
+def build_single_brain_m2_background_tasks(
+    config: Config,
+    *,
+    config_provider: Callable[[], Config],
+) -> List[Dict[str, Any]]:
+    """Build the default-off M2 shadow task on the existing scheduler lock."""
+    if not getattr(config, "single_brain_m2_enabled", False):
+        return []
+    try:
+        interval_minutes = max(
+            1,
+            min(1440, int(getattr(config, "single_brain_m2_interval_minutes", 60))),
+        )
+    except (TypeError, ValueError):
+        interval_minutes = 60
+
+    def m2_shadow_task() -> None:
+        current_config = config_provider()
+        if not getattr(current_config, "single_brain_m2_enabled", False):
+            return
+
+        def run_once(
+            loaded_config: Config,
+            _args: Any,
+            _stock_codes: Optional[List[str]],
+        ) -> None:
+            from src.investment.m2.orchestration import M2ShadowLoopService
+
+            result = M2ShadowLoopService.from_config(loaded_config).run_cycle()
+            logger.info(
+                "Single Brain M2 shadow cycle finished: cycle=%s status=%s persisted=%d",
+                result.cycle_id,
+                result.status,
+                len(result.persisted_decision_ids),
+            )
+
+        acquired = run_with_global_analysis_lock(
+            run_once,
+            current_config,
+            None,
+            blocking=False,
+        )
+        if not acquired:
+            logger.warning("Single Brain M2 shadow cycle skipped: analysis_already_running")
+
+    return [{
+        "task": m2_shadow_task,
+        "interval_seconds": interval_minutes * 60,
+        "run_immediately": bool(
+            getattr(config, "single_brain_m2_run_immediately", False)
+        ),
+        "name": "single_brain_m2_shadow",
+    }]
+
+
+def build_cli_schedule_background_tasks(
+    config: Config,
+    *,
+    config_provider: Callable[[], Config],
+) -> List[Dict[str, Any]]:
+    """Build the existing CLI scheduler's bounded background task set."""
+
+    return [
+        *build_agent_event_monitor_background_tasks(
+            config,
+            config_provider=config_provider,
+        ),
+        *build_single_brain_m2_background_tasks(
+            config,
+            config_provider=config_provider,
+        ),
+    ]
+
+
 class RuntimeSchedulerService:
     """Manage scheduled analysis inside the current API/Web/Desktop process."""
 
@@ -213,7 +287,13 @@ class RuntimeSchedulerService:
     def _current_background_tasks(self, config: Config) -> List[Dict[str, Any]]:
         if self._background_tasks_provider is not None:
             return self._background_tasks_provider(config)
-        return self._current_agent_event_monitor_background_tasks(config)
+        return [
+            *self._current_agent_event_monitor_background_tasks(config),
+            *build_single_brain_m2_background_tasks(
+                config,
+                config_provider=self._reload_config,
+            ),
+        ]
 
     def _current_agent_event_monitor_background_tasks(self, config: Config) -> List[Dict[str, Any]]:
         name = "agent_event_monitor"

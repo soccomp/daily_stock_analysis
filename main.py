@@ -1554,27 +1554,20 @@ def main() -> int:
 
             def scheduled_task():
                 runtime_config = _reload_runtime_config()
-                run_full_analysis(runtime_config, args, scheduled_stock_codes)
+                _run_analysis_with_runtime_scheduler_lock(
+                    runtime_config,
+                    args,
+                    scheduled_stock_codes,
+                )
 
-            background_tasks = []
-            if getattr(config, 'agent_event_monitor_enabled', False):
-                from src.services.alert_worker import AlertWorker
+            from src.services.runtime_scheduler import (
+                build_cli_schedule_background_tasks,
+            )
 
-                interval_minutes = max(1, getattr(config, 'agent_event_monitor_interval_minutes', 5))
-                alert_worker = AlertWorker(config_provider=_reload_runtime_config)
-
-                def event_monitor_task():
-                    stats = alert_worker.run_once()
-                    triggered_count = stats.get("triggered", 0)
-                    if triggered_count:
-                        logger.info("[EventMonitor] 本轮触发 %d 条提醒", triggered_count)
-
-                background_tasks.append({
-                    "task": event_monitor_task,
-                    "interval_seconds": interval_minutes * 60,
-                    "run_immediately": True,
-                    "name": "agent_event_monitor",
-                })
+            background_tasks = build_cli_schedule_background_tasks(
+                config,
+                config_provider=_reload_runtime_config,
+            )
 
             schedule_kwargs = {
                 "task": scheduled_task,
