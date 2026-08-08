@@ -20,7 +20,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import List, Dict, Any, Optional, Tuple, Callable
+from typing import TYPE_CHECKING, List, Dict, Any, Optional, Tuple, Callable
 
 import pandas as pd
 
@@ -100,6 +100,10 @@ from src.core.trading_calendar import (
 )
 from data_provider.us_index_mapping import is_us_stock_code
 from bot.models import BotMessage
+
+if TYPE_CHECKING:
+    from src.investment.contracts.portfolio_snapshot import PortfolioSnapshot
+    from src.investment.contracts.risk_policy import RiskPolicy
 
 
 logger = logging.getLogger(__name__)
@@ -224,6 +228,9 @@ class StockAnalysisPipeline:
         portfolio_context: Optional[Dict[str, Any]] = None,
         daily_market_context_enabled: Optional[bool] = None,
         daily_market_context_allow_generate: bool = True,
+        investment_shadow_portfolio_snapshot: Optional["PortfolioSnapshot"] = None,
+        investment_shadow_risk_policy: Optional["RiskPolicy"] = None,
+        investment_shadow_clock: Optional[Callable[[], datetime]] = None,
     ):
         """
         初始化调度器
@@ -251,6 +258,9 @@ class StockAnalysisPipeline:
             else bool(daily_market_context_enabled)
         )
         self.daily_market_context_allow_generate = daily_market_context_allow_generate
+        self._investment_shadow_portfolio_snapshot = investment_shadow_portfolio_snapshot
+        self._investment_shadow_risk_policy = investment_shadow_risk_policy
+        self._investment_shadow_clock = investment_shadow_clock
         
         # 初始化各模块
         self.db = get_db()
@@ -878,6 +888,12 @@ class StockAnalysisPipeline:
                             report_type=report_type.value,
                             context_snapshot=context_snapshot,
                             portfolio_context=portfolio_context,
+                        )
+                        self._run_investment_shadow_after_history_save(
+                            result=result,
+                            query_id=query_id,
+                            source_report_id=saved_history_id,
+                            context_snapshot=context_snapshot,
                         )
                 except Exception as e:
                     record_history_run(
@@ -1707,6 +1723,12 @@ class StockAnalysisPipeline:
                             report_type=report_type.value,
                             context_snapshot=agent_context_snapshot,
                             portfolio_context=portfolio_context,
+                        )
+                        self._run_investment_shadow_after_history_save(
+                            result=result,
+                            query_id=query_id,
+                            source_report_id=saved_history_id,
+                            context_snapshot=agent_context_snapshot,
                         )
                     latest_diagnostic_snapshot = current_diagnostic_snapshot()
                     if latest_diagnostic_snapshot is not None:
@@ -2669,6 +2691,66 @@ class StockAnalysisPipeline:
                 getattr(result, "code", None),
                 exc,
                 exc_info=True,
+            )
+
+    def _run_investment_shadow_after_history_save(
+        self,
+        *,
+        result: AnalysisResult,
+        query_id: str,
+        source_report_id: int,
+        context_snapshot: Dict[str, Any],
+    ) -> None:
+        """Build internal P1A artifacts; never persist, transport, or execute them."""
+
+        if not bool(getattr(self.config, "investment_shadow_wiring_enabled", False)):
+            return
+
+        setattr(result, "_investment_shadow_artifacts", None)
+        portfolio_snapshot = getattr(self, "_investment_shadow_portfolio_snapshot", None)
+        risk_policy = getattr(self, "_investment_shadow_risk_policy", None)
+        if portfolio_snapshot is None or risk_policy is None:
+            logger.warning(
+                "Investment shadow wiring blocked: query_id=%s stock_code=%s reason=missing_injected_authority",
+                query_id,
+                getattr(result, "code", None),
+            )
+            return
+
+        try:
+            from src.investment.shadow_wiring import InvestmentShadowWiringService
+
+            clock = getattr(self, "_investment_shadow_clock", None)
+            service = InvestmentShadowWiringService(clock=clock)
+            diagnostic_context = get_current_diagnostic_context()
+            trace_id = (
+                getattr(diagnostic_context, "trace_id", None)
+                or getattr(self, "trace_id", None)
+                or query_id
+            )
+            artifacts = service.build_from_analysis(
+                result=result,
+                context_snapshot=context_snapshot,
+                source_report_id=source_report_id,
+                trace_id=str(trace_id),
+                trigger_source=getattr(self, "query_source", None) or "system",
+                portfolio_snapshot=portfolio_snapshot,
+                risk_policy=risk_policy,
+            )
+            setattr(result, "_investment_shadow_artifacts", artifacts)
+            logger.info(
+                "Investment shadow wiring completed: query_id=%s stock_code=%s decision_id=%s shadow_only=true",
+                query_id,
+                getattr(result, "code", None),
+                artifacts.investment_decision.decision_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Investment shadow wiring blocked: query_id=%s stock_code=%s error_type=%s reason=%s",
+                query_id,
+                getattr(result, "code", None),
+                type(exc).__name__,
+                exc,
             )
 
     @staticmethod
