@@ -4,7 +4,7 @@
 
 **Repository role:** Research and sole Investment Decision Brain
 
-**Lifecycle state:** M2 IN PROGRESS — M2E COMPLETE
+**Lifecycle state:** M2 IN PROGRESS — M2F COMPLETE
 
 **Normative architecture:** [Single Brain Architecture Constitution](SINGLE_BRAIN_CONSTITUTION.md)
 
@@ -88,6 +88,13 @@ P1A adds one internal, default-off hook after a real legacy or Agent analysis re
 - Thesis weakening, risk factors, catalysts, and invalidation evidence remain visible in the one ResearchBundle/scorecard lineage. Because M2 has no SELL/REDUCE capability, non-positive evidence produces HOLD with unchanged quantity and no reduction sizing or execution artifact.
 - Focused two-cycle holdings-review proof: **1 passed** at the phase checkpoint.
 
+## M2F Operator Readiness Surface
+
+- Additive GET-only `/api/v1/single-brain/m2/readiness` reports the latest authoritative Athena snapshot identity/freshness/reconciliation facts, latest and latest-completed cycle, bounded symbol decisions and source kinds, explicit skip/failure reasons, persistence timestamp, and duplicate/recovery counters.
+- The response always identifies `execution_authorization=OFF` and `portfolio_authority=ATHENA_RUNTIME`. It derives portfolio fields only from a strictly revalidated immutable canonical mirror; it neither infers nor mutates account truth.
+- Existing global `AuthMiddleware` remains the real authentication authority. Missing and forged sessions return 401, while a session created through the real admin login succeeds. The endpoint has no mutation or retry route, and a read failure returns 500 without changing M2 state.
+- Focused authenticated/read-only readiness regression: **3 passed** at the phase checkpoint.
+
 ## Implementation map
 
 | Responsibility | Location |
@@ -112,6 +119,10 @@ P1A adds one internal, default-off hook after a real legacy or Agent analysis re
 | Immutable Single Decision Scorecard model | `src/investment/scorecard.py` |
 | Write-once scorecard persistence | `src/repositories/decision_scorecard_repo.py` |
 | Read-only scorecard service and API | `src/services/decision_scorecard_service.py`, `api/v1/endpoints/decision_scorecards.py` |
+| M2 canonical Athena snapshot ingress | `src/investment/integration/runtime_snapshot_ingress.py` |
+| M2 recurring orchestration and identity | `src/investment/m2/orchestration.py`, `src/investment/m2/identity.py` |
+| M2 operational recovery checkpoint | `src/investment/m2/repository.py`, `src/storage.py` |
+| M2 operator readiness | `src/services/single_brain_m2_readiness_service.py`, `api/v1/endpoints/single_brain_m2.py` |
 
 ## Authority proof
 

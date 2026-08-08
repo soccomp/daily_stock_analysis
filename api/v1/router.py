@@ -24,6 +24,7 @@ from api.v1.endpoints import (
     history,
     intelligence,
     portfolio,
+    single_brain_m2,
     stocks,
     system_config,
     usage,
@@ -103,6 +104,12 @@ router.include_router(
     decision_signals.router,
     prefix="/decision-signals",
     tags=["DecisionSignals"]
+)
+
+router.include_router(
+    single_brain_m2.router,
+    prefix="/single-brain/m2",
+    tags=["SingleBrainM2"],
 )
 
 router.include_router(
