@@ -102,8 +102,10 @@ from data_provider.us_index_mapping import is_us_stock_code
 from bot.models import BotMessage
 
 if TYPE_CHECKING:
+    from src.investment.integration.canary_transport import AthenaCanaryTransport
     from src.investment.contracts.portfolio_snapshot import PortfolioSnapshot
     from src.investment.contracts.risk_policy import RiskPolicy
+    from src.services.decision_scorecard_service import DecisionScorecardService
 
 
 logger = logging.getLogger(__name__)
@@ -231,6 +233,8 @@ class StockAnalysisPipeline:
         investment_shadow_portfolio_snapshot: Optional["PortfolioSnapshot"] = None,
         investment_shadow_risk_policy: Optional["RiskPolicy"] = None,
         investment_shadow_clock: Optional[Callable[[], datetime]] = None,
+        investment_canary_transport: Optional["AthenaCanaryTransport"] = None,
+        investment_scorecard_service: Optional["DecisionScorecardService"] = None,
     ):
         """
         初始化调度器
@@ -261,6 +265,8 @@ class StockAnalysisPipeline:
         self._investment_shadow_portfolio_snapshot = investment_shadow_portfolio_snapshot
         self._investment_shadow_risk_policy = investment_shadow_risk_policy
         self._investment_shadow_clock = investment_shadow_clock
+        self._investment_canary_transport = investment_canary_transport
+        self._investment_scorecard_service = investment_scorecard_service
         
         # 初始化各模块
         self.db = get_db()
@@ -2701,9 +2707,23 @@ class StockAnalysisPipeline:
         source_report_id: int,
         context_snapshot: Dict[str, Any],
     ) -> None:
-        """Build internal P1A artifacts; never persist, transport, or execute them."""
+        """Run at most one default-off P1A/P1B investment path."""
 
-        if not bool(getattr(self.config, "investment_shadow_wiring_enabled", False)):
+        canary_enabled = bool(
+            getattr(self.config, "investment_canary_enabled", False)
+        )
+        shadow_enabled = bool(
+            getattr(self.config, "investment_shadow_wiring_enabled", False)
+        )
+        if not canary_enabled and not shadow_enabled:
+            return
+        if canary_enabled:
+            self._run_investment_canary_after_history_save(
+                result=result,
+                query_id=query_id,
+                source_report_id=source_report_id,
+                context_snapshot=context_snapshot,
+            )
             return
 
         setattr(result, "_investment_shadow_artifacts", None)
@@ -2749,6 +2769,105 @@ class StockAnalysisPipeline:
                 "Investment shadow wiring blocked: query_id=%s stock_code=%s error_type=%s reason=%s",
                 query_id,
                 getattr(result, "code", None),
+                type(exc).__name__,
+                exc,
+            )
+
+    def _run_investment_canary_after_history_save(
+        self,
+        *,
+        result: AnalysisResult,
+        query_id: str,
+        source_report_id: int,
+        context_snapshot: Dict[str, Any],
+    ) -> None:
+        """Run one allowlisted local simulation canary; never retry it."""
+
+        setattr(result, "_investment_canary_artifacts", None)
+        transport = getattr(self, "_investment_canary_transport", None)
+        risk_policy = getattr(self, "_investment_shadow_risk_policy", None)
+        account_id = str(
+            getattr(self.config, "investment_canary_account_id", None) or ""
+        ).strip()
+        allowed_symbols = frozenset(
+            str(symbol).strip()
+            for symbol in (
+                getattr(self.config, "investment_canary_symbols", None) or ()
+            )
+            if str(symbol).strip()
+        )
+        symbol = str(getattr(result, "code", None) or "").strip()
+        if (
+            transport is None
+            or risk_policy is None
+            or not account_id
+            or not allowed_symbols
+            or symbol not in allowed_symbols
+        ):
+            logger.warning(
+                "Investment canary blocked: query_id=%s stock_code=%s reason=missing_or_disallowed_canary_authority",
+                query_id,
+                symbol,
+            )
+            return
+
+        try:
+            from src.investment.canary import InvestmentCanaryService
+
+            diagnostic_context = get_current_diagnostic_context()
+            trace_id = (
+                getattr(diagnostic_context, "trace_id", None)
+                or getattr(self, "trace_id", None)
+                or query_id
+            )
+            artifacts = InvestmentCanaryService(
+                clock=getattr(self, "_investment_shadow_clock", None),
+            ).run_from_analysis(
+                result=result,
+                context_snapshot=context_snapshot,
+                source_report_id=source_report_id,
+                trace_id=str(trace_id),
+                trigger_source=getattr(self, "query_source", None) or "system",
+                risk_policy=risk_policy,
+                transport=transport,
+                account_id=account_id,
+                allowed_symbols=allowed_symbols,
+            )
+            setattr(result, "_investment_canary_artifacts", artifacts)
+            setattr(result, "_investment_scorecard", None)
+            try:
+                from src.services.decision_scorecard_service import (
+                    DecisionScorecardService,
+                )
+
+                scorecard_service = (
+                    getattr(self, "_investment_scorecard_service", None)
+                    or DecisionScorecardService(db_manager=self.db)
+                )
+                scorecard_payload = scorecard_service.persist_canary(artifacts)
+                setattr(result, "_investment_scorecard", scorecard_payload["item"])
+            except Exception as scorecard_error:
+                logger.warning(
+                    "Investment scorecard persistence failed after canary: query_id=%s decision_id=%s error_type=%s reason=%s",
+                    query_id,
+                    artifacts.investment_decision.decision_id,
+                    type(scorecard_error).__name__,
+                    scorecard_error,
+                )
+            execution_result = artifacts.execution_result
+            logger.info(
+                "Investment canary completed: query_id=%s stock_code=%s decision_id=%s action=%s execution_status=%s",
+                query_id,
+                symbol,
+                artifacts.investment_decision.decision_id,
+                artifacts.investment_decision.action,
+                None if execution_result is None else execution_result.status,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Investment canary blocked: query_id=%s stock_code=%s error_type=%s reason=%s",
+                query_id,
+                symbol,
                 type(exc).__name__,
                 exc,
             )

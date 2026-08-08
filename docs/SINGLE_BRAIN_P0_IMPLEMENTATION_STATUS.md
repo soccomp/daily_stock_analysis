@@ -1,10 +1,10 @@
-# Single Brain P0/P1A Implementation Status — DSA
+# Single Brain P0/P1 Implementation Status — DSA
 
 **Status date:** 2026-08-08
 
 **Repository role:** Research and sole Investment Decision Brain
 
-**Lifecycle state:** P0 implemented and verified; P1A Shadow Wiring implemented on a stacked Draft PR
+**Lifecycle state:** P1 MISSION COMPLETE — READY FOR ARCHITECTURE REVIEW
 
 **Normative architecture:** [Single Brain Architecture Constitution](SINGLE_BRAIN_CONSTITUTION.md)
 
@@ -31,10 +31,29 @@ P1A adds one internal, default-off hook after a real legacy or Agent analysis re
 - The hook adapts the completed `AnalysisResult` into a `ResearchBundle`; it does not use fixture-only research or a second research engine.
 - It accepts only programmatically injected canonical `PortfolioSnapshot` and `RiskPolicy` objects. It has no Athena runtime, broker, HTTP, queue, scheduler, or execution dependency.
 - It produces one `InvestmentDecision` and one internal `DecisionSignal` projection. P1A deliberately does not create an `ExecutionMandate`.
-- Its provisional shadow sizing input requests at most `RiskPolicy.max_single_position_weight`; the existing DSA `InvestmentDecisionEngine` still applies stop-risk, cash, exposure, position-count, and lot constraints before producing final quantity. This is diagnostic only and is not execution authorization.
+- Its deterministic sizing input is now the risk-budget-derived target used by P1B; `max_single_position_weight` remains a cap rather than an investment target.
 - Shadow artifacts stay on a private runtime-only result attribute. They are not persisted and are absent from `AnalysisResult.to_dict()`, public APIs, UI, notifications, and existing DecisionSignal storage.
 - Missing, invalid, future, stale (older than five minutes), unreconciled, or non-simulation portfolio truth and missing/invalid/expired policy inputs fail closed with no shadow decision artifacts.
 - P1A remains CN-equity BUY/ADD/HOLD research shadowing only and introduces no trading capability.
+
+## P1B Simulation Canary
+
+- `DSA_INVESTMENT_CANARY_ENABLED=false` is a separate default-off switch; P1A enablement never enables P1B.
+- DSA Brain computes `risk_budget_per_trade / stop_loss_fraction` with Decimal semantics and caps the target by `max_single_position_weight`. An existing position at or above that target produces HOLD without mandate projection or transport execution.
+- The real legacy and Agent analysis-completion hooks can run one allowlisted canary only when an explicit account, symbol allowlist, canonical RiskPolicy, and local Athena canary transport are injected.
+- The integration boundary is outside Research and Decision. It sends only canonical PortfolioSnapshot, ExecutionMandate, ExecutionResult, and snapshot JSON through a bounded local subprocess session.
+- The canary projects a mandate only for BUY/ADD and validates that Athena submitted the exact decision delta or zero. It never retries UNKNOWN.
+- A development-only one-shot runner requires an explicit simulation confirmation, the default-off feature flag, an account match, an allowlisted symbol, and a canonical policy file. It does not touch launchd or a plist.
+- P1B artifacts remain private runtime objects pending P1C scorecard persistence.
+
+## P1C Minimal Single Decision Scorecard
+
+- Every completed P1B canary lineage is persisted once in the existing DSA SQLAlchemy database, keyed uniquely by `decision_id`; the stored canonical payload is immutable and content-hashed.
+- The one scorecard reconstructs `ResearchBundle`, authoritative Snapshot A mirror, `RiskPolicy`, `InvestmentDecision`, `DecisionSignal`, optional `ExecutionMandate`, `ExecutionResult`, and authoritative Snapshot B mirror.
+- Immediate diagnostics record requested, submitted, filled, and remaining quantity; average fill; fees; slippage; execution state; and reconciliation state without introducing performance judgment.
+- An additive GET-only endpoint, `/api/v1/decision-scorecards/{decision_id}`, exposes the lineage through existing DSA API conventions. There is no scorecard mutation endpoint.
+- Scorecard persistence occurs only after P1B returns observed artifacts. A storage failure is reported without changing the decision, retrying execution, or mutating portfolio truth.
+- The scorecard package imports neither the Brain engine nor the mandate projector and exposes no decide, submit, retry, reconcile, or portfolio-mutation operation.
 
 ## Implementation map
 
@@ -53,6 +72,13 @@ P1A adds one internal, default-off hook after a real legacy or Agent analysis re
 | DecisionSignal projection | `src/investment/execution_projection/decision_signal.py` |
 | P1A pure analysis-completion shadow wiring | `src/investment/shadow_wiring.py` |
 | Real analysis completion integration hook | `src/core/pipeline.py` |
+| P1 deterministic risk-budget target sizing | `src/investment/decision/sizing.py` |
+| P1B canary orchestration and invariant checks | `src/investment/canary.py` |
+| Narrow canonical local Athena transport | `src/investment/integration/canary_transport.py` |
+| Explicit development one-shot runner | `scripts/run_p1_simulation_canary.py` |
+| Immutable Single Decision Scorecard model | `src/investment/scorecard.py` |
+| Write-once scorecard persistence | `src/repositories/decision_scorecard_repo.py` |
+| Read-only scorecard service and API | `src/services/decision_scorecard_service.py`, `api/v1/endpoints/decision_scorecards.py` |
 
 ## Authority proof
 
@@ -69,8 +95,14 @@ P1A validation completed on the stacked branch:
 - P1A, config-registry, P0 contract/architecture/cross-repository, and pipeline-context focused suite — **120 passed**.
 - The P1A tests drive the existing `StockAnalysisPipeline.analyze_stock()` completion path through history persistence, then verify that the resulting real `AnalysisResult` fields form the `ResearchBundle` and preserve complete decision lineage.
 - Static dependency and call-surface assertions prove the shadow service has no HTTP, queue, broker, mandate, execution, dispatch, submit, persistence, mutation, or retry path.
+- P1B focused DSA/P0/config/cross-repository suite — **107 passed**.
+- The P1B integration test drives a real saved DSA `AnalysisResult`, produces risk-derived ADD 200, transports the canonical mandate to the sibling Athena worker, observes exact submit 200, and validates authoritative Snapshot B quantity 500.
 - Cross-repository invariant: `decision.delta_quantity == mandate.quantity == execution.requested_quantity == execution.submitted_quantity == 200`; reconciled position equals Snapshot A quantity plus observed fill.
 - Critical lint and diff checks passed.
+- P1C scorecard/canary/P1A/architecture/storage/config focused suite — **108 passed**.
+- The P1C integration test starts from an actual sibling Athena canary result, persists the complete canonical lineage in DSA SQLite, and reads it back by `decision_id` with exact execution diagnostics.
+- Write-once conflict, GET-only route, not-found handling, and no-decision/no-execution architecture assertions pass.
+- Post-architecture-review auth regression: the real `create_app` + global `AuthMiddleware` path returns 401 for a missing or forged `dsa_session`; a real `/api/v1/auth/login` signed admin session reaches the Scorecard GET endpoint and returns 200. The endpoint preserves the established global-validation convention rather than adding a second auth implementation.
 
 ## Compatibility
 
@@ -79,6 +111,8 @@ P1A validation completed on the stacked branch:
 - Existing DSA research/risk/orchestration flows remain available and are not silently routed into execution.
 - No live-trading path or broker SDK dependency was added to DSA.
 - P1A adds no persistence, dispatch, retry, order submission, portfolio mutation, API, or UI path.
+- P1B is opt-in, local, simulation-only, allowlisted, and adds no deployed runtime or public API/UI behavior.
+- P1C adds one read-only API and one additive table; it does not change existing routes, portfolio authority, execution behavior, or UI behavior.
 
 ## Publication and upstream policy
 
@@ -95,8 +129,11 @@ P1A validation completed on the stacked branch:
 - Live trading, message queues, service decomposition, or repository merger.
 - Full Decision Scorecard UI and broad DSA Web UI integration.
 - Retirement of legacy DSA or Athena investment paths.
-- Any Athena runtime connection or execution of P1A artifacts.
+- Any live, Windows-worker, launchd, or deployed-runtime canary.
+- Long-term 1/5/20-day outcome evaluation, broad Scorecard UI, and mutable scorecard revisions.
 
 ## Canonical next-phase handoff
 
-Future DSA phases must update this file in the implementation PR. Any cross-repository contract or authority change requires a coordinated Athena PR, cross-links between the two PRs, explicit wire-compatibility evidence, and matching constitutional amendments when the authority boundary changes.
+The canonical unmerged DSA P1 handoff is Draft PR [#3](https://github.com/soccomp/daily_stock_analysis/pull/3), paired with Athena Draft PR [#2](https://github.com/soccomp/athena/pull/2). Final closeout passed the required DSA gate (**5793 passed, 4 deselected, 501 subtests passed**), the complete P0/P1 cross-repository focused suite (**53 passed**), the broader P1C focused suite (**108 passed**), and the paired Athena full/focused regressions (**883 / 45 passed**). Both feature switches remain OFF by default; no live/deployed runtime configuration changed.
+
+Future DSA phases must continue from the canonical PR, [P1 Mission](SINGLE_BRAIN_P1_MISSION.md), and Constitution. Any cross-repository contract or authority change requires a coordinated Athena PR, cross-links between the two PRs, explicit wire-compatibility evidence, and matching constitutional amendments when the authority boundary changes.

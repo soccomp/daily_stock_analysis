@@ -18,6 +18,7 @@ from api.v1.endpoints import (
     analysis,
     auth,
     backtest,
+    decision_scorecards,
     decision_signals,
     health,
     history,
@@ -90,6 +91,12 @@ router.include_router(
     alerts.router,
     prefix="/alerts",
     tags=["Alerts"]
+)
+
+router.include_router(
+    decision_scorecards.router,
+    prefix="/decision-scorecards",
+    tags=["DecisionScorecards"]
 )
 
 router.include_router(

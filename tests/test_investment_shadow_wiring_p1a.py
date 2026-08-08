@@ -48,7 +48,7 @@ def _analysis_result() -> AnalysisResult:
                 "sniper_points": {
                     "ideal_buy": 95,
                     "secondary_buy": 100,
-                    "stop_loss": 50,
+                    "stop_loss": 80,
                     "take_profit": 130,
                 }
             },

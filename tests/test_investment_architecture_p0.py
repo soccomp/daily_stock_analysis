@@ -93,3 +93,16 @@ def test_research_contract_cannot_carry_final_allocation() -> None:
 def test_mandate_projector_has_no_quantity_override_parameter() -> None:
     parameters = inspect.signature(ExecutionMandateProjector.project).parameters
     assert tuple(parameters) == ("decision",)
+
+
+def test_p1_transport_stays_outside_research_and_decision_internals() -> None:
+    protected = _python_files("src/investment/research") + _python_files(
+        "src/investment/decision"
+    )
+    imports = _imported_modules(protected)
+    assert not any(
+        module.startswith("src.investment.integration")
+        or module.startswith("src.trading_spine")
+        or module.startswith("athena")
+        for module in imports
+    )
