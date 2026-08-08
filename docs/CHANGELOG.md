@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] 新增默认关闭的 Single Brain P1A analysis-completion shadow wiring：仅使用实际 DSA 分析结果与显式注入的 authoritative Athena PortfolioSnapshot/RiskPolicy 生成内部 ResearchBundle、InvestmentDecision 和只读 DecisionSignal 投影；不持久化 shadow 产物、不连接 Athena runtime 且不具备任何执行能力。
 - [新功能] 新增 DSA Single Brain P0 纵向闭环的六份不可变版本化协议、ResearchBundle 适配、唯一 InvestmentDecision 定量引擎及 DecisionSignal/ExecutionMandate 确定性投影；最终交易数量在 DSA 内按 authoritative Athena 模拟组合与显式 RiskPolicy 生成，执行投影不提供改量入口且保持 simulation-only。
 - [新功能] Agent Chat 按会话持久化 Skill 选择，支持刷新和会话切换恢复，并区分省略 `skills`、显式空列表与非空选择；无持久化状态的历史会话继续使用运行时默认且不会被静默转为显式选择，复用分析 `context` 中残留的 legacy `skills` / `strategies` 也不会覆盖顶层三态或会话状态，非空但全部无效的 Skill 请求不会被当成显式空列表并清空既有选择
 - [改进] 后端 CI 在不跳过离线测试的前提下按完整测试文件分成三个独立 runner 并行执行，由单一 `backend-gate` 汇总门禁结果；实测文件耗时和首分片静态检查成本共同参与负载平衡，新测试文件自动纳入，现有 pip 安装和测试参数保持不变，避免 xdist 进程内并发的全局状态竞态。

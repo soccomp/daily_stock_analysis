@@ -21,7 +21,7 @@
 | 文档 | 内容 |
 | --- | --- |
 | [Single Brain 架构宪章](SINGLE_BRAIN_CONSTITUTION.md) | DSA Brain 与 Athena Trading Spine 的权责边界、正式协议、安全规则和跨仓变更治理 |
-| [Single Brain P0.1 实施状态](SINGLE_BRAIN_P0_IMPLEMENTATION_STATUS.md) | DSA P0 已交付范围、源码位置、验证证据、兼容性和后续阶段的规范交接入口 |
+| [Single Brain P0/P1A 实施状态](SINGLE_BRAIN_P0_IMPLEMENTATION_STATUS.md) | DSA P0 与 P1A Shadow Wiring 已交付范围、源码位置、验证证据、兼容性和后续阶段的规范交接入口 |
 
 ## 快速开始
 
