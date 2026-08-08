@@ -4,7 +4,7 @@
 
 **Repository role:** Research and sole Investment Decision Brain
 
-**Lifecycle state:** P1 MISSION COMPLETE — READY FOR ARCHITECTURE REVIEW
+**Lifecycle state:** P1 BASELINE ACCEPTED AND MERGED
 
 **Normative architecture:** [Single Brain Architecture Constitution](SINGLE_BRAIN_CONSTITUTION.md)
 
@@ -21,7 +21,7 @@ DSA now implements the Brain half of the minimal one-account, one-stock, one BUY
 - Architecture tests that protect DSA Research and Decision from broker/execution dependencies.
 - A cross-repository subprocess integration test that proves DSA ADD 200 becomes Athena exact submit 200 and reconciles Snapshot B.
 
-The existing DSA agent, screening, portfolio, API, and Web flows remain in place. This is an additive P0 path; DSA's existing local portfolio service is not used as authoritative truth for an Athena-integrated account.
+The existing DSA agent, screening, portfolio, API, and Web flows remain in place. This is an additive P0/P1 path; DSA's existing local portfolio service is not used as authoritative truth for an Athena-integrated account.
 
 ## P1A Shadow Wiring
 
@@ -89,20 +89,17 @@ P1A adds one internal, default-off hook after a real legacy or Agent analysis re
 
 ## Verification evidence
 
-P1A validation completed on the stacked branch:
-
-- Required DSA backend gate: `PATH=/private/tmp/dsa-athena-p0-ci/bin:$PATH ./scripts/ci_gate.sh` — syntax and critical flake8 checks passed; deterministic code/YFinance checks passed; offline suite **5782 passed, 4 deselected, 501 subtests passed**.
-- P1A, config-registry, P0 contract/architecture/cross-repository, and pipeline-context focused suite — **120 passed**.
-- The P1A tests drive the existing `StockAnalysisPipeline.analyze_stock()` completion path through history persistence, then verify that the resulting real `AnalysisResult` fields form the `ResearchBundle` and preserve complete decision lineage.
-- Static dependency and call-surface assertions prove the shadow service has no HTTP, queue, broker, mandate, execution, dispatch, submit, persistence, mutation, or retry path.
+- P1A required DSA backend gate completed with syntax, critical flake8, deterministic checks, and offline suite **5782 passed, 4 deselected, 501 subtests passed**.
+- P1A/config/P0 architecture/cross-repository/pipeline focused suite — **120 passed**.
 - P1B focused DSA/P0/config/cross-repository suite — **107 passed**.
 - The P1B integration test drives a real saved DSA `AnalysisResult`, produces risk-derived ADD 200, transports the canonical mandate to the sibling Athena worker, observes exact submit 200, and validates authoritative Snapshot B quantity 500.
 - Cross-repository invariant: `decision.delta_quantity == mandate.quantity == execution.requested_quantity == execution.submitted_quantity == 200`; reconciled position equals Snapshot A quantity plus observed fill.
-- Critical lint and diff checks passed.
 - P1C scorecard/canary/P1A/architecture/storage/config focused suite — **108 passed**.
 - The P1C integration test starts from an actual sibling Athena canary result, persists the complete canonical lineage in DSA SQLite, and reads it back by `decision_id` with exact execution diagnostics.
 - Write-once conflict, GET-only route, not-found handling, and no-decision/no-execution architecture assertions pass.
-- Post-architecture-review auth regression: the real `create_app` + global `AuthMiddleware` path returns 401 for a missing or forged `dsa_session`; a real `/api/v1/auth/login` signed admin session reaches the Scorecard GET endpoint and returns 200. The endpoint preserves the established global-validation convention rather than adding a second auth implementation.
+- Post-architecture-review auth regression — **113 passed** for the relevant P1/auth suite. The real `create_app` + global `AuthMiddleware` path returns 401 for a missing or forged `dsa_session`; a real `/api/v1/auth/login` signed admin session reaches the Scorecard GET endpoint and returns 200.
+- Final P1 DSA required backend gate — **5793 passed, 4 deselected, 501 subtests passed**.
+- Paired Athena full/focused regressions — **883 / 45 passed**.
 
 ## Compatibility
 
@@ -116,13 +113,14 @@ P1A validation completed on the stacked branch:
 
 ## Publication and upstream policy
 
-- The canonical P0 implementation branch and PR live in `soccomp/daily_stock_analysis`.
-- No P0 PR is opened automatically against `ZhuLinsen/daily_stock_analysis`.
-- The current P0 implementation commit is additive and isolated, but it is not demonstrably generic as-is: its canonical contracts, authoritative snapshot rules, execution mandate lineage, simulation-only restrictions, and cross-repository test intentionally encode the DSA/Athena boundary.
-- The governance commit is system-specific and must not be upstreamed independently without upstream agreement on the Single Brain constitution.
-- A future upstream proposal should be a separately authored extraction. The most plausible candidates are the generic immutable canonical-JSON/hash contract utility and the DecisionSignal projection pattern, but neither is a safe direct cherry-pick today because both currently depend on P0-specific contracts and semantics.
+- The canonical Athena-specific DSA development branch is `athena-integration` in `soccomp/daily_stock_analysis`.
+- DSA `main` remains upstream-oriented and is intentionally not the canonical branch for Athena-specific integration work.
+- No P0/P1 PR is opened automatically against `ZhuLinsen/daily_stock_analysis`.
+- The current Single Brain implementation is not demonstrably generic as-is: its canonical contracts, authoritative snapshot rules, execution mandate lineage, simulation-only restrictions, and cross-repository tests intentionally encode the DSA/Athena boundary.
+- Governance is system-specific and must not be upstreamed independently without upstream agreement on the Single Brain constitution.
+- A future upstream proposal should be a separately authored extraction rather than a direct merge of the Athena-integration history.
 
-## Intentionally out of P0
+## Intentionally out of P1
 
 - Multiple simultaneous symbols or decision-cycle portfolio allocation.
 - SELL/REDUCE execution, complex conditional stops, and take-profit automation.
@@ -132,8 +130,20 @@ P1A validation completed on the stacked branch:
 - Any live, Windows-worker, launchd, or deployed-runtime canary.
 - Long-term 1/5/20-day outcome evaluation, broad Scorecard UI, and mutable scorecard revisions.
 
+## P1 Baseline Promotion
+
+Architecture acceptance and auth closeout completed before promotion. The stacked DSA PRs were merged in dependency order into `athena-integration`:
+
+- PR #1 P0 merge commit: `fe488d3ff9c8ebe343fd4b6c188ae7aa6d88aa08`.
+- PR #2 P1A merge commit: `02daef3a85b24ca71fc49e1b009f854792231e8d`.
+- PR #3 P1 merge baseline: `fa67418179f014d94832efaba883b6fa1a78938c`.
+
+The accepted/tested DSA P1 head `03f4cbf989535d65797f0ef56ca1066d4f2f0b75` and merge baseline `fa67418179f014d94832efaba883b6fa1a78938c` both point to tree `b860792d7a8a7dac5d2d190af5da75af0e96a5c2`. The merge therefore introduced no code-tree drift.
+
+The canonical paired Athena baseline is `integration`, whose accepted P1 merge baseline is `915441905978a2de67786209523cf934288acac5`. Its tree matches the tested Athena P1 head exactly, as recorded in [P1 Mission](SINGLE_BRAIN_P1_MISSION.md).
+
 ## Canonical next-phase handoff
 
-The canonical unmerged DSA P1 handoff is Draft PR [#3](https://github.com/soccomp/daily_stock_analysis/pull/3), paired with Athena Draft PR [#2](https://github.com/soccomp/athena/pull/2). Final closeout passed the required DSA gate (**5793 passed, 4 deselected, 501 subtests passed**), the complete P0/P1 cross-repository focused suite (**53 passed**), the broader P1C focused suite (**108 passed**), and the paired Athena full/focused regressions (**883 / 45 passed**). Both feature switches remain OFF by default; no live/deployed runtime configuration changed.
+Future DSA missions must branch from **`athena-integration`** and read [P1 Mission](SINGLE_BRAIN_P1_MISSION.md) plus the Constitution before implementation. The paired Athena branch is **`integration`**.
 
-Future DSA phases must continue from the canonical PR, [P1 Mission](SINGLE_BRAIN_P1_MISSION.md), and Constitution. Any cross-repository contract or authority change requires a coordinated Athena PR, cross-links between the two PRs, explicit wire-compatibility evidence, and matching constitutional amendments when the authority boundary changes.
+Any cross-repository contract or authority change requires coordinated DSA and Athena changes, explicit wire-compatibility evidence, and matching constitutional amendments when the authority boundary changes. Athena mainline promotion remains a separate governance decision and must not be folded into an unrelated mission.
