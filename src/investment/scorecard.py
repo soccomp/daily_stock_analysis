@@ -20,9 +20,13 @@ from src.investment.contracts.risk_policy import RiskPolicy
 
 if TYPE_CHECKING:
     from src.investment.canary import InvestmentCanaryArtifacts
+    from src.investment.shadow_wiring import InvestmentShadowArtifacts
 
 
 SCORECARD_SCHEMA_VERSION = "p1-scorecard-v1"
+SHADOW_SCORECARD_MODE = "M2_SHADOW"
+SHADOW_EXECUTION_AUTHORIZATION = "OFF"
+SHADOW_EXECUTION_STATE = "NOT_AUTHORIZED"
 
 
 def _without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -107,6 +111,69 @@ class SingleDecisionScorecard:
             execution_results=(() if result is None else (result,)),
             portfolio_snapshot_b=artifacts.portfolio_snapshot_b,
             execution_diagnostics=_freeze(diagnostics),
+        )
+        draft._validate_lineage()
+        return cls(
+            **{
+                **draft.__dict__,
+                "scorecard_hash": hashlib.sha256(
+                    canonical_json_bytes(draft._body())
+                ).hexdigest(),
+            }
+        )
+
+    @classmethod
+    def from_shadow(
+        cls,
+        artifacts: "InvestmentShadowArtifacts",
+    ) -> "SingleDecisionScorecard":
+        """Capture a non-executable shadow lineage in the existing scorecard."""
+
+        if (
+            artifacts.shadow_only is not True
+            or artifacts.execution_permitted is not False
+            or artifacts.shadow_mandate is not None
+        ):
+            raise ValueError("shadow scorecard artifacts must be non-executable")
+
+        snapshot = artifacts.portfolio_snapshot_a
+        decision = artifacts.investment_decision
+        diagnostics = {
+            "mode": SHADOW_SCORECARD_MODE,
+            "execution_authorization": SHADOW_EXECUTION_AUTHORIZATION,
+            "execution_state": SHADOW_EXECUTION_STATE,
+            "requested_quantity": None,
+            "submitted_quantity": None,
+            "filled_quantity": None,
+            "remaining_quantity": None,
+            "average_fill_price": None,
+            "fees": None,
+            "slippage_bps": None,
+            "reconciliation_state": "NOT_APPLICABLE",
+            "snapshot_freshness": {
+                "snapshot_id": snapshot.snapshot_id,
+                "snapshot_hash": snapshot.content_hash,
+                "as_of": snapshot.as_of,
+                "validated_at": decision.created_at,
+                "reconciliation_status": snapshot.reconciliation_status,
+                "source": snapshot.source,
+                "authoritative": snapshot.authoritative,
+                "read_only": snapshot.read_only,
+            },
+        }
+        draft = cls(
+            scorecard_hash="0" * 64,
+            created_at=decision.created_at,
+            source_report_id=artifacts.source_report_id,
+            research_bundle=artifacts.research_bundle,
+            portfolio_snapshot_a=snapshot,
+            risk_policy=artifacts.risk_policy,
+            investment_decision=decision,
+            decision_signal=_freeze(canonicalize(artifacts.decision_signal)),
+            execution_mandate=None,
+            execution_results=(),
+            portfolio_snapshot_b=None,
+            execution_diagnostics=_freeze(canonicalize(diagnostics)),
         )
         draft._validate_lineage()
         return cls(
@@ -244,6 +311,10 @@ class SingleDecisionScorecard:
         ):
             raise ValueError("scorecard DecisionSignal lineage mismatch")
 
+        if self.execution_diagnostics.get("mode") == SHADOW_SCORECARD_MODE:
+            self._validate_shadow_lineage()
+            return
+
         actionable = decision.action in {"BUY", "ADD"}
         if actionable:
             if (
@@ -274,3 +345,43 @@ class SingleDecisionScorecard:
             or self.portfolio_snapshot_b is not None
         ):
             raise ValueError("HOLD scorecard cannot contain execution artifacts")
+
+    def _validate_shadow_lineage(self) -> None:
+        if (
+            self.execution_diagnostics.get("execution_authorization")
+            != SHADOW_EXECUTION_AUTHORIZATION
+            or self.execution_diagnostics.get("execution_state")
+            != SHADOW_EXECUTION_STATE
+        ):
+            raise ValueError("shadow scorecard execution authorization mismatch")
+        if (
+            self.execution_mandate is not None
+            or self.execution_results
+            or self.portfolio_snapshot_b is not None
+        ):
+            raise ValueError("shadow scorecard cannot contain execution artifacts")
+        metadata = self.decision_signal.get("metadata")
+        if (
+            self.decision_signal.get("shadow_only") is not True
+            or self.decision_signal.get("execution_permitted") is not False
+            or not isinstance(metadata, Mapping)
+            or metadata.get("shadow_only") is not True
+            or metadata.get("execution_permitted") is not False
+        ):
+            raise ValueError("shadow scorecard DecisionSignal is executable")
+
+        snapshot = self.portfolio_snapshot_a
+        expected_freshness = canonicalize(
+            {
+                "snapshot_id": snapshot.snapshot_id,
+                "snapshot_hash": snapshot.content_hash,
+                "as_of": snapshot.as_of,
+                "validated_at": self.investment_decision.created_at,
+                "reconciliation_status": snapshot.reconciliation_status,
+                "source": snapshot.source,
+                "authoritative": snapshot.authoritative,
+                "read_only": snapshot.read_only,
+            }
+        )
+        if self.execution_diagnostics.get("snapshot_freshness") != expected_freshness:
+            raise ValueError("shadow scorecard snapshot freshness lineage mismatch")

@@ -4,7 +4,7 @@
 
 **Repository role:** Research and sole Investment Decision Brain
 
-**Lifecycle state:** M2 IN PROGRESS — M2B COMPLETE
+**Lifecycle state:** M2 IN PROGRESS — M2C COMPLETE
 
 **Normative architecture:** [Single Brain Architecture Constitution](SINGLE_BRAIN_CONSTITUTION.md)
 
@@ -64,6 +64,14 @@ P1A adds one internal, default-off hook after a real legacy or Agent analysis re
 - An additive GET-only endpoint, `/api/v1/decision-scorecards/{decision_id}`, exposes the lineage through existing DSA API conventions. There is no scorecard mutation endpoint.
 - Scorecard persistence occurs only after P1B returns observed artifacts. A storage failure is reported without changing the decision, retrying execution, or mutating portfolio truth.
 - The scorecard package imports neither the Brain engine nor the mandate projector and exposes no decide, submit, retry, reconcile, or portfolio-mutation operation.
+
+## M2C Shadow Decision Persistence
+
+- M2 reuses the existing `SingleDecisionScorecard` model, write-once repository, `decision_id` key, and authenticated read surface. No parallel shadow score or second decision authority was introduced.
+- `SingleDecisionScorecard.from_shadow()` records ResearchBundle, exact authoritative Snapshot A mirror/hash, RiskPolicy/version/hash, `decision_cycle_id`, InvestmentDecision, DecisionSignal, creation time, and freshness provenance with explicit `mode=M2_SHADOW`, `execution_authorization=OFF`, and `execution_state=NOT_AUTHORIZED` diagnostics.
+- BUY, ADD, and HOLD shadow decisions all require zero `ExecutionMandate`, zero `ExecutionResult`, and no Snapshot B. Any attempt to attach execution artifacts to an M2 shadow scorecard fails validation.
+- `DecisionScorecardService.persist_shadow()` keeps the existing immutable create-if-absent semantics. Restart or duplicate persistence with identical content returns the same record; conflicting content under one `decision_id` is rejected.
+- M2C plus P1 scorecard/shadow/canary focused regression: **22 passed** at the phase checkpoint.
 
 ## Implementation map
 
