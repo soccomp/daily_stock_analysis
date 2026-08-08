@@ -1170,6 +1170,10 @@ class Config:
 
     # Single Brain P1A: internal analysis-completion shadow wiring (default off)
     investment_shadow_wiring_enabled: bool = False
+    # Single Brain P1B: exact local simulation canary (separate, default off)
+    investment_canary_enabled: bool = False
+    investment_canary_account_id: Optional[str] = None
+    investment_canary_symbols: List[str] = field(default_factory=list)
 
     # === 回测配置 ===
     backtest_enabled: bool = True
@@ -2127,6 +2131,21 @@ class Config:
                 os.getenv('DSA_INVESTMENT_SHADOW_ENABLED'),
                 default=False,
             ),
+            investment_canary_enabled=parse_env_bool(
+                os.getenv('DSA_INVESTMENT_CANARY_ENABLED'),
+                default=False,
+            ),
+            investment_canary_account_id=(
+                os.getenv('DSA_INVESTMENT_CANARY_ACCOUNT_ID') or ''
+            ).strip() or None,
+            investment_canary_symbols=[
+                symbol.strip()
+                for symbol in os.getenv(
+                    'DSA_INVESTMENT_CANARY_SYMBOLS',
+                    '',
+                ).split(',')
+                if symbol.strip()
+            ],
             backtest_enabled=os.getenv('BACKTEST_ENABLED', 'true').lower() == 'true',
             backtest_eval_window_days=parse_env_int(os.getenv('BACKTEST_EVAL_WINDOW_DAYS'), 10, field_name='BACKTEST_EVAL_WINDOW_DAYS', minimum=1),
             backtest_min_age_days=parse_env_int(os.getenv('BACKTEST_MIN_AGE_DAYS'), 14, field_name='BACKTEST_MIN_AGE_DAYS', minimum=1),

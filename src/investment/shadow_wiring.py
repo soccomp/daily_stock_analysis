@@ -23,6 +23,7 @@ from src.investment.contracts.portfolio_snapshot import PortfolioSnapshot
 from src.investment.contracts.research_bundle import ModelProvenance, ResearchBundle
 from src.investment.contracts.risk_policy import RiskPolicy
 from src.investment.decision.engine import DecisionSizingInput, InvestmentDecisionEngine
+from src.investment.decision.sizing import risk_budget_target_weight
 from src.investment.execution_projection.decision_signal import DecisionSignalProjector
 from src.investment.research.adapter import ResearchBundleAdapter
 from src.services.decision_signal_data_quality import normalize_decision_signal_data_quality
@@ -234,7 +235,12 @@ class InvestmentShadowWiringService:
                 created_at=now,
                 valid_from=now,
                 valid_until=valid_until,
-                proposed_target_weight=risk_policy.max_single_position_weight,
+                proposed_target_weight=risk_budget_target_weight(
+                    entry_limit=entry_limit,
+                    stop_price=stop_price,
+                    risk_budget_per_trade=risk_policy.risk_budget_per_trade,
+                    max_single_position_weight=risk_policy.max_single_position_weight,
+                ),
                 lot_size=100,
                 entry_plan=EntryPlan(
                     limit_price=entry_limit,
