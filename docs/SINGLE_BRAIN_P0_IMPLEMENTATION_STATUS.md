@@ -1,10 +1,10 @@
-# Single Brain P0/P1A Implementation Status — DSA
+# Single Brain P0/P1 Implementation Status — DSA
 
 **Status date:** 2026-08-08
 
 **Repository role:** Research and sole Investment Decision Brain
 
-**Lifecycle state:** P0 and P1A verified; P1B Simulation Canary and P1C Single Decision Scorecard implemented on the P1 Mission branch
+**Lifecycle state:** P1 MISSION COMPLETE — READY FOR ARCHITECTURE REVIEW
 
 **Normative architecture:** [Single Brain Architecture Constitution](SINGLE_BRAIN_CONSTITUTION.md)
 
@@ -133,4 +133,6 @@ P1A validation completed on the stacked branch:
 
 ## Canonical next-phase handoff
 
-Future DSA phases must update this file in the implementation PR. Any cross-repository contract or authority change requires a coordinated Athena PR, cross-links between the two PRs, explicit wire-compatibility evidence, and matching constitutional amendments when the authority boundary changes.
+The canonical unmerged DSA P1 handoff is Draft PR [#3](https://github.com/soccomp/daily_stock_analysis/pull/3), paired with Athena Draft PR [#2](https://github.com/soccomp/athena/pull/2). Final closeout passed the required DSA gate (**5793 passed, 4 deselected, 501 subtests passed**), the complete P0/P1 cross-repository focused suite (**53 passed**), the broader P1C focused suite (**108 passed**), and the paired Athena full/focused regressions (**883 / 45 passed**). Both feature switches remain OFF by default; no live/deployed runtime configuration changed.
+
+Future DSA phases must continue from the canonical PR, [P1 Mission](SINGLE_BRAIN_P1_MISSION.md), and Constitution. Any cross-repository contract or authority change requires a coordinated Athena PR, cross-links between the two PRs, explicit wire-compatibility evidence, and matching constitutional amendments when the authority boundary changes.

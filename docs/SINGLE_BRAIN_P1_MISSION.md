@@ -4,7 +4,7 @@
 
 **Adopted:** 2026-08-08
 
-**Mission status:** IN PROGRESS
+**Mission status:** COMPLETE — READY FOR ARCHITECTURE REVIEW
 
 **Normative parent:** [Single Brain Architecture Constitution](SINGLE_BRAIN_CONSTITUTION.md)
 
@@ -200,3 +200,55 @@ outcome scoring, distributed coordination, or legacy retirement.
 When every closeout gate passes, both copies of this document must be updated
 to Mission status: COMPLETE — READY FOR ARCHITECTURE REVIEW, with exact test
 evidence, P1 PR links, compatibility notes, and known gaps.
+
+## 8. Completion record
+
+P1A, P1B, P1C, and the P1 governance/regression closeout are complete on the
+two unmerged Draft P1 branches. The Single Brain Constitution and every
+authority boundary remain unchanged.
+
+### 8.1 Canonical Draft PRs
+
+- DSA: https://github.com/soccomp/daily_stock_analysis/pull/3, stacked on
+  `codex/p1a-shadow-wiring`.
+- Athena: https://github.com/soccomp/athena/pull/2, stacked on
+  `codex/p0-trading-spine`.
+
+The PRs are cross-linked, Draft, and intentionally unmerged pending
+architecture acceptance.
+
+### 8.2 Final verification evidence
+
+- DSA required backend gate: **5793 passed, 4 deselected, 501 subtests
+  passed**; syntax, critical flake8, deterministic checks, and the offline
+  suite all passed.
+- Athena full regression: **883 passed**.
+- DSA P0/P1 contract, architecture, cross-repository canary, and scorecard
+  suite: **53 passed**.
+- DSA P1C plus storage/config/canary focused suite: **108 passed**.
+- Athena P0/P1 Trading Spine focused suite: **45 passed**.
+- Canonical PortfolioSnapshot, ExecutionMandate, and ExecutionResult wire
+  round trips, hashes, Decimal strings, IDs, timestamps, and lineage passed.
+- Architecture guards passed: DSA Research/Decision remain independent from
+  Athena/broker submission; Athena Trading Spine remains independent from
+  Research/LLM/Decision/allocation/sizing; the scorecard remains observational.
+- Default DSA configuration keeps P1A shadow and P1B execution OFF. The canary
+  tests prove zero submission while disabled or non-allowlisted, fail closed
+  unless LIVE_TRADING is exactly false, exact quantity or zero, UNKNOWN no
+  automatic retry, durable restart deduplication, and observed Snapshot B.
+- No live trading, live worker, live broker, launchd service, plist, deployed
+  configuration, or public audit-snapshot repository was changed or enabled.
+
+### 8.3 Compatibility and known gaps
+
+- Existing DSA and Athena product paths, public behavior, legacy investment
+  flows, and simulation-only guarantees remain additive and compatible.
+- The P1 canary is a development-worktree, same-host, single-account,
+  allowlisted CN-equity BUY/ADD/HOLD LIMIT slice; deployed/Windows-worker and
+  live-broker integration remain out of scope.
+- The P1 scorecard is an immutable immediate lineage record. Mutable lifecycle
+  revisions, broad UI work, and 1/5/20-day outcome evaluation remain out of
+  scope.
+- Distributed multi-process coordination, multi-symbol allocation,
+  SELL/REDUCE, automated stops/take-profit, scheduler consolidation, and
+  legacy retirement remain future separately governed phases.
