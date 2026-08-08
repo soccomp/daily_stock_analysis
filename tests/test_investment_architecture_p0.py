@@ -106,3 +106,58 @@ def test_p1_transport_stays_outside_research_and_decision_internals() -> None:
         or module.startswith("athena")
         for module in imports
     )
+
+
+def test_m2_runtime_path_has_no_execution_or_broker_dependency() -> None:
+    paths = (
+        ROOT / "src/investment/m2/orchestration.py",
+        ROOT / "src/investment/integration/runtime_snapshot_ingress.py",
+        ROOT / "src/services/single_brain_m2_readiness_service.py",
+        ROOT / "api/v1/endpoints/single_brain_m2.py",
+    )
+    imports = _imported_modules(paths)
+    forbidden_imports = (
+        "src.investment.canary",
+        "src.investment.execution_projection",
+        "src.investment.contracts.execution_mandate",
+        "src.investment.contracts.execution_result",
+        "src.brokers",
+        "src.trading_spine",
+        "athena",
+        "gmtrade",
+    )
+    assert not any(
+        module == prefix or module.startswith(f"{prefix}.")
+        for module in imports
+        for prefix in forbidden_imports
+    )
+
+    called = set()
+    referenced = set()
+    for path in paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name):
+                    called.add(node.func.id)
+                elif isinstance(node.func, ast.Attribute):
+                    called.add(node.func.attr)
+            if isinstance(node, ast.Name):
+                referenced.add(node.id)
+            elif isinstance(node, ast.Attribute):
+                referenced.add(node.attr)
+    forbidden_calls = {
+        "execute",
+        "submit",
+        "submit_order",
+        "dispatch",
+        "enqueue",
+        "retry",
+        "reconcile",
+        "cancel",
+        "cancel_order",
+        "order_volume",
+        "project",
+    }
+    assert called.isdisjoint(forbidden_calls)
+    assert {"ExecutionMandate", "ExecutionResult"}.isdisjoint(referenced)

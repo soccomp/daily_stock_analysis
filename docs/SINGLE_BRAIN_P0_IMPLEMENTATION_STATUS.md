@@ -4,7 +4,7 @@
 
 **Repository role:** Research and sole Investment Decision Brain
 
-**Lifecycle state:** M2 IN PROGRESS — M2F COMPLETE
+**Lifecycle state:** M2 IN PROGRESS — M2G COMPLETE, CLOSEOUT PENDING
 
 **Normative architecture:** [Single Brain Architecture Constitution](SINGLE_BRAIN_CONSTITUTION.md)
 
@@ -94,6 +94,14 @@ P1A adds one internal, default-off hook after a real legacy or Agent analysis re
 - The response always identifies `execution_authorization=OFF` and `portfolio_authority=ATHENA_RUNTIME`. It derives portfolio fields only from a strictly revalidated immutable canonical mirror; it neither infers nor mutates account truth.
 - Existing global `AuthMiddleware` remains the real authentication authority. Missing and forged sessions return 401, while a session created through the real admin login succeeds. The endpoint has no mutation or retry route, and a read failure returns 500 without changing M2 state.
 - Focused authenticated/read-only readiness regression: **3 passed** at the phase checkpoint.
+
+## M2G Multi-Cycle Shadow Burn-in
+
+- A deterministic no-sleep harness completed 20 fresh authoritative-snapshot cycles across three bounded symbols, creating 60 unique immutable shadow scorecards and exercising BUY, ADD, and HOLD outcomes.
+- Every cycle used a new Athena-owned snapshot revision with changed cash/positions and changed research evidence. New service objects across cycles exercised process-restart behavior; a duplicate trigger performed no additional analysis or persistence.
+- Two additional dependency-failure cycles proved unavailable and stale runtime truth remain explicit `FAILED_CLOSED` states while the readiness projection continues to identify the latest completed cycle.
+- Every burn-in scorecard has one unique `decision_id`, one canonical cycle lineage, authoritative/read-only Snapshot A, no mandate, no result, no Snapshot B, and `execution_authorization=OFF`. Cross-repository wire proof observed two actual Athena runtime projections with zero submissions/cancellations and parsed them with identical canonical hashes in DSA.
+- Complete DSA M2 focused, architecture, auth, cross-repository, resilience, holdings, and burn-in checkpoint: **51 passed**.
 
 ## Implementation map
 
