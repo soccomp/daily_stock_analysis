@@ -1129,6 +1129,72 @@ class SingleDecisionScorecardRecord(Base):
     created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
 
 
+class SingleBrainM2CycleRecord(Base):
+    """Operational state for one deterministic M2 shadow cycle.
+
+    This table is a scheduler/recovery journal only.  Investment lineage remains
+    owned by ``single_decision_scorecards`` and account truth remains Athena-owned.
+    """
+
+    __tablename__ = "single_brain_m2_cycles"
+
+    cycle_id = Column(String(160), primary_key=True)
+    account_id = Column(String(160), nullable=False, index=True)
+    scheduled_for = Column(DateTime, nullable=False, index=True)
+    status = Column(String(32), nullable=False, index=True)
+    input_hash = Column(String(64))
+    snapshot_id = Column(String(160), index=True)
+    snapshot_hash = Column(String(64))
+    snapshot_json = Column(Text)
+    snapshot_as_of = Column(DateTime)
+    reconciliation_status = Column(String(32))
+    risk_policy_id = Column(String(160))
+    risk_policy_version = Column(String(64))
+    risk_policy_hash = Column(String(64))
+    risk_policy_json = Column(Text)
+    symbols_json = Column(Text, nullable=False, default="[]")
+    failure_reason = Column(Text)
+    duplicate_trigger_count = Column(Integer, nullable=False, default=0)
+    recovery_count = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+    updated_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+    completed_at = Column(DateTime, index=True)
+
+
+class SingleBrainM2SymbolRecord(Base):
+    """Per-symbol operational checkpoint for an M2 shadow cycle."""
+
+    __tablename__ = "single_brain_m2_symbols"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    cycle_id = Column(
+        String(160),
+        ForeignKey("single_brain_m2_cycles.cycle_id"),
+        nullable=False,
+        index=True,
+    )
+    symbol = Column(String(64), nullable=False, index=True)
+    source_kind = Column(String(16), nullable=False)
+    status = Column(String(32), nullable=False, index=True)
+    analysis_query_id = Column(String(64), nullable=False, index=True)
+    source_report_id = Column(Integer)
+    research_id = Column(String(160))
+    decision_id = Column(String(160), index=True)
+    decision_action = Column(String(16))
+    rationale_summary = Column(Text)
+    failure_reason = Column(Text)
+    persisted_at = Column(DateTime, index=True)
+    updated_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "cycle_id",
+            "symbol",
+            name="uix_single_brain_m2_cycle_symbol",
+        ),
+    )
+
+
 class DecisionSignalOutcomeRecord(Base):
     """Signal-level forward outcome for Issue #1390 P5."""
 

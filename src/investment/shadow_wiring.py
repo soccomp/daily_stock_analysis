@@ -55,10 +55,12 @@ class ShadowWiringRejected(ValueError):
 
 @dataclass(frozen=True)
 class InvestmentShadowArtifacts:
-    """Internal-only lineage artifacts; no field can dispatch or persist them."""
+    """Internal-only lineage artifacts with no execution capability."""
 
     source_report_id: int
     research_bundle: ResearchBundle
+    portfolio_snapshot_a: PortfolioSnapshot
+    risk_policy: RiskPolicy
     investment_decision: InvestmentDecision
     decision_signal: Mapping[str, Any]
     shadow_mandate: None = None
@@ -85,6 +87,9 @@ class InvestmentShadowWiringService:
         trigger_source: str,
         portfolio_snapshot: PortfolioSnapshot,
         risk_policy: RiskPolicy,
+        decision_cycle_id: str | None = None,
+        decision_id: str | None = None,
+        allow_nonpositive_return: bool = False,
     ) -> InvestmentShadowArtifacts:
         """Build one decision lineage without persistence, transport, or execution."""
 
@@ -107,7 +112,7 @@ class InvestmentShadowWiringService:
             _RETURN_QUANTUM,
             rounding=ROUND_DOWN,
         )
-        if expected_return <= 0:
+        if expected_return <= 0 and not allow_nonpositive_return:
             raise ShadowWiringRejected("completed analysis has no positive target return")
 
         effective_trace_id = str(trace_id or "").strip()
@@ -126,6 +131,18 @@ class InvestmentShadowWiringService:
                 }
             )
         ).hexdigest()
+        effective_decision_cycle_id = (
+            str(decision_cycle_id).strip()
+            if decision_cycle_id is not None
+            else f"decision-cycle-shadow-{identity_hash[:32]}"
+        )
+        effective_decision_id = (
+            str(decision_id).strip()
+            if decision_id is not None
+            else f"decision-shadow-{identity_hash[:32]}"
+        )
+        if not effective_decision_cycle_id or not effective_decision_id:
+            raise ShadowWiringRejected("explicit shadow decision identities cannot be blank")
 
         research = ResearchBundleAdapter.from_dsa_views(
             research_id=f"research-shadow-{identity_hash[:32]}",
@@ -230,8 +247,8 @@ class InvestmentShadowWiringService:
             portfolio=portfolio_snapshot,
             risk_policy=risk_policy,
             sizing=DecisionSizingInput(
-                decision_id=f"decision-shadow-{identity_hash[:32]}",
-                decision_cycle_id=f"decision-cycle-shadow-{identity_hash[:32]}",
+                decision_id=effective_decision_id,
+                decision_cycle_id=effective_decision_cycle_id,
                 created_at=now,
                 valid_from=now,
                 valid_until=valid_until,
@@ -248,8 +265,16 @@ class InvestmentShadowWiringService:
                     price_ceiling=entry_limit,
                 ),
                 stop_plan=StopPlan(stop_price=stop_price),
-                take_profit_plan=TakeProfitPlan(target_price=target_price),
-                rationale=research.base_case,
+                take_profit_plan=(
+                    TakeProfitPlan(target_price=target_price)
+                    if expected_return > 0
+                    else None
+                ),
+                rationale=(
+                    research.base_case
+                    if expected_return > 0
+                    else f"HOLD: non-positive expected return; weakening evidence: {research.bear_case}"
+                ),
                 horizon=research.horizon,
                 producer="DSA_INVESTMENT_SHADOW_DECISION_ENGINE",
             ),
@@ -274,6 +299,8 @@ class InvestmentShadowWiringService:
         return InvestmentShadowArtifacts(
             source_report_id=source_report_id,
             research_bundle=research,
+            portfolio_snapshot_a=portfolio_snapshot,
+            risk_policy=risk_policy,
             investment_decision=decision,
             decision_signal=self._freeze(decision_signal),
         )
@@ -335,8 +362,6 @@ class InvestmentShadowWiringService:
         entry_limit = max(entries)
         if stop_price >= entry_limit:
             raise ShadowWiringRejected("completed analysis stop is not below the entry limit")
-        if target_price <= entry_limit:
-            raise ShadowWiringRejected("completed analysis target is not above the entry limit")
         return entry_floor, entry_limit, stop_price, target_price
 
     @staticmethod

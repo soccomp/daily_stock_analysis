@@ -1175,6 +1175,19 @@ class Config:
     investment_canary_account_id: Optional[str] = None
     investment_canary_symbols: List[str] = field(default_factory=list)
 
+    # Single Brain M2: recurring, persisted shadow operations (default off).
+    # This surface intentionally carries observation inputs only.
+    single_brain_m2_enabled: bool = False
+    single_brain_m2_account_id: Optional[str] = None
+    single_brain_m2_symbols: List[str] = field(default_factory=list)
+    single_brain_m2_max_symbols: int = 10
+    single_brain_m2_holdings_limit: int = 10
+    single_brain_m2_interval_minutes: int = 60
+    single_brain_m2_run_immediately: bool = False
+    single_brain_m2_snapshot_url: Optional[str] = None
+    single_brain_m2_snapshot_timeout_seconds: float = 5.0
+    single_brain_m2_risk_policy_path: Optional[str] = None
+
     # === 回测配置 ===
     backtest_enabled: bool = True
     backtest_eval_window_days: int = 10
@@ -2146,6 +2159,59 @@ class Config:
                 ).split(',')
                 if symbol.strip()
             ],
+            single_brain_m2_enabled=parse_env_bool(
+                os.getenv('DSA_SINGLE_BRAIN_M2_ENABLED'),
+                default=False,
+            ),
+            single_brain_m2_account_id=(
+                os.getenv('DSA_SINGLE_BRAIN_M2_ACCOUNT_ID') or ''
+            ).strip() or None,
+            single_brain_m2_symbols=[
+                symbol.strip()
+                for symbol in os.getenv(
+                    'DSA_SINGLE_BRAIN_M2_SYMBOLS',
+                    '',
+                ).split(',')
+                if symbol.strip()
+            ],
+            single_brain_m2_max_symbols=parse_env_int(
+                os.getenv('DSA_SINGLE_BRAIN_M2_MAX_SYMBOLS'),
+                10,
+                field_name='DSA_SINGLE_BRAIN_M2_MAX_SYMBOLS',
+                minimum=1,
+                maximum=50,
+            ),
+            single_brain_m2_holdings_limit=parse_env_int(
+                os.getenv('DSA_SINGLE_BRAIN_M2_HOLDINGS_LIMIT'),
+                10,
+                field_name='DSA_SINGLE_BRAIN_M2_HOLDINGS_LIMIT',
+                minimum=0,
+                maximum=50,
+            ),
+            single_brain_m2_interval_minutes=parse_env_int(
+                os.getenv('DSA_SINGLE_BRAIN_M2_INTERVAL_MINUTES'),
+                60,
+                field_name='DSA_SINGLE_BRAIN_M2_INTERVAL_MINUTES',
+                minimum=1,
+                maximum=1440,
+            ),
+            single_brain_m2_run_immediately=parse_env_bool(
+                os.getenv('DSA_SINGLE_BRAIN_M2_RUN_IMMEDIATELY'),
+                default=False,
+            ),
+            single_brain_m2_snapshot_url=(
+                os.getenv('DSA_SINGLE_BRAIN_M2_SNAPSHOT_URL') or ''
+            ).strip() or None,
+            single_brain_m2_snapshot_timeout_seconds=parse_env_float(
+                os.getenv('DSA_SINGLE_BRAIN_M2_SNAPSHOT_TIMEOUT_SECONDS'),
+                5.0,
+                field_name='DSA_SINGLE_BRAIN_M2_SNAPSHOT_TIMEOUT_SECONDS',
+                minimum=0.1,
+                maximum=30.0,
+            ),
+            single_brain_m2_risk_policy_path=(
+                os.getenv('DSA_SINGLE_BRAIN_M2_RISK_POLICY_PATH') or ''
+            ).strip() or None,
             backtest_enabled=os.getenv('BACKTEST_ENABLED', 'true').lower() == 'true',
             backtest_eval_window_days=parse_env_int(os.getenv('BACKTEST_EVAL_WINDOW_DAYS'), 10, field_name='BACKTEST_EVAL_WINDOW_DAYS', minimum=1),
             backtest_min_age_days=parse_env_int(os.getenv('BACKTEST_MIN_AGE_DAYS'), 14, field_name='BACKTEST_MIN_AGE_DAYS', minimum=1),

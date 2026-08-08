@@ -4,7 +4,7 @@
 
 **Repository role:** Research and sole Investment Decision Brain
 
-**Lifecycle state:** P1 BASELINE ACCEPTED AND MERGED
+**Lifecycle state:** M2 MISSION COMPLETE — READY FOR ARCHITECTURE REVIEW
 
 **Normative architecture:** [Single Brain Architecture Constitution](SINGLE_BRAIN_CONSTITUTION.md)
 
@@ -22,6 +22,16 @@ DSA now implements the Brain half of the minimal one-account, one-stock, one BUY
 - A cross-repository subprocess integration test that proves DSA ADD 200 becomes Athena exact submit 200 and reconciles Snapshot B.
 
 The existing DSA agent, screening, portfolio, API, and Web flows remain in place. This is an additive P0/P1 path; DSA's existing local portfolio service is not used as authoritative truth for an Athena-integrated account.
+
+## M2B Recurring Brain Shadow Loop
+
+- `DSA_SINGLE_BRAIN_M2_ENABLED=false` is a separate default-off switch. Disabled mode registers no M2 scheduler task and performs no Athena observation, research, decision, or persistence work.
+- The existing API/Web/Desktop runtime scheduler and CLI schedule mode both register the same bounded M2 background task and share the existing global analysis lock. No second scheduler, launchd/plist edit, or deployed enablement was introduced.
+- DSA reads only canonical `PortfolioSnapshot` JSON from Athena's exact loopback `GET /v1/simulation/portfolio-snapshot` route. The client rejects alternate paths, credentials, queries, redirects before follow-up contact, oversized payloads, and invalid hashes/contracts; it imports no Athena or broker implementation.
+- Every logical time slot has a deterministic `decision_cycle_id`; each bounded CN symbol has a deterministic analysis query and decision identity. Current Athena holdings are deduplicated with the explicit allowlist under a configurable cap.
+- An additive SQLite operational checkpoint uses unique cycle/symbol keys and stores only immutable Snapshot A and RiskPolicy mirrors plus scheduler recovery facts. It is not an account ledger or parallel scorecard. Duplicate/restart work reuses the exact bound inputs, while conflicting Snapshot, policy hash, policy content, or symbol scope fails closed.
+- The real DSA `StockAnalysisPipeline` remains the analysis producer. M2 disables all pre-existing P1 investment runtime hooks during that analysis, reconstructs the persisted completion deterministically, revalidates authority/freshness after analysis, and then invokes only the DSA Brain shadow service. Runtime mandate creation and all execution transport are absent.
+- Focused M2B ingress/scheduler/analysis/dedupe tests: **32 passed** at the phase checkpoint.
 
 ## P1A Shadow Wiring
 
@@ -55,6 +65,52 @@ P1A adds one internal, default-off hook after a real legacy or Agent analysis re
 - Scorecard persistence occurs only after P1B returns observed artifacts. A storage failure is reported without changing the decision, retrying execution, or mutating portfolio truth.
 - The scorecard package imports neither the Brain engine nor the mandate projector and exposes no decide, submit, retry, reconcile, or portfolio-mutation operation.
 
+## M2C Shadow Decision Persistence
+
+- M2 reuses the existing `SingleDecisionScorecard` model, write-once repository, `decision_id` key, and authenticated read surface. No parallel shadow score or second decision authority was introduced.
+- `SingleDecisionScorecard.from_shadow()` records ResearchBundle, exact authoritative Snapshot A mirror/hash, RiskPolicy/version/hash, `decision_cycle_id`, InvestmentDecision, DecisionSignal, creation time, and freshness provenance with explicit `mode=M2_SHADOW`, `execution_authorization=OFF`, and `execution_state=NOT_AUTHORIZED` diagnostics.
+- BUY, ADD, and HOLD shadow decisions all require zero `ExecutionMandate`, zero `ExecutionResult`, and no Snapshot B. Any attempt to attach execution artifacts to an M2 shadow scorecard fails validation.
+- `DecisionScorecardService.persist_shadow()` keeps the existing immutable create-if-absent semantics. Restart or duplicate persistence with identical content returns the same record; conflicting content under one `decision_id` is rejected.
+- M2C plus P1 scorecard/shadow/canary focused regression: **22 passed** at the phase checkpoint.
+
+## M2D Runtime Resilience and Recovery
+
+- Cycle and symbol claims are durable and unique. A duplicate scheduler trigger, duplicate symbol, or process restart reuses the same deterministic analysis query, `decision_cycle_id`, and `decision_id` rather than creating a second scorecard.
+- Recovery after real analysis persistence reconstructs the saved DSA result; recovery after scorecard persistence skips both analysis and scorecard rewriting, then closes the existing cycle checkpoint.
+- The exact immutable Snapshot A, symbol scope, and RiskPolicy are rebound on recovery. A missing, changed, expired, or conflicting policy and unavailable, stale, future, unreconciled, or account-mismatched Athena snapshot fail closed with no actionable lineage.
+- Storage failures are bounded to one scheduler attempt. Analysis, scorecard persistence, and cycle closeout failure injection remains recoverable without retry loops or any execution path.
+- M2D resilience plus shadow/scorecard focused regression: **23 passed** at the phase checkpoint.
+
+## M2E Holdings Review Loop
+
+- Positive-quantity CN holdings from Athena Snapshot A are included ahead of the optional allowlist under the explicit holdings and total-symbol caps, and each persisted symbol records whether it came from `HOLDING`, `ALLOWLIST`, or `BOTH`.
+- A holding is researched again in each later logical cycle. Changed research evidence produces a new ResearchBundle and decision lineage bound to that cycle's fresh authoritative snapshot rather than reusing the earlier thesis.
+- Thesis weakening, risk factors, catalysts, and invalidation evidence remain visible in the one ResearchBundle/scorecard lineage. Because M2 has no SELL/REDUCE capability, non-positive evidence produces HOLD with unchanged quantity and no reduction sizing or execution artifact.
+- Focused two-cycle holdings-review proof: **1 passed** at the phase checkpoint.
+
+## M2F Operator Readiness Surface
+
+- Additive GET-only `/api/v1/single-brain/m2/readiness` reports the latest authoritative Athena snapshot identity/freshness/reconciliation facts, latest and latest-completed cycle, bounded symbol decisions and source kinds, explicit skip/failure reasons, persistence timestamp, and duplicate/recovery counters.
+- The response always identifies `execution_authorization=OFF` and `portfolio_authority=ATHENA_RUNTIME`. It derives portfolio fields only from a strictly revalidated immutable canonical mirror; it neither infers nor mutates account truth.
+- Existing global `AuthMiddleware` remains the real authentication authority. Missing and forged sessions return 401, while a session created through the real admin login succeeds. The endpoint has no mutation or retry route, and a read failure returns 500 without changing M2 state.
+- Focused authenticated/read-only readiness regression: **3 passed** at the phase checkpoint.
+
+## M2G Multi-Cycle Shadow Burn-in
+
+- A deterministic no-sleep harness completed 20 fresh authoritative-snapshot cycles across three bounded symbols, creating 60 unique immutable shadow scorecards and exercising BUY, ADD, and HOLD outcomes.
+- Every cycle used a new Athena-owned snapshot revision with changed cash/positions and changed research evidence. New service objects across cycles exercised process-restart behavior; a duplicate trigger performed no additional analysis or persistence.
+- Two additional dependency-failure cycles proved unavailable and stale runtime truth remain explicit `FAILED_CLOSED` states while the readiness projection continues to identify the latest completed cycle.
+- Every burn-in scorecard has one unique `decision_id`, one canonical cycle lineage, authoritative/read-only Snapshot A, no mandate, no result, no Snapshot B, and `execution_authorization=OFF`. Cross-repository wire proof observed two actual Athena runtime projections with zero submissions/cancellations and parsed them with identical canonical hashes in DSA.
+- Complete DSA M2 focused, architecture, auth, cross-repository, resilience, holdings, and burn-in checkpoint: **51 passed**.
+
+## M2 Governance and Regression Closeout
+
+- Canonical DSA review is Draft PR [soccomp/daily_stock_analysis#4](https://github.com/soccomp/daily_stock_analysis/pull/4), based on `athena-integration`. It is cross-linked to Athena Draft PR [soccomp/athena#3](https://github.com/soccomp/athena/pull/3), based on `integration`. Both remain unmerged.
+- The final DSA M2 focused suite, including the restored legacy CLI scheduler compatibility proof, is **52 passed**.
+- The required DSA backend gate is green: syntax, critical flake8, deterministic code/YFinance checks, then **5,839 passed, 4 deselected, 501 subtests passed**.
+- The paired Athena full/focused regressions are **916 / 92 passed**. Cross-repository canonical snapshot parsing, architecture dependency guards, default-off behavior, and zero-execution isolation are green.
+- No Single Brain Constitution or authority boundary changed. No feature was enabled in deployed configuration, no launchd/plist changed, and no PR was merged.
+
 ## Implementation map
 
 | Responsibility | Location |
@@ -79,6 +135,10 @@ P1A adds one internal, default-off hook after a real legacy or Agent analysis re
 | Immutable Single Decision Scorecard model | `src/investment/scorecard.py` |
 | Write-once scorecard persistence | `src/repositories/decision_scorecard_repo.py` |
 | Read-only scorecard service and API | `src/services/decision_scorecard_service.py`, `api/v1/endpoints/decision_scorecards.py` |
+| M2 canonical Athena snapshot ingress | `src/investment/integration/runtime_snapshot_ingress.py` |
+| M2 recurring orchestration and identity | `src/investment/m2/orchestration.py`, `src/investment/m2/identity.py` |
+| M2 operational recovery checkpoint | `src/investment/m2/repository.py`, `src/storage.py` |
+| M2 operator readiness | `src/services/single_brain_m2_readiness_service.py`, `api/v1/endpoints/single_brain_m2.py` |
 
 ## Authority proof
 
@@ -100,6 +160,9 @@ P1A adds one internal, default-off hook after a real legacy or Agent analysis re
 - Post-architecture-review auth regression — **113 passed** for the relevant P1/auth suite. The real `create_app` + global `AuthMiddleware` path returns 401 for a missing or forged `dsa_session`; a real `/api/v1/auth/login` signed admin session reaches the Scorecard GET endpoint and returns 200.
 - Final P1 DSA required backend gate — **5793 passed, 4 deselected, 501 subtests passed**.
 - Paired Athena full/focused regressions — **883 / 45 passed**.
+- Final M2 DSA required backend gate — **5,839 passed, 4 deselected, 501 subtests passed**, with syntax, critical flake8, and deterministic checks green.
+- Final M2 DSA focused auth/architecture/resilience/holdings/cross-repository/burn-in suite — **52 passed**.
+- Final paired Athena full/focused regressions — **916 / 92 passed**.
 
 ## Compatibility
 
@@ -120,15 +183,16 @@ P1A adds one internal, default-off hook after a real legacy or Agent analysis re
 - Governance is system-specific and must not be upstreamed independently without upstream agreement on the Single Brain constitution.
 - A future upstream proposal should be a separately authored extraction rather than a direct merge of the Athena-integration history.
 
-## Intentionally out of P1
+## Intentionally out of M2
 
-- Multiple simultaneous symbols or decision-cycle portfolio allocation.
-- SELL/REDUCE execution, complex conditional stops, and take-profit automation.
+- Execution-capable runtime wiring of any kind; M2 persists no mandate, result, or Snapshot B.
+- SELL/REDUCE execution, complex conditional stops, and take-profit automation. Weakening holding evidence remains a non-executing HOLD.
 - Live trading, message queues, service decomposition, or repository merger.
 - Full Decision Scorecard UI and broad DSA Web UI integration.
 - Retirement of legacy DSA or Athena investment paths.
 - Any live, Windows-worker, launchd, or deployed-runtime canary.
 - Long-term 1/5/20-day outcome evaluation, broad Scorecard UI, and mutable scorecard revisions.
+- Distributed scheduler/idempotency coordination beyond the existing SQLite deployment model.
 
 ## P1 Baseline Promotion
 
@@ -145,5 +209,7 @@ The canonical paired Athena baseline is `integration`, whose accepted P1 merge b
 ## Canonical next-phase handoff
 
 Future DSA missions must branch from **`athena-integration`** and read [P1 Mission](SINGLE_BRAIN_P1_MISSION.md) plus the Constitution before implementation. The paired Athena branch is **`integration`**.
+
+Until architecture acceptance, the canonical M2 handoff is the cross-linked, unmerged Draft PR pair [DSA #4](https://github.com/soccomp/daily_stock_analysis/pull/4) and [Athena #3](https://github.com/soccomp/athena/pull/3), together with [M2 Mission](SINGLE_BRAIN_M2_MISSION.md).
 
 Any cross-repository contract or authority change requires coordinated DSA and Athena changes, explicit wire-compatibility evidence, and matching constitutional amendments when the authority boundary changes. Athena mainline promotion remains a separate governance decision and must not be folded into an unrelated mission.
