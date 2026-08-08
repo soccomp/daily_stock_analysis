@@ -1,10 +1,10 @@
 # Single Brain M2 Deployment Smoke Mission
 
-**Version:** 1.1
+**Version:** 1.2
 
 **Approved:** 2026-08-09
 
-**Mission status:** HARD STOP AT S2 — AUTHORITATIVE SNAPSHOT CLOCK ORDERING
+**Mission status:** HARD STOP — SNAPSHOT TIME CONTRACT DECISION REQUIRED
 
 **Normative parents:**
 
@@ -249,3 +249,66 @@ network permission, or runtime process was changed or restarted.
 Do not rerun S2 until a separately reviewed code change corrects the caller /
 observation clock ordering while preserving strict future-dated and stale
 snapshot rejection.
+
+## 12. Authoritative Snapshot clock diagnosis — 2026-08-09
+
+Deployment Smoke remained stopped. No S2 retry or S3 work was performed.
+
+### Timestamp ownership
+
+| Field | Clock owner and current meaning |
+| --- | --- |
+| Worker request observation time | Windows Worker `datetime.now(timezone.utc)`, sampled at the start of `canonical_portfolio_observation()` before the broker cash/position/order GET sequence. |
+| Underlying runtime/broker observation time | The broker APIs expose no atomic portfolio timestamp in this path. The Worker assigns its request observation time to the aggregate runtime observation and each position `price_as_of`. |
+| Canonical `PortfolioSnapshot.as_of` | Athena ingress preserves the Worker `observed_at` exactly. |
+| Envelope `created_at` | The current adapter sets it to that same preserved Worker observation time; it is not a separately sampled ingress/response time. |
+| `revision` / `supersedes_id` | Athena ingress owns the persisted sequence. The observation timestamp participates in the fact identity, so each fresh observation creates the next immutable revision and supersedes the prior snapshot. |
+| DSA validation time | The M2 loop currently samples the DSA/macOS clock before issuing the canonical HTTP GET, then compares the later Athena observation against that earlier value. |
+
+### Real deployed observations
+
+Five consecutive canonical observations were captured read-only:
+
+| Revision | Snapshot ID | Supersedes | `as_of` = `created_at` = Worker/runtime observation | Hash | Reconciliation |
+| --- | --- | --- | --- | --- | --- |
+| 15 | `snapshot:athena-sim:15:2e42df6018b80018` | `snapshot:athena-sim:14:e8435a512bc7a982` | `2026-08-08T16:47:26.281126Z` | `086d8c879d68adbd6dd60b498d855124c41860f98274ccf925e867066b320d6c` | RECONCILED |
+| 16 | `snapshot:athena-sim:16:482c5b9bf9c0a6b5` | revision 15 | `2026-08-08T16:47:26.336784Z` | `6703ab237a10b3b9e4ba080061594a3ba5a55dd01b1938f80deee24e64e4c18a` | RECONCILED |
+| 17 | `snapshot:athena-sim:17:e4b57e3155f2dbca` | revision 16 | `2026-08-08T16:47:26.395155Z` | `04982ffe954627bbf13eb40385c84304c22f733994f4ba2d7de3daeafd8f3f52` | RECONCILED |
+| 18 | `snapshot:athena-sim:18:8be23ed2424030bb` | revision 17 | `2026-08-08T16:47:26.446722Z` | `c6e3bebf53d018a32ca17fb0a0ae66373109dd6ee384b41d7ac36004160026c8` | RECONCILED |
+| 19 | `snapshot:athena-sim:19:415f97316e4a33bc` | revision 18 | `2026-08-08T16:47:26.499015Z` | `8cd95d21a1d5d5bb8136951f7d6c53416ebd7e5f51b1b48194a8a653e08acc3a` | RECONCILED |
+
+The exact monotonic revision and supersession chain excludes unchanged broker
+observation time, ingress timestamp reuse, non-monotonic lineage, and persisted
+restart-state corruption as causes. Windows timezone conversion is also
+correct: the host reports `China Standard Time` / UTC+08:00 and emits aware UTC
+timestamps.
+
+Twelve independent HTTP observations showed the Worker timestamp consistently
+ahead of the DSA host's post-response clock by 52.812–62.040 ms (median 59.023
+ms), with 41.369–45.942 ms request round trips. Therefore two conditions combine:
+
+1. DSA compares against a clock sampled before the remote observation exists;
+2. the independent Windows wall clock is also slightly ahead of the DSA host,
+   so merely moving DSA's sample after the GET still does not restore strict
+   ordering.
+
+### Decision gate
+
+No arbitrary sleep or timestamp replacement was used. No tolerance was added
+and no future/freshness validation was weakened.
+
+A correct cross-host repair now requires a normative choice among at least:
+
+- an explicit, bounded, evidenced cross-host clock-skew budget;
+- a distinct Athena ingress/response timestamp and causal validation rule; or
+- an operational clock-synchronization SLA and its fail-closed enforcement.
+
+Those choices define how `as_of`, envelope creation time, and future-dated
+authoritative observations are interpreted across hosts. Per mission authority,
+that semantic decision is not made autonomously. No implementation branch or
+Draft PR was created.
+
+Safety closeout remained unchanged: `LIVE_TRADING=false`, simulation-only,
+recurring M2/P1A/P1B OFF, and the one historical order/execution evidence digest
+unchanged. No submit, cancel, retry, reconcile, portfolio mutation, service
+restart, credential, password, plist, or environment change occurred.
