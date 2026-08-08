@@ -1,10 +1,10 @@
 # Single Brain M2 Deployment Smoke Mission
 
-**Version:** 1.0
+**Version:** 1.1
 
-**Approved:** 2026-08-08
+**Approved:** 2026-08-09
 
-**Mission status:** APPROVED — NOT STARTED
+**Mission status:** APPROVED — RESTART FROM S0
 
 **Normative parents:**
 
@@ -26,9 +26,15 @@ Prove one real deployed zero-execution path:
       -> DSA InvestmentDecision
       -> DecisionSignal
       -> M2 shadow scorecard
-      -> authenticated operator-readiness readback
+      -> local read-only operator-readiness readback
 
 The proof must use observed account facts from the real long-running Athena simulation environment, not fixture state and not a newly seeded Decimal broker.
+
+The Owner's current deployment policy intentionally keeps DSA passwordless with
+`ADMIN_AUTH_ENABLED=false`. This is the accepted and expected state for this
+smoke. The readiness surface must remain loopback/local-only and observational;
+this mission must not enable authentication, add a password, or introduce a new
+authentication mechanism.
 
 ## 2. Canonical code baselines
 
@@ -52,6 +58,8 @@ Before changing any running process or configuration, inspect and record:
 - current loopback/runtime endpoints and ports;
 - whether the accepted canonical snapshot endpoint is already present;
 - whether M2 feature flags are currently disabled;
+- whether DSA remains bound to loopback/local-only access;
+- whether `ADMIN_AUTH_ENABLED=false` remains effective;
 - current relevant process health and last observed account timestamp.
 
 S0 is read-only. Do not restart, stop, edit plist/service files, change credentials, change account configuration, or enable M2 during preflight.
@@ -92,15 +100,21 @@ Requirements:
 
 Do not leave recurring scheduling enabled after the smoke. If a temporary in-process/config toggle is used under an already-running non-deployed test process, restore it to OFF before closeout.
 
-## 6. Phase S3 — Operator-readiness proof
+## 6. Phase S3 — Local read-only operator-readiness proof
 
-Using the existing authenticated admin-session convention:
+Under the Owner-approved passwordless deployment policy:
 
-- missing session -> 401;
-- forged/invalid session -> 401;
-- valid admin session -> 200;
-- readiness output identifies the smoke cycle/symbol/decision and confirms execution authorization OFF;
-- no mutation endpoint is introduced or used.
+- `ADMIN_AUTH_ENABLED=false` is expected;
+- DSA remains bound to loopback/local-only access;
+- local `GET /api/v1/single-brain/m2/readiness` returns 200;
+- readiness identifies the smoke cycle/symbol/decision and explicitly reports execution authorization OFF;
+- the readiness surface is observational and read-only only;
+- no POST, PUT, PATCH, DELETE, retry, submit, reconcile, portfolio mutation, or execution-control endpoint is available through the M2 readiness path;
+- `DSA_SINGLE_BRAIN_M2_ENABLED=false` before and after the controlled smoke;
+- Athena remains `LIVE_TRADING=false` and `simulation_only=true`.
+
+Do not enable authentication, add a password, or introduce a new authentication
+mechanism as part of this smoke.
 
 Do not expose credentials, cookies, account secrets, or private runtime payloads in GitHub artifacts.
 
@@ -163,7 +177,7 @@ The mission may close in exactly one of two states:
 
 ### SMOKE PASS
 
-One real Athena simulation Snapshot -> one real DSA shadow cycle -> one persisted shadow scorecard -> authenticated readiness readback succeeds with zero execution side effects. Restore all temporary toggles to OFF and publish only sanitized evidence.
+One real Athena simulation Snapshot -> one real DSA shadow cycle -> one persisted shadow scorecard -> local read-only readiness readback succeeds with zero execution side effects. Restore all temporary toggles to OFF and publish only sanitized evidence.
 
 ### HARD STOP
 
