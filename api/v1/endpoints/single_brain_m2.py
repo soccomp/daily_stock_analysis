@@ -43,4 +43,3 @@ def get_readiness() -> SingleBrainM2ReadinessResponse:
             status_code=500,
             detail={"error": "internal_error", "message": "Read M2 readiness failed"},
         ) from exc
-

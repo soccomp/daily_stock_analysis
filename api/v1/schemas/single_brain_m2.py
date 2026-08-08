@@ -7,4 +7,3 @@ from pydantic import BaseModel
 
 class SingleBrainM2ReadinessResponse(BaseModel):
     item: dict[str, Any]
-
