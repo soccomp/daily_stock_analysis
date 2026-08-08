@@ -156,6 +156,8 @@ class M2ShadowLoopService:
     """One bounded scheduler attempt; every unsafe state fails closed."""
 
     MAX_SNAPSHOT_AGE = timedelta(minutes=5)
+    # Infrastructure safety budget, intentionally independent of RiskPolicy.
+    MAX_SNAPSHOT_CLOCK_SKEW = timedelta(seconds=1)
 
     def __init__(
         self,
@@ -227,10 +229,12 @@ class M2ShadowLoopService:
             mirror = self._repository.load_authority_mirror(cycle)
             if mirror is None:
                 snapshot = self._snapshot_source.capture_snapshot()
+                snapshot_validation_time = self._snapshot_receipt_time()
                 policy = self._policy_source.load()
                 symbols = self._select_symbols(snapshot)
             else:
                 snapshot = PortfolioSnapshot.model_validate_json(mirror.snapshot_json)
+                snapshot_validation_time = self._aware_now()
                 policy = RiskPolicy.model_validate_json(mirror.risk_policy_json)
                 current_policy = self._policy_source.load()
                 if (
@@ -247,7 +251,7 @@ class M2ShadowLoopService:
                 snapshot=snapshot,
                 policy=policy,
                 account_id=account_id,
-                now=now,
+                now=snapshot_validation_time,
             )
             if not symbols:
                 raise M2ShadowBlocked("M2 symbol scope is empty after validation")
@@ -415,9 +419,16 @@ class M2ShadowLoopService:
             raise M2ShadowBlocked("M2 requires an Athena simulation-only account")
         if snapshot.reconciliation_status != "RECONCILED":
             raise M2ShadowBlocked("authoritative PortfolioSnapshot is not reconciled")
-        if snapshot.as_of > now:
+        if (
+            snapshot.as_of.utcoffset() != timedelta(0)
+            or snapshot.created_at.utcoffset() != timedelta(0)
+        ):
+            raise M2ShadowBlocked("PortfolioSnapshot timestamps must be timezone-aware UTC")
+        future_offset = snapshot.as_of - now
+        if future_offset > self.MAX_SNAPSHOT_CLOCK_SKEW:
             raise M2ShadowBlocked("authoritative PortfolioSnapshot is future-dated")
-        if now - snapshot.as_of > self.MAX_SNAPSHOT_AGE:
+        freshness_age = max(timedelta(0), now - snapshot.as_of)
+        if freshness_age > self.MAX_SNAPSHOT_AGE:
             raise M2ShadowBlocked("authoritative PortfolioSnapshot is stale")
         if snapshot.data_quality not in {"HIGH", "MEDIUM"}:
             raise M2ShadowBlocked("authoritative PortfolioSnapshot data quality is insufficient")
@@ -482,4 +493,16 @@ class M2ShadowLoopService:
         now = self._clock()
         if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
             raise M2ShadowBlocked("M2 clock must be timezone-aware")
-        return now
+        return now.astimezone(timezone.utc)
+
+    def _snapshot_receipt_time(self) -> datetime:
+        received_at = getattr(self._snapshot_source, "last_response_received_at", None)
+        if received_at is None:
+            return self._aware_now()
+        if (
+            not isinstance(received_at, datetime)
+            or received_at.tzinfo is None
+            or received_at.utcoffset() is None
+        ):
+            raise M2ShadowBlocked("snapshot response receipt clock must be timezone-aware")
+        return received_at.astimezone(timezone.utc)

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from pydantic import ValidationError
 
 from src.config import Config
 from src.investment.contracts.portfolio_snapshot import PortfolioSnapshot
@@ -27,8 +28,9 @@ from tests.test_investment_shadow_wiring_p1a import (
 
 
 class _SnapshotSource:
-    def __init__(self, snapshot):
+    def __init__(self, snapshot, *, response_received_at=None):
         self.snapshot = snapshot
+        self.last_response_received_at = response_received_at
         self.calls = 0
 
     def capture_snapshot(self):
@@ -103,8 +105,20 @@ def _config(*, enabled=True):
     return config
 
 
-def _service(m2_db, *, enabled=True, snapshot=None, runner=None, store=None, clock=None):
-    snapshot_source = _SnapshotSource(snapshot or _snapshot())
+def _service(
+    m2_db,
+    *,
+    enabled=True,
+    snapshot=None,
+    response_received_at=None,
+    runner=None,
+    store=None,
+    clock=None,
+):
+    snapshot_source = _SnapshotSource(
+        snapshot or _snapshot(),
+        response_received_at=response_received_at,
+    )
     policy_source = _PolicySource(_policy())
     runner = runner or _AnalysisRunner()
     real_store = DecisionScorecardService(db_manager=m2_db)
@@ -201,11 +215,90 @@ def test_one_cycle_persists_stable_lineage_and_duplicate_trigger_is_noop(m2_db):
     assert readiness["latest_cycle"]["duplicate_trigger_count"] == 1
 
 
+def test_response_receipt_time_replaces_pre_request_clock_and_dedupe_is_unchanged(m2_db):
+    pre_request = NOW - timedelta(seconds=2)
+    producer_observation = NOW + timedelta(milliseconds=60)
+    clock_values = iter(
+        (pre_request, NOW + timedelta(seconds=1), NOW + timedelta(minutes=10))
+    )
+    service, snapshots, _policies, runner, scorecards = _service(
+        m2_db,
+        snapshot=_snapshot(as_of=producer_observation),
+        response_received_at=NOW,
+        clock=lambda: next(clock_values),
+    )
+
+    first = service.run_cycle(scheduled_for=NOW)
+    duplicate = service.run_cycle(scheduled_for=NOW + timedelta(minutes=10))
+
+    assert first.status == "COMPLETED"
+    assert duplicate.status == "DEDUPLICATED"
+    assert snapshots.calls == 1
+    assert len(runner.calls) == 1
+    assert scorecards.get(first.persisted_decision_ids[0])["item"][
+        "portfolio_snapshot_a"
+    ]["as_of"] == "2026-08-08T02:00:00.060000Z"
+
+
+@pytest.mark.parametrize(
+    "producer_offset",
+    (
+        timedelta(milliseconds=60),
+        timedelta(microseconds=999_999),
+        timedelta(seconds=1),
+    ),
+)
+def test_bounded_cross_host_snapshot_clock_skew_is_accepted(
+    m2_db,
+    producer_offset,
+):
+    clock_values = iter((NOW, NOW + timedelta(seconds=1)))
+    service, _snapshots, _policies, runner, _store = _service(
+        m2_db,
+        snapshot=_snapshot(as_of=NOW + producer_offset),
+        response_received_at=NOW,
+        clock=lambda: next(clock_values),
+    )
+
+    result = service.run_cycle(scheduled_for=NOW)
+
+    assert result.status == "COMPLETED"
+    assert len(runner.calls) == 1
+
+
+def test_snapshot_beyond_cross_host_clock_skew_budget_fails_closed(m2_db):
+    service, _snapshots, _policies, runner, _store = _service(
+        m2_db,
+        snapshot=_snapshot(as_of=NOW + timedelta(seconds=1, microseconds=1)),
+        response_received_at=NOW,
+        clock=lambda: NOW,
+    )
+
+    result = service.run_cycle(scheduled_for=NOW)
+
+    assert result.status == "FAILED_CLOSED"
+    assert "future-dated" in " ".join(result.blocked_reasons)
+    assert runner.calls == []
+
+
+def test_timezone_naive_authoritative_snapshot_is_rejected_by_contract():
+    with pytest.raises(ValidationError, match="timezone"):
+        PortfolioSnapshot.build(
+            **{
+                **_snapshot().model_dump(
+                    exclude={"content_hash", "as_of", "created_at"}
+                ),
+                "as_of": datetime(2026, 8, 8, 2, 0),
+                "created_at": datetime(2026, 8, 8, 2, 0),
+            }
+        )
+
+
 @pytest.mark.parametrize(
     "snapshot",
     (
         _snapshot(as_of=NOW - timedelta(minutes=6)),
-        _snapshot(as_of=NOW + timedelta(seconds=1)),
+        _snapshot(as_of=NOW + timedelta(seconds=1, microseconds=1)),
         PortfolioSnapshot.build(
             **{
                 **_snapshot().model_dump(exclude={"content_hash", "reconciliation_status"}),
@@ -270,7 +363,7 @@ def test_restart_fails_closed_when_explicit_policy_changes_inside_cycle(m2_db):
 
 
 def test_authority_becoming_stale_during_analysis_blocks_before_decision(m2_db):
-    clock_values = iter((NOW, NOW + timedelta(minutes=6)))
+    clock_values = iter((NOW, NOW, NOW + timedelta(minutes=6)))
     service, _snapshots, _policies, _runner, _store = _service(
         m2_db,
         clock=lambda: next(clock_values),
