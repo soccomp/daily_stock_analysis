@@ -102,6 +102,7 @@ P1A validation completed on the stacked branch:
 - P1C scorecard/canary/P1A/architecture/storage/config focused suite — **108 passed**.
 - The P1C integration test starts from an actual sibling Athena canary result, persists the complete canonical lineage in DSA SQLite, and reads it back by `decision_id` with exact execution diagnostics.
 - Write-once conflict, GET-only route, not-found handling, and no-decision/no-execution architecture assertions pass.
+- Post-architecture-review auth regression: the real `create_app` + global `AuthMiddleware` path returns 401 for a missing or forged `dsa_session`; a real `/api/v1/auth/login` signed admin session reaches the Scorecard GET endpoint and returns 200. The endpoint preserves the established global-validation convention rather than adding a second auth implementation.
 
 ## Compatibility
 

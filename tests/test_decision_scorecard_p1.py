@@ -8,8 +8,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from fastapi.testclient import TestClient
 
+import src.auth as auth
+from api.app import create_app
 from api.v1.endpoints import decision_scorecards
+from src.config import Config
 from src.investment.canary import InvestmentCanaryService
 from src.investment.integration import LocalAthenaCanaryTransport
 from src.repositories.decision_scorecard_repo import (
@@ -27,6 +31,14 @@ from tests.test_investment_shadow_wiring_p1a import (
     _analysis_result,
     _policy,
 )
+
+
+def _reset_auth_globals() -> None:
+    auth._auth_enabled = None
+    auth._session_secret = None
+    auth._password_hash_salt = None
+    auth._password_hash_stored = None
+    auth._rate_limit = {}
 
 
 def _canary_artifacts(tmp_path):
@@ -155,6 +167,72 @@ def test_scorecard_api_is_get_only_and_maps_not_found(monkeypatch):
     with pytest.raises(Exception) as error:
         decision_scorecards.get_scorecard("missing-decision")
     assert getattr(error.value, "status_code", None) == 404
+
+
+def test_scorecard_api_requires_a_real_valid_admin_session(tmp_path, monkeypatch):
+    """Exercise the real app middleware and signed login cookie end to end."""
+
+    env_path = tmp_path / ".env"
+    db_path = tmp_path / "scorecard-auth.db"
+    static_dir = tmp_path / "empty-static"
+    static_dir.mkdir()
+    env_path.write_text(
+        "\n".join(
+            (
+                "STOCK_LIST=600519",
+                "GEMINI_API_KEY=test",
+                "ADMIN_AUTH_ENABLED=true",
+                f"DATABASE_PATH={db_path}",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENV_FILE", str(env_path))
+    monkeypatch.setenv("DATABASE_PATH", str(db_path))
+    _reset_auth_globals()
+    Config.reset_instance()
+    DatabaseManager.reset_instance()
+
+    class ReadOnlyScorecardService:
+        def get(self, decision_id):
+            return {"item": {"decision_id": decision_id, "read_only": True}}
+
+    monkeypatch.setattr(
+        decision_scorecards,
+        "DecisionScorecardService",
+        ReadOnlyScorecardService,
+    )
+    try:
+        client = TestClient(create_app(static_dir=static_dir))
+
+        unauthenticated = client.get("/api/v1/decision-scorecards/decision-auth")
+        assert unauthenticated.status_code == 401
+        assert unauthenticated.json()["error"] == "unauthorized"
+
+        invalid = client.get(
+            "/api/v1/decision-scorecards/decision-auth",
+            headers={"Cookie": f"{auth.COOKIE_NAME}=forged-session"},
+        )
+        assert invalid.status_code == 401
+        assert invalid.json()["error"] == "unauthorized"
+
+        login = client.post(
+            "/api/v1/auth/login",
+            json={"password": "scorecard-admin", "passwordConfirm": "scorecard-admin"},
+        )
+        assert login.status_code == 200, login.text
+        assert auth.verify_session(client.cookies.get(auth.COOKIE_NAME))
+
+        authenticated = client.get("/api/v1/decision-scorecards/decision-auth")
+        assert authenticated.status_code == 200, authenticated.text
+        assert authenticated.json() == {
+            "item": {"decision_id": "decision-auth", "read_only": True}
+        }
+    finally:
+        DatabaseManager.reset_instance()
+        Config.reset_instance()
+        _reset_auth_globals()
 
 
 def test_scorecard_layers_have_no_decision_execution_or_retry_authority():
