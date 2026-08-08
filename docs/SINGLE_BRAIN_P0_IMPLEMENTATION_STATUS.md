@@ -4,7 +4,7 @@
 
 **Repository role:** Research and sole Investment Decision Brain
 
-**Lifecycle state:** M2 IN PROGRESS — M2C COMPLETE
+**Lifecycle state:** M2 IN PROGRESS — M2D COMPLETE
 
 **Normative architecture:** [Single Brain Architecture Constitution](SINGLE_BRAIN_CONSTITUTION.md)
 
@@ -72,6 +72,14 @@ P1A adds one internal, default-off hook after a real legacy or Agent analysis re
 - BUY, ADD, and HOLD shadow decisions all require zero `ExecutionMandate`, zero `ExecutionResult`, and no Snapshot B. Any attempt to attach execution artifacts to an M2 shadow scorecard fails validation.
 - `DecisionScorecardService.persist_shadow()` keeps the existing immutable create-if-absent semantics. Restart or duplicate persistence with identical content returns the same record; conflicting content under one `decision_id` is rejected.
 - M2C plus P1 scorecard/shadow/canary focused regression: **22 passed** at the phase checkpoint.
+
+## M2D Runtime Resilience and Recovery
+
+- Cycle and symbol claims are durable and unique. A duplicate scheduler trigger, duplicate symbol, or process restart reuses the same deterministic analysis query, `decision_cycle_id`, and `decision_id` rather than creating a second scorecard.
+- Recovery after real analysis persistence reconstructs the saved DSA result; recovery after scorecard persistence skips both analysis and scorecard rewriting, then closes the existing cycle checkpoint.
+- The exact immutable Snapshot A, symbol scope, and RiskPolicy are rebound on recovery. A missing, changed, expired, or conflicting policy and unavailable, stale, future, unreconciled, or account-mismatched Athena snapshot fail closed with no actionable lineage.
+- Storage failures are bounded to one scheduler attempt. Analysis, scorecard persistence, and cycle closeout failure injection remains recoverable without retry loops or any execution path.
+- M2D resilience plus shadow/scorecard focused regression: **23 passed** at the phase checkpoint.
 
 ## Implementation map
 

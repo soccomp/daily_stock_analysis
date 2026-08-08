@@ -366,7 +366,25 @@ class M2ShadowLoopService:
                 )
                 logger.exception("M2 shadow symbol failed closed: cycle=%s symbol=%s", cycle, symbol)
 
-        status = self._repository.close_cycle(cycle_id=cycle)
+        try:
+            status = self._repository.close_cycle(cycle_id=cycle)
+        except Exception as exc:
+            reason = f"cycle closeout failed: {type(exc).__name__}: {exc}"
+            try:
+                self._repository.fail_cycle(cycle_id=cycle, reason=reason)
+            except Exception:
+                logger.exception(
+                    "M2 shadow cycle failure checkpoint could not be persisted: cycle=%s",
+                    cycle,
+                )
+            logger.exception("M2 shadow cycle closeout failed: cycle=%s", cycle)
+            return M2ShadowRunResult(
+                cycle_id=cycle,
+                status="FAILED_CLOSED",
+                persisted_decision_ids=tuple(persisted),
+                blocked_reasons=(*blocked, reason),
+                duplicate_trigger=duplicate,
+            )
         return M2ShadowRunResult(
             cycle_id=cycle,
             status=status,
