@@ -4,7 +4,7 @@
 
 **Repository role:** Research and sole Investment Decision Brain
 
-**Lifecycle state:** M2 IN PROGRESS — M2D COMPLETE
+**Lifecycle state:** M2 IN PROGRESS — M2E COMPLETE
 
 **Normative architecture:** [Single Brain Architecture Constitution](SINGLE_BRAIN_CONSTITUTION.md)
 
@@ -80,6 +80,13 @@ P1A adds one internal, default-off hook after a real legacy or Agent analysis re
 - The exact immutable Snapshot A, symbol scope, and RiskPolicy are rebound on recovery. A missing, changed, expired, or conflicting policy and unavailable, stale, future, unreconciled, or account-mismatched Athena snapshot fail closed with no actionable lineage.
 - Storage failures are bounded to one scheduler attempt. Analysis, scorecard persistence, and cycle closeout failure injection remains recoverable without retry loops or any execution path.
 - M2D resilience plus shadow/scorecard focused regression: **23 passed** at the phase checkpoint.
+
+## M2E Holdings Review Loop
+
+- Positive-quantity CN holdings from Athena Snapshot A are included ahead of the optional allowlist under the explicit holdings and total-symbol caps, and each persisted symbol records whether it came from `HOLDING`, `ALLOWLIST`, or `BOTH`.
+- A holding is researched again in each later logical cycle. Changed research evidence produces a new ResearchBundle and decision lineage bound to that cycle's fresh authoritative snapshot rather than reusing the earlier thesis.
+- Thesis weakening, risk factors, catalysts, and invalidation evidence remain visible in the one ResearchBundle/scorecard lineage. Because M2 has no SELL/REDUCE capability, non-positive evidence produces HOLD with unchanged quantity and no reduction sizing or execution artifact.
+- Focused two-cycle holdings-review proof: **1 passed** at the phase checkpoint.
 
 ## Implementation map
 
