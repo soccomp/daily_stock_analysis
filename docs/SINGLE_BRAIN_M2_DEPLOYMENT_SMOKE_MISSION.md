@@ -4,7 +4,7 @@
 
 **Approved:** 2026-08-09
 
-**Mission status:** APPROVED — RESTART FROM S0
+**Mission status:** HARD STOP AT S2 — AUTHORITATIVE SNAPSHOT CLOCK ORDERING
 
 **Normative parents:**
 
@@ -184,3 +184,68 @@ One real Athena simulation Snapshot -> one real DSA shadow cycle -> one persiste
 No unsafe workaround. Record the exact blocker and the smallest reversible owner-approved deployment action required next.
 
 Do not merge or promote any new code automatically. If implementation code changes become necessary, open separate Draft PRs and return for architecture review.
+
+## 11. Deployment smoke record — 2026-08-09
+
+The Owner-approved passwordless acceptance revision was published first at DSA
+commit `545e93504d0cf34508e3479ed8bcb28520314057`. The smoke then restarted from
+S0 against the already aligned deployment.
+
+### S0 — PASS
+
+- DSA ran the accepted `athena-integration` code tree plus governance-only
+  commits, bound only to `127.0.0.1:8080`, with the existing `--webui-only`
+  service command.
+- Athena remained the aligned simulation Worker recorded at
+  `integration@19c36d328d28a024a927f612b910f85db04c22b1` and was reachable only
+  through the existing loopback tunnel.
+- `ADMIN_AUTH_ENABLED=false` was the expected Owner-approved state.
+- `DSA_SINGLE_BRAIN_M2_ENABLED`, the P1A runtime shadow hook, and the P1B canary
+  all remained OFF.
+- Athena health reported `LIVE_TRADING=false`, `simulation_only=true`, and
+  `READY`. Existing DSA Git/database/plist and Athena Worker rollback evidence
+  remained available.
+
+### S1 — PASS
+
+Two real canonical observations produced revisions 8 and 9:
+
+- Snapshot A: `snapshot:athena-sim:8:d7a56c0c7e2575fe`, hash
+  `48879645558634825f938cf8f5d06b2d13bed64ee1b1efdb2c94d64ca144c312`;
+- Snapshot B: `snapshot:athena-sim:9:2c422b91c993ffc6`, hash
+  `74ea89dfd8d33c4a22497b0265914dac90c4bdf9be26bf74c1c36d2d7f7db25e`.
+
+Both were fresh, reconciled, Athena-owned, authoritative, read-only,
+simulation-only, hash-valid, and carried the accepted runtime provenance. The
+stable account fingerprint, order evidence, and position/cash mutation facts
+remained unchanged across S1. No submit, cancel, retry, reconcile, or portfolio
+mutation call was made.
+
+### S2 — HARD STOP
+
+The one-shot process used an in-memory-only M2 enablement while the deployed
+configuration remained OFF. The production `M2ShadowLoopService` recorded its
+validation clock immediately before requesting the authoritative snapshot. The
+Athena endpoint necessarily created the observation a few milliseconds later,
+so the fresh snapshot appeared future-dated relative to that earlier clock and
+the cycle failed closed with:
+
+`authoritative PortfolioSnapshot is future-dated`
+
+Failed cycle: `m2-cycle-75f601dbcf829fe21c384bd6b61a01734838e1c2`.
+
+The failure occurred before analysis. Analysis-history count remained 13,
+scorecard count remained zero, and no per-symbol checkpoint, ResearchBundle,
+InvestmentDecision, DecisionSignal, duplicate trigger, mandate, result, or
+Snapshot B was created. Readiness reported the failed-closed cycle and
+`execution_authorization=OFF`.
+
+Closeout re-confirmed one unchanged historical order and one unchanged
+historical execution with the same sanitized evidence digest as S1. Recurring
+M2 scheduling, P1A, and P1B remained OFF; Athena remained simulation-only with
+`LIVE_TRADING=false`. No service, plist, environment, credential, password,
+network permission, or runtime process was changed or restarted.
+
+Do not rerun S2 until a separately reviewed code change corrects the caller /
+observation clock ordering while preserving strict future-dated and stale
+snapshot rejection.
