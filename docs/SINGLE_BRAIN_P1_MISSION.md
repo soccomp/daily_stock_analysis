@@ -4,18 +4,18 @@
 
 **Adopted:** 2026-08-08
 
-**Mission status:** COMPLETE — READY FOR ARCHITECTURE REVIEW
+**Mission status:** P1 BASELINE ACCEPTED AND MERGED
 
 **Normative parent:** [Single Brain Architecture Constitution](SINGLE_BRAIN_CONSTITUTION.md)
 
 This document is the canonical cross-repository mission authority for P1. The
-same version must exist in the DSA and Athena P1 branches. Repository code,
-tests, implementation-status documents, and the two cross-linked Draft P1 pull
-requests provide the implementation evidence.
+same normative content must exist in the DSA and Athena canonical integration
+branches. Repository code, tests, implementation-status documents, historical
+pull requests, and the baseline-promotion record below provide implementation
+evidence.
 
 If this mission conflicts with the Single Brain Constitution, the Constitution
-wins and implementation must stop. P1 does not amend the Constitution or any
-authority boundary.
+wins. P1 did not amend the Constitution or any authority boundary.
 
 ## 1. Mission outcome
 
@@ -69,11 +69,11 @@ Before a mandate can be emitted, DSA calculates:
         max_single_position_weight,
     )
 
-All calculations use exact Decimal semantics. max_single_position_weight is a
+All calculations use exact Decimal semantics. `max_single_position_weight` is a
 cap, not a target. No confidence-based discretionary sizing is permitted. The
-existing DSA InvestmentDecisionEngine must still enforce current position, max
-single position, total exposure, minimum cash, concurrent positions, lot
-rules, stop-risk budget, and every applicable RiskPolicy constraint. An
+existing DSA `InvestmentDecisionEngine` must still enforce current position,
+max single position, total exposure, minimum cash, concurrent positions, lot
+rules, stop-risk budget, and every applicable `RiskPolicy` constraint. An
 existing position at or above the risk-derived target produces HOLD in the P1
 BUY/ADD-only scope.
 
@@ -81,10 +81,10 @@ BUY/ADD-only scope.
 
 - P1A shadow and P1B canary have separate feature flags; both default OFF.
 - Enabling P1A does not enable P1B.
-- The canary requires a simulation-only account, LIVE_TRADING exactly false,
+- The canary requires a simulation-only account, `LIVE_TRADING` exactly false,
   one configured account, an explicit symbol allowlist, CN equity identity,
   BUY/ADD/HOLD, LIMIT, and a canonical mandate.
-- P1 provides a development-worktree one-shot path. It does not modify or
+- The P1 canary is a development-worktree one-shot path. It does not modify or
   silently enable any deployed launchd service or plist.
 - No live worker, live broker, SELL/REDUCE, automatic stop, automatic
   take-profit, scheduler redesign, queue, service discovery, distributed
@@ -92,7 +92,7 @@ BUY/ADD-only scope.
 
 ### 3.3 Execution and uncertainty
 
-- mandate.quantity equals decision.delta_quantity.
+- `mandate.quantity == decision.delta_quantity`.
 - Athena may submit exactly that quantity or zero, never another quantity.
 - Athena does not round, resize, reallocate, or make an investment judgment.
 - Invalid lot and stale/changed account truth are blocked. Changed truth
@@ -106,7 +106,7 @@ BUY/ADD-only scope.
 
 ### 3.4 P1B acceptance
 
-Focused and cross-repository tests must prove:
+Focused and cross-repository tests proved:
 
 - a real completed DSA analysis produces the canonical research/decision chain;
 - risk-budget sizing is deterministic and positions at/above target HOLD;
@@ -116,11 +116,11 @@ Focused and cross-repository tests must prove:
 - restart does not duplicate submission;
 - default-off configuration has zero execution side effects;
 - non-allowlisted symbols submit zero; and
-- any environment where LIVE_TRADING is not exactly false fails closed.
+- any environment where `LIVE_TRADING` is not exactly false fails closed.
 
 ## 4. P1C — Minimal Single Decision Scorecard
 
-DSA persists one read-only scorecard lineage keyed by decision_id. It
+DSA persists one read-only scorecard lineage keyed by `decision_id`. It
 reconstructs:
 
 - ResearchBundle and research references;
@@ -141,36 +141,26 @@ saw, what was authorized and submitted, what filled, and what the authoritative
 account became. It does not invent long-term performance scoring. Future
 1/5/20-day evaluation is outside P1.
 
-P1C must reuse existing DSA persistence and API/service conventions. Retrieval
-is read-only and additive. Unrelated public behavior remains unchanged.
+P1C reuses existing DSA persistence and API/service conventions. Retrieval is
+read-only and additive. Unrelated public behavior remains unchanged.
 
-## 5. Phase and publication gates
+## 5. Historical phase and publication gates
 
-The two P1 branches are stacked on the accepted heads:
+P1 was developed as stacked Draft pull requests from the accepted P0/P1A heads:
 
-- DSA base: codex/p1a-shadow-wiring
-- Athena base: codex/p0-trading-spine
+- DSA P1 base: `codex/p1a-shadow-wiring`.
+- Athena P1 base: `codex/p0-trading-spine`.
 
-Each repository uses one Draft P1 pull request. The PRs remain unmerged and are
-cross-linked. Commits are separated into:
+Each implementation phase ran focused tests, updated implementation-status
+documents, and committed phase-scoped changes before continuing. Final closeout
+required full DSA and Athena regression, focused cross-repository P1 tests,
+wire-compatibility and dependency-boundary tests, proof that default
+configuration executes nothing, proof that no live-trading path was enabled,
+and architecture acceptance before baseline promotion.
 
-1. P1 Mission governance;
-2. P1B;
-3. P1C where the repository is affected; and
-4. P1 closeout.
+## 6. Hard-stop rules retained for future missions
 
-After each implementation phase, focused tests must pass, implementation-status
-documents must be updated, and the phase must be committed before continuing.
-
-Final closeout requires full DSA and Athena regression, focused
-cross-repository P1 tests, wire-compatibility and dependency-boundary tests,
-proof that default configuration executes nothing, proof that no live-trading
-path was enabled, final status/mission updates, and cross-linked unmerged Draft
-PRs.
-
-## 6. Hard-stop rules
-
-Implementation must stop before proceeding if any condition is true:
+Future implementation must stop before proceeding if any condition is true:
 
 1. The Constitution or an authority boundary must change.
 2. Live trading must be enabled.
@@ -188,44 +178,40 @@ Implementation must stop before proceeding if any condition is true:
     preference.
 
 Routine file placement, naming, helper APIs, tests, in-scope refactoring,
-introduced bug fixes, documentation, and mechanically safe stacked-branch
-maintenance are not hard stops.
+introduced bug fixes, documentation, and mechanically safe branch maintenance
+are not hard stops.
 
-## 7. Out of scope and completion marker
+## 7. Out of scope
 
 P1 does not add SELL/REDUCE, live execution, multi-symbol allocation, automatic
 stops/take-profit, broad UI redesign, scheduler consolidation, long-term
 outcome scoring, distributed coordination, or legacy retirement.
 
-When every closeout gate passes, both copies of this document must be updated
-to Mission status: COMPLETE — READY FOR ARCHITECTURE REVIEW, with exact test
-evidence, P1 PR links, compatibility notes, and known gaps.
-
 ## 8. Completion record
 
-P1A, P1B, P1C, and the P1 governance/regression closeout are complete on the
-two unmerged Draft P1 branches. The Single Brain Constitution and every
+P1A, P1B, P1C, the P1 governance/regression closeout, and post-review Scorecard
+authentication proof are complete. The Single Brain Constitution and every
 authority boundary remain unchanged.
 
-### 8.1 Canonical Draft PRs
+### 8.1 Historical implementation PRs
 
-- DSA: https://github.com/soccomp/daily_stock_analysis/pull/3, stacked on
-  `codex/p1a-shadow-wiring`.
-- Athena: https://github.com/soccomp/athena/pull/2, stacked on
-  `codex/p0-trading-spine`.
+- DSA P0: `soccomp/daily_stock_analysis` PR #1.
+- DSA P1A: `soccomp/daily_stock_analysis` PR #2.
+- DSA P1 Mission: `soccomp/daily_stock_analysis` PR #3.
+- Athena P0 Trading Spine: `soccomp/athena` PR #1.
+- Athena P1 Mission: `soccomp/athena` PR #2.
 
-The PRs are cross-linked, Draft, and intentionally unmerged pending
-architecture acceptance.
+These PRs were architecture-reviewed and merged in dependency order into the
+canonical integration branches during P1 Baseline Promotion.
 
 ### 8.2 Final verification evidence
 
-- DSA required backend gate: **5793 passed, 4 deselected, 501 subtests
-  passed**; syntax, critical flake8, deterministic checks, and the offline
-  suite all passed.
-- Athena full regression: **883 passed**.
+- DSA required backend gate: **5793 passed, 4 deselected, 501 subtests passed**.
 - DSA P0/P1 contract, architecture, cross-repository canary, and scorecard
   suite: **53 passed**.
 - DSA P1C plus storage/config/canary focused suite: **108 passed**.
+- Post-review Scorecard/admin-auth/P1 regression: **113 passed**.
+- Athena full regression: **883 passed**.
 - Athena P0/P1 Trading Spine focused suite: **45 passed**.
 - Canonical PortfolioSnapshot, ExecutionMandate, and ExecutionResult wire
   round trips, hashes, Decimal strings, IDs, timestamps, and lineage passed.
@@ -234,7 +220,7 @@ architecture acceptance.
   Research/LLM/Decision/allocation/sizing; the scorecard remains observational.
 - Default DSA configuration keeps P1A shadow and P1B execution OFF. The canary
   tests prove zero submission while disabled or non-allowlisted, fail closed
-  unless LIVE_TRADING is exactly false, exact quantity or zero, UNKNOWN no
+  unless `LIVE_TRADING` is exactly false, exact quantity or zero, UNKNOWN no
   automatic retry, durable restart deduplication, and observed Snapshot B.
 - No live trading, live worker, live broker, launchd service, plist, deployed
   configuration, or public audit-snapshot repository was changed or enabled.
@@ -252,3 +238,30 @@ architecture acceptance.
 - Distributed multi-process coordination, multi-symbol allocation,
   SELL/REDUCE, automated stops/take-profit, scheduler consolidation, and
   legacy retirement remain future separately governed phases.
+
+## 9. P1 Baseline Promotion
+
+**Accepted code trees before governance-only closeout:**
+
+- DSA tested head: `03f4cbf989535d65797f0ef56ca1066d4f2f0b75`.
+- DSA merge baseline: `fa67418179f014d94832efaba883b6fa1a78938c`.
+- DSA tree equality proof: both commits point to tree
+  `b860792d7a8a7dac5d2d190af5da75af0e96a5c2`.
+- Athena tested head: `974797fdbd92835a340d3324c6294be1c117f0d2`.
+- Athena merge baseline: `915441905978a2de67786209523cf934288acac5`.
+- Athena tree equality proof: both commits point to tree
+  `2ca7a11c5379dbb94acfd0301663c2a765d41dc3`.
+
+The merge commits therefore changed Git history only; they did not change the
+accepted P1 code trees.
+
+**Canonical development branches after promotion:**
+
+- DSA: `athena-integration`.
+- Athena: `integration`.
+
+Future missions must branch from these canonical integration branches and read
+this mission, the implementation-status documents, and the Single Brain
+Constitution before implementation. DSA `main` remains upstream-oriented;
+Athena `main` remains outside this P1 promotion and requires a separately
+governed mainline-promotion decision.
