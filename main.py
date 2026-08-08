@@ -1560,14 +1560,42 @@ def main() -> int:
                     scheduled_stock_codes,
                 )
 
+            # Preserve the existing CLI event-monitor callback and log surface.
+            # M2 only appends its own default-off task to this scheduler.
+            background_tasks = []
+            if getattr(config, 'agent_event_monitor_enabled', False):
+                from src.services.alert_worker import AlertWorker
+
+                interval_minutes = max(
+                    1,
+                    getattr(config, 'agent_event_monitor_interval_minutes', 5),
+                )
+                alert_worker = AlertWorker(config_provider=_reload_runtime_config)
+
+                def event_monitor_task():
+                    stats = alert_worker.run_once()
+                    triggered_count = stats.get("triggered", 0)
+                    if triggered_count:
+                        logger.info(
+                            "[EventMonitor] 本轮触发 %d 条提醒",
+                            triggered_count,
+                        )
+
+                background_tasks.append({
+                    "task": event_monitor_task,
+                    "interval_seconds": interval_minutes * 60,
+                    "run_immediately": True,
+                    "name": "agent_event_monitor",
+                })
+
             from src.services.runtime_scheduler import (
-                build_cli_schedule_background_tasks,
+                build_single_brain_m2_background_tasks,
             )
 
-            background_tasks = build_cli_schedule_background_tasks(
+            background_tasks.extend(build_single_brain_m2_background_tasks(
                 config,
                 config_provider=_reload_runtime_config,
-            )
+            ))
 
             schedule_kwargs = {
                 "task": scheduled_task,

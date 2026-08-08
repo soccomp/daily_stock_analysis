@@ -120,5 +120,5 @@ def test_cli_schedule_composes_m2_task_and_uses_shared_analysis_lock():
     source = (Path(__file__).resolve().parents[1] / "main.py").read_text(
         encoding="utf-8"
     )
-    assert "build_cli_schedule_background_tasks" in source
+    assert "build_single_brain_m2_background_tasks" in source
     assert "_run_analysis_with_runtime_scheduler_lock(" in source
