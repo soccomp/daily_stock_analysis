@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
