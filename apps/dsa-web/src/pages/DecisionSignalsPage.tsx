@@ -1202,6 +1202,13 @@ const DecisionSignalsPage: React.FC = () => {
           )}
         />
 
+        <div
+          role="note"
+          className="rounded-2xl border border-cyan/20 bg-cyan/10 px-4 py-3 text-sm text-cyan"
+        >
+          {t('decisionSignals.researchOnlyNotice')}
+        </div>
+
         <Card title={t('decisionSignals.stockContextTitle')} subtitle={t('decisionSignals.stockContextDescription')} padding="md">
           <form
             className="flex flex-col gap-3 md:flex-row"

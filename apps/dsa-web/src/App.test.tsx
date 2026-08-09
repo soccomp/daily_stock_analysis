@@ -48,6 +48,10 @@ vi.mock('./pages/DecisionSignalsPage', () => ({
   default: () => <div data-testid="decision-signals-page">Decision signals</div>,
 }));
 
+vi.mock('./pages/InvestmentDecisionsPage', () => ({
+  default: () => <div data-testid="investment-decisions-page">Investment decisions</div>,
+}));
+
 vi.mock('./pages/BacktestPage', () => ({
   default: () => <div data-testid="backtest-page">Backtest</div>,
 }));
@@ -142,13 +146,23 @@ describe('App routing behavior', () => {
     expect(screen.queryByTestId('home-page')).not.toBeInTheDocument();
   });
 
-  it('routes /decision-signals to the AI signals page after auth is ready', async () => {
+  it('keeps the existing /decision-signals research route after auth is ready', async () => {
     window.history.pushState({}, '', '/decision-signals');
 
     render(<App />);
 
     expect(await screen.findByTestId('decision-signals-page')).toBeInTheDocument();
     expect(setCurrentRoute).toHaveBeenCalledWith('/decision-signals');
+    expect(screen.queryByTestId('home-page')).not.toBeInTheDocument();
+  });
+
+  it('lazy-routes /investment-decisions after auth is ready', async () => {
+    window.history.pushState({}, '', '/investment-decisions');
+
+    render(<App />);
+
+    expect(await screen.findByTestId('investment-decisions-page')).toBeInTheDocument();
+    expect(setCurrentRoute).toHaveBeenCalledWith('/investment-decisions');
     expect(screen.queryByTestId('home-page')).not.toBeInTheDocument();
   });
 
