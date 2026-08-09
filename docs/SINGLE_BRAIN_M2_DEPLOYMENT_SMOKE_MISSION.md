@@ -1,10 +1,10 @@
 # Single Brain M2 Deployment Smoke Mission
 
-**Version:** 1.3
+**Version:** 1.4
 
 **Approved:** 2026-08-09
 
-**Mission status:** SNAPSHOT CLOCK REPAIR READY FOR REVIEW — SMOKE REMAINS STOPPED
+**Mission status:** CLOSEOUT RESUME APPROVED — S2 EVIDENCE REMAINS IMMUTABLE
 
 **Normative parents:**
 
@@ -342,3 +342,43 @@ and architecture compatibility regression completed with **46 passed**.
 The repair is review-only. It has not been deployed or merged, Deployment Smoke
 has not resumed, recurring M2 remains OFF, and no submit, cancel, retry,
 reconcile, or portfolio mutation operation was performed.
+
+## 14. Owner-approved cash representation-equivalence closeout rule — 2026-08-09
+
+The prior Smoke closeout gate identified a `+0.00000000012` CNY difference in
+Athena producer-observed available cash. The Owner has approved the following
+strictly limited rule for the remaining zero-mutation proof.
+
+### Canonical factual equality remains unchanged
+
+`PortfolioSnapshot` cash fields remain Athena producer facts. Their Decimal
+strings, canonical JSON, content hashes, and all Brain inputs must remain exact.
+Neither DSA nor the Smoke verifier may quantize, rewrite, normalize, or re-hash
+the canonical snapshot to hide a difference. Canonical factual equality still
+means exact contract-field equality.
+
+### Smoke-only zero-mutation semantic equivalence
+
+For Deployment Smoke closeout evidence only, two observed broker monetary values
+originating from binary64 fields may be treated as representation-equivalent
+when all of the following are proved:
+
+- the difference is explicitly attributed to `NUMERIC_REPRESENTATION_JITTER`;
+- the values compare equal at the CNY currency quantum of `0.01`;
+- position quantity, available quantity, position cost, active orders,
+  historical orders, and execution evidence are unchanged;
+- reserved cash is unchanged; and
+- no broker cash-change reason/event, settlement, fee, dividend, funding,
+  submit, cancel, retry, reconcile, mandate-dispatch, or execution-lifecycle
+  evidence indicates an account mutation.
+
+This is an observational Smoke closeout rule, not a contract, portfolio,
+investment, RiskPolicy, or execution rule. It cannot be used to alter
+`PortfolioSnapshot` content or hashes, decision inputs, or canonical wire
+serialization.
+
+Any economically meaningful difference at the CNY quantum, lifecycle or account
+event evidence, a changed reserved-cash value, or an unattributed difference is
+still a hard stop. The existing completed S2 cycle, ResearchBundle, decision,
+and M2 shadow scorecard remain immutable accepted evidence; closeout must not
+rerun S2 or create a replacement cycle.
