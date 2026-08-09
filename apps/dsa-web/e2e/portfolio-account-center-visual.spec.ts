@@ -106,6 +106,11 @@ test.describe('portfolio account center v1 visual evidence', () => {
     await expect(page.getByTestId('connected-account-view')).toBeVisible();
     await expect(page.getByText('已核对', { exact: true })).toBeVisible();
     await expect(page.getByText('数据质量 · 高')).toBeVisible();
+    await expect(page.getByText('券商 · SANITIZED_SIMULATION')).toBeVisible();
+    await expect(page.getByText('币种 · HKD')).toBeVisible();
+    await expect(page.getByText(/快照时间 ·/)).toBeVisible();
+    await expect(page.getByText(/行情时间 ·/).first()).toBeVisible();
+    await expect(page.getByText('快照追溯与技术细节')).toBeVisible();
     await expect(page.getByText('CN', { exact: true })).toBeVisible();
     await expect(page.getByText('HK', { exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: '提交交易' })).toHaveCount(0);

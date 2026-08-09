@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { decisionSignalsApi } from '../../api/decisionSignals';
 import { createApiError, createParsedApiError } from '../../api/error';
+import ConnectedPortfolioAccountView from '../../components/portfolio/ConnectedPortfolioAccountView';
 import { UiLanguageProvider } from '../../contexts/UiLanguageContext';
 import type { DecisionSignalItem } from '../../types/decisionSignals';
 import { UI_LANGUAGE_STORAGE_KEY } from '../../utils/uiLanguage';
@@ -441,6 +442,12 @@ describe('PortfolioPage FX refresh', () => {
 
     const connected = await screen.findByTestId('connected-account-view');
     expect(within(connected).getByText('Athena 已连接账户')).toBeInTheDocument();
+    expect(within(connected).getByText('券商 · ATHENA_DECIMAL_SIM')).toBeInTheDocument();
+    expect(within(connected).getByText('币种 · HKD')).toBeInTheDocument();
+    expect(within(connected).getByText(/^快照时间 ·/)).toBeInTheDocument();
+    expect(within(connected).getByText('快照追溯与技术细节')).toBeInTheDocument();
+    expect(within(connected).getAllByText(/^行情时间 ·/)).toHaveLength(2);
+    expect(within(connected).queryByText(/^(Broker|Currency|Snapshot) ·/)).not.toBeInTheDocument();
     expect(within(connected).getAllByText('HKD', { exact: false }).length).toBeGreaterThan(0);
     expect(within(connected).getAllByText('600519')).toHaveLength(3);
     expect(within(connected).getByText('CN')).toBeInTheDocument();
@@ -459,6 +466,49 @@ describe('PortfolioPage FX refresh', () => {
     fireEvent.change(accountSelect, { target: { value: '1' } });
     expect(await screen.findByRole('button', { name: '提交交易' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '提交资金流水' })).toBeInTheDocument();
+  });
+
+  it('renders UNKNOWN facts as pending warnings rather than failures', async () => {
+    const snapshot = makeConnectedSnapshot();
+    getConnectedSnapshot.mockResolvedValueOnce({
+      ...snapshot,
+      reconciliationStatus: 'UNKNOWN' as const,
+      dataQuality: 'UNKNOWN' as const,
+      limitations: [],
+      activeOrders: [{ ...snapshot.activeOrders[0], state: 'UNKNOWN' as const }],
+    });
+    render(<PortfolioPage />);
+    await waitForInitialLoad();
+
+    fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: 'connected' } });
+
+    const connected = await screen.findByTestId('connected-account-view');
+    for (const testId of [
+      'connected-reconciliation-status',
+      'connected-data-quality',
+      'connected-order-state-order-read-only-1',
+    ]) {
+      const badge = within(connected).getByTestId(testId);
+      expect(badge).toHaveClass('text-warning');
+      expect(badge).not.toHaveClass('text-danger');
+      expect(badge).not.toHaveClass('text-success');
+    }
+    expect(within(connected).getAllByText(/待确认/).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('uses Chinese product language for the empty connected-account state', () => {
+    render(
+      <ConnectedPortfolioAccountView
+        snapshot={null}
+        loading={false}
+        error={null}
+        onRefresh={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('尚未取得权威账户快照')).toBeInTheDocument();
+    expect(screen.getByText('此视图只接受来自 Athena 运行时的权威、只读、仅模拟账户快照。')).toBeInTheDocument();
+    expect(screen.queryByText(/authoritative|read-only|simulation-only|PortfolioSnapshot/)).not.toBeInTheDocument();
   });
 
   it('shows connected unavailability explicitly without fabricating zero balances', async () => {

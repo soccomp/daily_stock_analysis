@@ -19,9 +19,17 @@ function formatCanonicalMoney(value: string, currency: string): string {
   })}`;
 }
 
-function statusVariant(value: string): 'success' | 'warning' | 'danger' {
-  if (value === 'RECONCILED' || value === 'HIGH') return 'success';
-  if (value === 'UNKNOWN' || value === 'LOW') return 'danger';
+function reconciliationVariant(
+  value: ConnectedPortfolioSnapshot['reconciliationStatus'],
+): 'success' | 'warning' {
+  return value === 'RECONCILED' ? 'success' : 'warning';
+}
+
+function dataQualityVariant(
+  value: ConnectedPortfolioSnapshot['dataQuality'],
+): 'success' | 'warning' | 'danger' {
+  if (value === 'HIGH') return 'success';
+  if (value === 'LOW') return 'danger';
   return 'warning';
 }
 
@@ -79,7 +87,7 @@ const ConnectedPortfolioAccountView: React.FC<ConnectedPortfolioAccountViewProps
         ) : (
           <EmptyState
             title={loading ? '正在读取权威账户快照' : '尚未取得权威账户快照'}
-            description="此视图只接受 Athena runtime 的 authoritative、read-only、simulation-only PortfolioSnapshot。"
+            description="此视图只接受来自 Athena 运行时的权威、只读、仅模拟账户快照。"
             className="mt-4"
           />
         )}
@@ -113,17 +121,23 @@ const ConnectedPortfolioAccountView: React.FC<ConnectedPortfolioAccountViewProps
               <Badge variant="default">只读</Badge>
             </div>
             <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-secondary">
-              <span>Broker · {snapshot.broker}</span>
+              <span>券商 · {snapshot.broker}</span>
               <span>账户模式 · 模拟</span>
-              <span>Currency · {snapshot.currency}</span>
-              <span>Snapshot · {formatDateTime(snapshot.asOf)}</span>
+              <span>币种 · {snapshot.currency}</span>
+              <span>快照时间 · {formatDateTime(snapshot.asOf)}</span>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Badge variant={statusVariant(snapshot.reconciliationStatus)}>
+            <Badge
+              data-testid="connected-reconciliation-status"
+              variant={reconciliationVariant(snapshot.reconciliationStatus)}
+            >
               {reconciliationLabels[snapshot.reconciliationStatus]}
             </Badge>
-            <Badge variant={statusVariant(snapshot.dataQuality)}>
+            <Badge
+              data-testid="connected-data-quality"
+              variant={dataQualityVariant(snapshot.dataQuality)}
+            >
               数据质量 · {dataQualityLabels[snapshot.dataQuality]}
             </Badge>
             <button type="button" className="btn-secondary text-sm" onClick={onRefresh} disabled={loading}>
@@ -165,7 +179,7 @@ const ConnectedPortfolioAccountView: React.FC<ConnectedPortfolioAccountViewProps
           <span className="text-xs text-secondary">{snapshot.positions.length} 项</span>
         </div>
         {snapshot.positions.length === 0 ? (
-          <EmptyState title="暂无权威持仓" description="该结果来自 Athena 当前 observed runtime state。" />
+          <EmptyState title="暂无权威持仓" description="该结果来自 Athena 当前运行时观察到的账户事实。" />
         ) : (
           <div className="overflow-x-auto">
             <table className="min-w-[920px] w-full text-sm">
@@ -189,7 +203,7 @@ const ConnectedPortfolioAccountView: React.FC<ConnectedPortfolioAccountViewProps
                     <td className="py-3 pr-3 text-right">{formatCanonicalMoney(position.avgCost, snapshot.currency)}</td>
                     <td className="py-3 pr-3 text-right">
                       <div>{formatCanonicalMoney(position.lastPrice, snapshot.currency)}</div>
-                      <div className="text-[11px] text-secondary">{position.priceSource} · {formatDateTime(position.priceAsOf)}</div>
+                      <div className="text-[11px] text-secondary">行情时间 · {formatDateTime(position.priceAsOf)}</div>
                     </td>
                     <td className="py-3 pr-3 text-right">{formatCanonicalMoney(position.marketValue, snapshot.currency)}</td>
                     <td className={`py-3 text-right ${Number(position.unrealizedPnl) >= 0 ? 'text-success' : 'text-danger'}`}>
@@ -206,13 +220,13 @@ const ConnectedPortfolioAccountView: React.FC<ConnectedPortfolioAccountViewProps
       <Card padding="md">
         <div className="mb-3 flex items-center justify-between gap-3">
           <div>
-            <h3 className="text-sm font-semibold text-foreground">活动订单事实</h3>
+            <h3 className="text-sm font-semibold text-foreground">当前活动订单</h3>
             <p className="mt-1 text-xs text-secondary">仅观察，不提供撤单、重试、对账或任何执行控制。</p>
           </div>
           <Badge variant="default">只读 · {snapshot.activeOrders.length}</Badge>
         </div>
         {snapshot.activeOrders.length === 0 ? (
-          <EmptyState title="暂无活动订单" description="此处不推断订单，也不触发 reconciliation。" />
+          <EmptyState title="暂无活动订单" description="此处不推断订单，也不触发账户核对。" />
         ) : (
           <div className="space-y-2">
             {snapshot.activeOrders.map((order) => (
@@ -221,7 +235,7 @@ const ConnectedPortfolioAccountView: React.FC<ConnectedPortfolioAccountViewProps
                 <div><span className="text-secondary">方向</span><div className="mt-1 text-foreground">{order.side === 'BUY' ? '买入' : '卖出'}</div></div>
                 <div><span className="text-secondary">数量</span><div className="mt-1 text-foreground">{order.quantity}</div></div>
                 <div><span className="text-secondary">成交 / 剩余</span><div className="mt-1 text-foreground">{order.filledQuantity} / {order.remainingQuantity}</div></div>
-                <div><span className="text-secondary">状态</span><div className="mt-1"><Badge variant={order.state === 'UNKNOWN' ? 'danger' : 'warning'}>{orderStateLabels[order.state]}</Badge></div></div>
+                <div><span className="text-secondary">状态</span><div className="mt-1"><Badge data-testid={`connected-order-state-${order.brokerOrderId}`} variant="warning">{orderStateLabels[order.state]}</Badge></div></div>
                 <div><span className="text-secondary">冻结现金</span><div className="mt-1 text-foreground">{formatCanonicalMoney(order.reservedCash, snapshot.currency)}</div></div>
               </div>
             ))}
@@ -230,13 +244,19 @@ const ConnectedPortfolioAccountView: React.FC<ConnectedPortfolioAccountViewProps
       </Card>
 
       <details className="rounded-xl border border-white/10 bg-white/[0.02] p-4 text-xs text-secondary">
-        <summary className="cursor-pointer font-medium text-foreground">快照 lineage 与技术细节</summary>
+        <summary className="cursor-pointer font-medium text-foreground">快照追溯与技术细节</summary>
         <dl className="mt-3 grid gap-2 break-all md:grid-cols-2">
-          <div><dt>snapshot_id</dt><dd className="font-mono text-foreground">{snapshot.snapshotId}</dd></div>
-          <div><dt>revision / supersedes</dt><dd className="font-mono text-foreground">{snapshot.revision} / {snapshot.supersedesId || '—'}</dd></div>
-          <div><dt>producer</dt><dd className="font-mono text-foreground">{snapshot.producer}</dd></div>
-          <div><dt>created_at</dt><dd className="font-mono text-foreground">{snapshot.createdAt}</dd></div>
-          <div className="md:col-span-2"><dt>content_hash</dt><dd className="font-mono text-foreground">{snapshot.contentHash}</dd></div>
+          <div><dt>账户快照 ID</dt><dd className="font-mono text-foreground">{snapshot.snapshotId}</dd></div>
+          <div><dt>修订号 / 前序快照</dt><dd className="font-mono text-foreground">{snapshot.revision} / {snapshot.supersedesId || '—'}</dd></div>
+          <div><dt>生产者</dt><dd className="font-mono text-foreground">{snapshot.producer}</dd></div>
+          <div><dt>创建时间</dt><dd className="font-mono text-foreground">{snapshot.createdAt}</dd></div>
+          <div className="md:col-span-2">
+            <dt>行情来源</dt>
+            <dd className="font-mono text-foreground">
+              {snapshot.positions.map((position) => `${position.market}:${position.symbol}=${position.priceSource}`).join('；') || '—'}
+            </dd>
+          </div>
+          <div className="md:col-span-2"><dt>内容哈希</dt><dd className="font-mono text-foreground">{snapshot.contentHash}</dd></div>
         </dl>
       </details>
     </div>

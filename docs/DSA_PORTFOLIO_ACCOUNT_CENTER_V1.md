@@ -1,6 +1,6 @@
 # DSA 持仓统一账户中心 v1
 
-Status: implementation complete on `ui/portfolio-account-center-v1`; pending architecture review. This document is subordinate to `SINGLE_BRAIN_CONSTITUTION.md` and `DSA_UI_ARCHITECTURE_V1.md`.
+Status: implementation complete on `ui/portfolio-account-center-v1`; Architecture Review UI-semantic follow-up applied, pending re-review. This document is subordinate to `SINGLE_BRAIN_CONSTITUTION.md` and `DSA_UI_ARCHITECTURE_V1.md`.
 
 ## Account source model
 
@@ -48,7 +48,7 @@ The connected view contains no manual trade, cash, corporate-action, CSV, FX mut
 
 Invalid, unavailable, stale, future-dated, non-UTC, wrong-account, non-authoritative, writable, or non-simulation input fails closed with a visible “已连接账户暂时不可用” state. Manual accounts remain selectable and usable.
 
-`DEGRADED`, `PENDING_RECONCILIATION`, `UNKNOWN`, low data quality, and explicit limitations are displayed as factual warning states. The UI does not convert them into success or trigger remediation.
+`DEGRADED`, `PENDING_RECONCILIATION`, `UNKNOWN`, and explicit limitations are displayed as factual warning states. `UNKNOWN` is specifically rendered as pending confirmation, never success or failure/danger; low data quality may retain a danger treatment. The UI does not trigger remediation.
 
 ## Authority and navigation
 
@@ -61,14 +61,14 @@ No fuzzy cross-page lineage links were added. Deterministic navigation can be ad
 - The canonical P0 `ActiveOrder` schema does not contain limit price or market, so v1 displays only actual contract fields and does not invent either value.
 - Connected and manual assets are intentionally not aggregated into one total.
 - Multiple connected accounts, account connection management, trading controls, and broker lifecycle controls remain out of scope.
-- UI labels are Chinese-first; existing English page copy remains available, while connected-card detail copy can be localized in a later UI-only phase.
+- The connected-account primary surface and collapsed technical-detail labels are Chinese-first; canonical identifiers and producer values remain unchanged.
 
 ## Review evidence
 
 - Backend full gate: 5,891 passed, 4 deselected, 501 subtests passed.
-- Frontend full unit suite: 1,100 passed, 2 skipped across 103 files.
+- Frontend full unit suite: 1,102 passed, 2 skipped across 103 files.
 - Focused backend portfolio/architecture suite: 84 passed, including all 16 connected-account cases.
-- Focused frontend API/page suite: 31 passed.
+- Focused frontend API/page suite: 33 passed.
 - TypeScript production build and ESLint: passed.
 - Playwright read-only visual suite: 3 passed.
 
