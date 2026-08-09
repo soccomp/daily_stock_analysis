@@ -136,18 +136,18 @@ The product flow is:
 
 Links between research and investment decisions require an exact `source_report_id` or `decision_id`. Symbol similarity or fuzzy matching is not lineage and must not create a link.
 
-## 10. Portfolio future baseline
+## 10. Portfolio account center v1
 
-“持仓” becomes the single account and holdings center in a later phase.
+“持仓” is the single account and holdings center. The accepted implementation boundary is documented in `DSA_PORTFOLIO_ACCOUNT_CENTER_V1.md`.
 
 - Manual accounts retain current DSA account creation, manual trade, cash flow, CSV, dividend, and split features.
 - Connected accounts use Athena authoritative PortfolioSnapshot as fact truth and are read-only in DSA. DSA must not overwrite broker facts, delete broker trades, or copy snapshots into the manual portfolio ledger.
 
-This v1 mission does not implement that unification.
+The connected-account view is observational and GET-only. It preserves canonical currency, `(market, symbol)` identity, reconciliation limitations, and content hash; it creates no manual-ledger mirror or execution control.
 
 ## 11. Deferred phases
 
-- Unified connected-account and manual-account presentation in 持仓.
+- Multiple connected accounts and connection management.
 - 首页 “今日投资动态”.
 - Richer deterministic 研究建议 ↔ 投资决策 navigation.
 - Alert/backtest relationships to real investment decisions.

@@ -96,6 +96,67 @@ export interface PortfolioSnapshotResponse {
   accounts: PortfolioAccountSnapshot[];
 }
 
+export interface ConnectedPortfolioPosition {
+  symbol: string;
+  market: string;
+  quantity: number;
+  availableQuantity: number;
+  avgCost: string;
+  lastPrice: string;
+  marketValue: string;
+  unrealizedPnl: string;
+  priceAsOf: string;
+  priceSource: string;
+}
+
+export interface ConnectedPortfolioActiveOrder {
+  brokerOrderId: string;
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  quantity: number;
+  filledQuantity: number;
+  remainingQuantity: number;
+  state: 'ACCEPTED' | 'ACTIVE' | 'PARTIALLY_FILLED' | 'UNKNOWN';
+  reservedCash: string;
+  submittedAt: string;
+}
+
+export interface ConnectedPortfolioSnapshot {
+  schemaVersion: '1.0';
+  snapshotId: string;
+  accountId: string;
+  broker: string;
+  accountMode: 'SIMULATION' | 'PAPER' | 'LIVE';
+  source: 'ATHENA_RUNTIME';
+  authoritative: true;
+  readOnly: true;
+  simulationOnly: true;
+  asOf: string;
+  revision: number;
+  currency: string;
+  equity: string;
+  cash: string;
+  availableCash: string;
+  reservedCash: string;
+  positions: ConnectedPortfolioPosition[];
+  activeOrders: ConnectedPortfolioActiveOrder[];
+  realizedPnl: string;
+  unrealizedPnl: string;
+  reconciliationStatus: 'RECONCILED' | 'PENDING_RECONCILIATION' | 'DEGRADED' | 'UNKNOWN';
+  dataQuality: 'HIGH' | 'MEDIUM' | 'LOW' | 'UNKNOWN';
+  limitations: string[];
+  brokerSnapshotRef: string;
+  traceId: string;
+  createdAt: string;
+  producer: string;
+  contentHash: string;
+  supersedesId?: string | null;
+}
+
+export interface ConnectedPortfolioSnapshotResponse {
+  item: ConnectedPortfolioSnapshot;
+}
+
 export interface PortfolioConcentrationItem {
   symbol: string;
   marketValueBase: number;

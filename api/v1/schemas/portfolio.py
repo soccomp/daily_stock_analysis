@@ -216,6 +216,12 @@ class PortfolioSnapshotResponse(BaseModel):
     accounts: List[PortfolioAccountSnapshot] = Field(default_factory=list)
 
 
+class ConnectedPortfolioSnapshotResponse(BaseModel):
+    """Observational envelope carrying one validated canonical Snapshot."""
+
+    item: Dict[str, Any]
+
+
 class PortfolioImportTradeItem(BaseModel):
     trade_date: str
     symbol: str

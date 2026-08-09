@@ -20,6 +20,7 @@ from api.v1.schemas.portfolio import (
     PortfolioAccountUpdateRequest,
     PortfolioCashLedgerListResponse,
     PortfolioCashLedgerCreateRequest,
+    ConnectedPortfolioSnapshotResponse,
     PortfolioCorporateActionListResponse,
     PortfolioCorporateActionCreateRequest,
     PortfolioDeleteResponse,
@@ -43,6 +44,10 @@ from src.services.portfolio_service import (
     PortfolioConflictError,
     PortfolioOversellError,
     PortfolioService,
+)
+from src.services.connected_portfolio_service import (
+    ConnectedPortfolioSnapshotService,
+    ConnectedPortfolioSnapshotUnavailable,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,6 +76,36 @@ def _serialize_import_record(item: dict) -> PortfolioImportTradeItem:
     else:
         payload["trade_date"] = str(trade_date)
     return PortfolioImportTradeItem(**payload)
+
+
+@router.get(
+    "/connected-snapshot",
+    response_model=ConnectedPortfolioSnapshotResponse,
+    responses={
+        503: {
+            "model": ErrorResponse,
+            "description": "Authoritative connected account is unavailable",
+        },
+    },
+    summary="Read the authoritative connected account Snapshot",
+    description=(
+        "GET-only projection of Athena runtime facts. It never writes the manual "
+        "portfolio ledger or invokes execution, reconciliation, or order controls."
+    ),
+    operation_id="getConnectedPortfolioSnapshot",
+)
+def get_connected_snapshot() -> ConnectedPortfolioSnapshotResponse:
+    try:
+        return ConnectedPortfolioSnapshotResponse(
+            **ConnectedPortfolioSnapshotService().get()
+        )
+    except ConnectedPortfolioSnapshotUnavailable as exc:
+        logger.warning("Connected account Snapshot unavailable: %s", exc)
+        raise api_error(
+            503,
+            "connected_snapshot_unavailable",
+            "已连接账户暂时不可用，请稍后重试。",
+        ) from exc
 
 
 @router.post(
