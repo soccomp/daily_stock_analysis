@@ -10,6 +10,7 @@ import PortfolioPage from '../PortfolioPage';
 
 const {
   getAccounts,
+  getConnectedSnapshot,
   getSnapshot,
   getRisk,
   refreshFx,
@@ -32,6 +33,7 @@ const {
   getLatestDecisionSignals,
 } = vi.hoisted(() => ({
   getAccounts: vi.fn(),
+  getConnectedSnapshot: vi.fn(),
   getSnapshot: vi.fn(),
   getRisk: vi.fn(),
   refreshFx: vi.fn(),
@@ -64,6 +66,7 @@ vi.mock('../../api/decisionSignals', () => ({
 vi.mock('../../api/portfolio', () => ({
   portfolioApi: {
     getAccounts,
+    getConnectedSnapshot,
     getSnapshot,
     getRisk,
     refreshFx,
@@ -162,6 +165,77 @@ function makeSnapshot(options: {
         positions: options.positions ?? [],
       },
     ],
+  };
+}
+
+function makeConnectedSnapshot() {
+  return {
+    schemaVersion: '1.0' as const,
+    snapshotId: 'snapshot-connected-v1',
+    accountId: 'private-simulation-account',
+    broker: 'ATHENA_DECIMAL_SIM',
+    accountMode: 'SIMULATION' as const,
+    source: 'ATHENA_RUNTIME' as const,
+    authoritative: true as const,
+    readOnly: true as const,
+    simulationOnly: true as const,
+    asOf: '2026-08-09T03:00:00Z',
+    revision: 7,
+    currency: 'HKD',
+    equity: '1000000.120000',
+    cash: '400000.120000',
+    availableCash: '399000.120000',
+    reservedCash: '1000.000000',
+    positions: [
+      {
+        symbol: '600519',
+        market: 'CN',
+        quantity: 300,
+        availableQuantity: 280,
+        avgCost: '90.120000',
+        lastPrice: '100.340000',
+        marketValue: '30102.000000',
+        unrealizedPnl: '3066.000000',
+        priceAsOf: '2026-08-09T03:00:00Z',
+        priceSource: 'ATHENA_RUNTIME',
+      },
+      {
+        symbol: '600519',
+        market: 'HK',
+        quantity: 20,
+        availableQuantity: 20,
+        avgCost: '88.000000',
+        lastPrice: '91.000000',
+        marketValue: '1820.000000',
+        unrealizedPnl: '60.000000',
+        priceAsOf: '2026-08-09T03:00:00Z',
+        priceSource: 'ATHENA_RUNTIME',
+      },
+    ],
+    activeOrders: [
+      {
+        brokerOrderId: 'order-read-only-1',
+        symbol: '600519',
+        side: 'BUY' as const,
+        quantity: 100,
+        filledQuantity: 40,
+        remainingQuantity: 60,
+        state: 'PARTIALLY_FILLED' as const,
+        reservedCash: '1000.000000',
+        submittedAt: '2026-08-09T02:59:00Z',
+      },
+    ],
+    realizedPnl: '120.000000',
+    unrealizedPnl: '3126.000000',
+    reconciliationStatus: 'DEGRADED' as const,
+    dataQuality: 'MEDIUM' as const,
+    limitations: ['部分行情来自延迟报价'],
+    brokerSnapshotRef: 'athena-sim:connected-v1',
+    traceId: 'trace-connected-v1',
+    createdAt: '2026-08-09T03:00:00Z',
+    producer: 'ATHENA_SIMULATION_RECONCILIATION',
+    contentHash: 'a'.repeat(64),
+    supersedesId: 'snapshot-connected-v0',
   };
 }
 
@@ -290,6 +364,7 @@ describe('PortfolioPage FX refresh', () => {
     window.localStorage.clear();
 
     getAccounts.mockResolvedValue(makeAccounts());
+    getConnectedSnapshot.mockResolvedValue(makeConnectedSnapshot());
     getSnapshot.mockImplementation(async ({ accountId }: { accountId?: number } = {}) => makeSnapshot({ accountId, fxStale: true }));
     getRisk.mockResolvedValue(makeRisk());
     refreshFx.mockResolvedValue({
@@ -352,6 +427,51 @@ describe('PortfolioPage FX refresh', () => {
 
     expect(getSnapshot).toHaveBeenCalledWith({ accountId: undefined, costMethod: 'fifo', includeRealtime: false });
     expect(getRisk).toHaveBeenCalledWith({ accountId: undefined, costMethod: 'fifo', includeRealtime: false });
+  });
+
+  it('separates connected facts from writable manual accounts', async () => {
+    render(<PortfolioPage />);
+    await waitForInitialLoad();
+
+    const accountSelect = screen.getAllByRole('combobox')[0];
+    expect(screen.getByRole('group', { name: '已连接账户' })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: '手工账户' })).toBeInTheDocument();
+
+    fireEvent.change(accountSelect, { target: { value: 'connected' } });
+
+    const connected = await screen.findByTestId('connected-account-view');
+    expect(within(connected).getByText('Athena 已连接账户')).toBeInTheDocument();
+    expect(within(connected).getAllByText('HKD', { exact: false }).length).toBeGreaterThan(0);
+    expect(within(connected).getAllByText('600519')).toHaveLength(3);
+    expect(within(connected).getByText('CN')).toBeInTheDocument();
+    expect(within(connected).getByText('HK')).toBeInTheDocument();
+    expect(within(connected).getAllByText('核对受限').length).toBeGreaterThan(0);
+    expect(within(connected).getAllByText('部分成交').length).toBeGreaterThan(0);
+    for (const name of ['提交交易', '提交资金流水', '提交企业行为', '提交导入', '删除账户', '刷新汇率']) {
+      expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
+    }
+    expect(createTrade).not.toHaveBeenCalled();
+    expect(createCashLedger).not.toHaveBeenCalled();
+    expect(createCorporateAction).not.toHaveBeenCalled();
+    expect(commitCsvImport).not.toHaveBeenCalled();
+    expect(deleteAccount).not.toHaveBeenCalled();
+
+    fireEvent.change(accountSelect, { target: { value: '1' } });
+    expect(await screen.findByRole('button', { name: '提交交易' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '提交资金流水' })).toBeInTheDocument();
+  });
+
+  it('shows connected unavailability explicitly without fabricating zero balances', async () => {
+    getConnectedSnapshot.mockRejectedValueOnce(new Error('worker unavailable'));
+    render(<PortfolioPage />);
+    await waitForInitialLoad();
+
+    fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: 'connected' } });
+
+    expect(await screen.findByText('已连接账户暂时不可用')).toBeInTheDocument();
+    expect(screen.getByText(/worker unavailable/)).toBeInTheDocument();
+    expect(screen.queryByText('HKD 0.00')).not.toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Main (#1)' })).toBeInTheDocument();
   });
 
   it('renders stale FX status with a manual refresh button', async () => {

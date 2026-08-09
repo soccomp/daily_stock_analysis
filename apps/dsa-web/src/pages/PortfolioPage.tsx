@@ -7,6 +7,7 @@ import type { ParsedApiError } from '../api/error';
 import { getParsedApiError } from '../api/error';
 import { ApiErrorAlert, Card, Badge, ConfirmDialog, EmptyState, InlineAlert } from '../components/common';
 import { PortfolioSignalSummary } from '../components/decision-signals/DecisionSignalDisplay';
+import ConnectedPortfolioAccountView from '../components/portfolio/ConnectedPortfolioAccountView';
 import { useUiLanguage } from '../contexts/UiLanguageContext';
 import { formatUiText } from '../i18n/uiText';
 import { PORTFOLIO_TEXT } from '../locales/featureText';
@@ -40,6 +41,7 @@ import type {
   PortfolioCorporateActionListItem,
   PortfolioCorporateActionType,
   PortfolioCostMethod,
+  ConnectedPortfolioSnapshot,
   PortfolioImportBrokerItem,
   PortfolioImportCommitResponse,
   PortfolioImportParseResponse,
@@ -62,7 +64,7 @@ const FALLBACK_BROKERS: PortfolioImportBrokerItem[] = [
   { broker: 'cmb', aliases: ['cmbchina', 'zhaoshang'], displayName: '招商' },
 ];
 
-type AccountOption = 'all' | number;
+type AccountOption = 'connected' | 'all' | number;
 type EventType = 'trade' | 'cash' | 'corporate';
 
 type FlatPosition = PortfolioPositionItem & {
@@ -191,6 +193,9 @@ const PortfolioPage: React.FC = () => {
 
   const [accounts, setAccounts] = useState<PortfolioAccountItem[]>([]);
   const [selectedAccount, setSelectedAccount] = useState<AccountOption>('all');
+  const [connectedSnapshot, setConnectedSnapshot] = useState<ConnectedPortfolioSnapshot | null>(null);
+  const [connectedLoading, setConnectedLoading] = useState(false);
+  const [connectedError, setConnectedError] = useState<string | null>(null);
   const [showCreateAccount, setShowCreateAccount] = useState(false);
   const [accountCreating, setAccountCreating] = useState(false);
   const [accountCreateError, setAccountCreateError] = useState<string | null>(null);
@@ -273,11 +278,14 @@ const PortfolioPage: React.FC = () => {
     note: '',
   });
 
-  const queryAccountId = selectedAccount === 'all' ? undefined : selectedAccount;
-  const refreshViewKey = `${selectedAccount === 'all' ? 'all' : `account:${selectedAccount}`}:cost:${costMethod}`;
+  const isConnectedSelected = selectedAccount === 'connected';
+  const queryAccountId = typeof selectedAccount === 'number' ? selectedAccount : undefined;
+  const refreshViewKey = `${typeof selectedAccount === 'number' ? `account:${selectedAccount}` : selectedAccount}:cost:${costMethod}`;
   const refreshContextRef = useRef<FxRefreshContext>({ viewKey: refreshViewKey, requestId: 0 });
   const hasAccounts = accounts.length > 0;
-  const writableAccount = selectedAccount === 'all' ? undefined : accounts.find((item) => item.id === selectedAccount);
+  const writableAccount = typeof selectedAccount === 'number'
+    ? accounts.find((item) => item.id === selectedAccount)
+    : undefined;
   const writableAccountId = writableAccount?.id;
   const writeBlocked = !writableAccountId;
   const canDeleteSelectedAccount = Boolean(writableAccountId) && !isLoading && !fxRefreshing && !accountDeleteLoading;
@@ -301,13 +309,28 @@ const PortfolioPage: React.FC = () => {
       const items = response.accounts || [];
       setAccounts(items);
       setSelectedAccount((prev) => {
+        if (prev === 'connected') return prev;
         if (items.length === 0) return 'all';
-        if (prev !== 'all' && !items.some((item) => item.id === prev)) return items[0].id;
+        if (typeof prev === 'number' && !items.some((item) => item.id === prev)) return items[0].id;
         return prev;
       });
       if (items.length === 0) setShowCreateAccount(true);
     } catch (err) {
       setError(getParsedApiError(err));
+    }
+  }, []);
+
+  const loadConnectedSnapshot = useCallback(async () => {
+    setConnectedLoading(true);
+    try {
+      const item = await portfolioApi.getConnectedSnapshot();
+      setConnectedSnapshot(item);
+      setConnectedError(null);
+    } catch (err) {
+      setConnectedSnapshot(null);
+      setConnectedError(getParsedApiError(err).message || '无法读取 Athena 权威账户快照。');
+    } finally {
+      setConnectedLoading(false);
     }
   }, []);
 
@@ -338,6 +361,7 @@ const PortfolioPage: React.FC = () => {
   }, [selectedBroker]);
 
   const loadSnapshotAndRisk = useCallback(async () => {
+    if (isConnectedSelected) return;
     setIsLoading(true);
     setRiskWarning(null);
     try {
@@ -368,9 +392,10 @@ const PortfolioPage: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [queryAccountId, costMethod]);
+  }, [queryAccountId, costMethod, isConnectedSelected]);
 
   const loadEventsPage = useCallback(async (page: number) => {
+    if (isConnectedSelected) return;
     setEventLoading(true);
     try {
       if (eventType === 'trade') {
@@ -422,6 +447,7 @@ const PortfolioPage: React.FC = () => {
     eventSide,
     eventSymbol,
     eventType,
+    isConnectedSelected,
     queryAccountId,
   ]);
 
@@ -436,7 +462,8 @@ const PortfolioPage: React.FC = () => {
   useEffect(() => {
     void loadAccounts();
     void loadBrokers();
-  }, [loadAccounts, loadBrokers]);
+    void loadConnectedSnapshot();
+  }, [loadAccounts, loadBrokers, loadConnectedSnapshot]);
 
   useEffect(() => {
     void loadSnapshotAndRisk();
@@ -836,6 +863,10 @@ const PortfolioPage: React.FC = () => {
   };
 
   const handleRefresh = async () => {
+    if (isConnectedSelected) {
+      await loadConnectedSnapshot();
+      return;
+    }
     await Promise.all([loadAccounts(), loadSnapshotAndRisk(), loadEvents(), loadBrokers()]);
     setPortfolioSignalsRefreshKey((current) => current + 1);
   };
@@ -965,25 +996,34 @@ const PortfolioPage: React.FC = () => {
             {text.description}
           </p>
         </div>
-        {hasAccounts ? (
-          <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3">
+        <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3">
             <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_220px_280px] gap-2 items-end">
               <div>
                 <p className="text-xs text-secondary mb-1">{text.accountView}</p>
                 <select
                   value={String(selectedAccount)}
-                  onChange={(e) => setSelectedAccount(e.target.value === 'all' ? 'all' : Number(e.target.value))}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setSelectedAccount(value === 'connected' || value === 'all' ? value : Number(value));
+                  }}
                   className={PORTFOLIO_SELECT_CLASS}
                 >
-                  <option value="all">{text.allAccounts}</option>
-                  {accounts.map((account) => (
-                    <option key={account.id} value={account.id}>
-                      {account.name} (#{account.id})
+                  <optgroup label="已连接账户">
+                    <option value="connected">
+                      Athena · {connectedSnapshot?.broker || (connectedError ? '暂时不可用' : '权威模拟账户')}
                     </option>
-                  ))}
+                  </optgroup>
+                  <optgroup label="手工账户">
+                    <option value="all">{text.allAccounts}</option>
+                    {accounts.map((account) => (
+                      <option key={account.id} value={account.id}>
+                        {account.name} (#{account.id})
+                      </option>
+                    ))}
+                  </optgroup>
                 </select>
               </div>
-              <div>
+              {!isConnectedSelected ? <div>
                 <p className="text-xs text-secondary mb-1">{text.costMethod}</p>
                 <select
                   value={costMethod}
@@ -993,9 +1033,9 @@ const PortfolioPage: React.FC = () => {
                   <option value="fifo">{text.fifo}</option>
                   <option value="avg">{text.avg}</option>
                 </select>
-              </div>
+              </div> : <div className="text-xs text-secondary">连接账户按 Athena 原始币种与事实口径展示。</div>}
               <div className="flex flex-wrap gap-2">
-                <button
+                {!isConnectedSelected ? <button
                   type="button"
                   className="btn-secondary text-sm flex-1"
                   onClick={() => {
@@ -1005,33 +1045,33 @@ const PortfolioPage: React.FC = () => {
                   }}
                 >
                   {showCreateAccount ? text.collapseCreate : text.createAccount}
-                </button>
+                </button> : null}
                 <button
                   type="button"
                   onClick={() => void handleRefresh()}
-                  disabled={isLoading || fxRefreshing}
+                  disabled={isConnectedSelected ? connectedLoading : isLoading || fxRefreshing}
                   className="btn-secondary text-sm flex-1"
                 >
-                  {isLoading ? text.refreshing : text.refreshData}
+                  {(isConnectedSelected ? connectedLoading : isLoading) ? text.refreshing : text.refreshData}
                 </button>
-                <button
+                {!isConnectedSelected ? <button
                   type="button"
                   onClick={openAccountDeleteDialog}
                   disabled={!canDeleteSelectedAccount}
                   className="btn-secondary text-sm flex-1 border-red-400/40 text-red-100 hover:bg-red-500/15 disabled:border-white/10 disabled:text-secondary"
                 >
                   {accountDeleteLoading ? text.deletingAccount : text.deleteAccount}
-                </button>
+                </button> : null}
               </div>
             </div>
           </div>
-        ) : (
+        {!hasAccounts && !isConnectedSelected ? (
           <InlineAlert
             variant="warning"
             className="inline-block rounded-lg px-3 py-2 text-xs shadow-none"
             message={text.noAccounts}
           />
-        )}
+        ) : null}
       </section>
 
       {error ? <ApiErrorAlert error={error} onDismiss={() => setError(null)} /> : null}
@@ -1057,6 +1097,15 @@ const PortfolioPage: React.FC = () => {
         />
       ) : null}
 
+      {isConnectedSelected ? (
+        <ConnectedPortfolioAccountView
+          snapshot={connectedSnapshot}
+          loading={connectedLoading}
+          error={connectedError}
+          onRefresh={() => void loadConnectedSnapshot()}
+        />
+      ) : (
+        <>
       {(showCreateAccount || !hasAccounts) ? (
         <Card padding="md">
           <div className="flex items-center justify-between gap-2">
@@ -1676,6 +1725,8 @@ const PortfolioPage: React.FC = () => {
           }
         }}
       />
+        </>
+      )}
     </div>
   );
 };
