@@ -797,7 +797,7 @@ describe('PortfolioPage FX refresh', () => {
     render(<PortfolioPage />);
 
     expect(await screen.findByText('已加载风险')).toBeInTheDocument();
-    expect(await screen.findByText('AI 建议降级')).toBeInTheDocument();
+    expect(await screen.findByText('研究建议受限')).toBeInTheDocument();
     expect(screen.getByText(/latest AAPL failed/)).toBeInTheDocument();
   });
 

@@ -197,6 +197,9 @@ def test_scorecard_api_requires_a_real_valid_admin_session(tmp_path, monkeypatch
         def get(self, decision_id):
             return {"item": {"decision_id": decision_id, "read_only": True}}
 
+        def list(self, **_filters):
+            return {"items": [], "total": 0, "page": 1, "page_size": 20}
+
     monkeypatch.setattr(
         decision_scorecards,
         "DecisionScorecardService",
@@ -208,6 +211,7 @@ def test_scorecard_api_requires_a_real_valid_admin_session(tmp_path, monkeypatch
         unauthenticated = client.get("/api/v1/decision-scorecards/decision-auth")
         assert unauthenticated.status_code == 401
         assert unauthenticated.json()["error"] == "unauthorized"
+        assert client.get("/api/v1/decision-scorecards").status_code == 401
 
         invalid = client.get(
             "/api/v1/decision-scorecards/decision-auth",
@@ -215,6 +219,11 @@ def test_scorecard_api_requires_a_real_valid_admin_session(tmp_path, monkeypatch
         )
         assert invalid.status_code == 401
         assert invalid.json()["error"] == "unauthorized"
+        invalid_list = client.get(
+            "/api/v1/decision-scorecards",
+            headers={"Cookie": f"{auth.COOKIE_NAME}=forged-session"},
+        )
+        assert invalid_list.status_code == 401
 
         login = client.post(
             "/api/v1/auth/login",
@@ -227,6 +236,14 @@ def test_scorecard_api_requires_a_real_valid_admin_session(tmp_path, monkeypatch
         assert authenticated.status_code == 200, authenticated.text
         assert authenticated.json() == {
             "item": {"decision_id": "decision-auth", "read_only": True}
+        }
+        authenticated_list = client.get("/api/v1/decision-scorecards")
+        assert authenticated_list.status_code == 200
+        assert authenticated_list.json() == {
+            "items": [],
+            "total": 0,
+            "page": 1,
+            "page_size": 20,
         }
     finally:
         DatabaseManager.reset_instance()

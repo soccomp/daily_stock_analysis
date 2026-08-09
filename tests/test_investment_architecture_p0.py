@@ -190,3 +190,29 @@ def test_m3_keeps_athena_and_broker_dependencies_outside_dsa_brain() -> None:
     ).read_text(encoding="utf-8")
     assert "for attempt" not in transport_source
     assert "while " not in transport_source
+
+
+def test_ui_v1_investment_decision_surface_is_observational_only() -> None:
+    paths = (
+        ROOT / "apps/dsa-web/src/api/investmentDecisions.ts",
+        ROOT / "apps/dsa-web/src/pages/InvestmentDecisionsPage.tsx",
+        ROOT
+        / "apps/dsa-web/src/components/investment-decisions/DecisionScorecardDrawer.tsx",
+        ROOT / "src/services/decision_scorecard_service.py",
+        ROOT / "api/v1/endpoints/decision_scorecards.py",
+    )
+    source = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+    forbidden_fragments = (
+        "apiClient.post(",
+        "apiClient.put(",
+        "apiClient.patch(",
+        "apiClient.delete(",
+        "create_mandate(",
+        "submit_order(",
+        "dispatch(",
+        "retry(",
+        "reconcile(",
+        "cancel_order(",
+        "capture_snapshot(",
+    )
+    assert not any(fragment in source for fragment in forbidden_fragments)

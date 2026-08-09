@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Optional, TYPE_CHECKING
+from datetime import datetime
+from typing import Any, Optional, TYPE_CHECKING
 
 from src.investment.scorecard import SingleDecisionScorecard
 from src.repositories.decision_scorecard_repo import DecisionScorecardRepository
@@ -92,3 +93,96 @@ class DecisionScorecardService:
         ):
             raise ValueError("persisted decision scorecard metadata mismatch")
         return {"item": scorecard.to_payload()}
+
+    def list(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        symbol: str | None = None,
+        action: str | None = None,
+        mode: str | None = None,
+        source_report_id: int | None = None,
+    ) -> dict:
+        """List validated immutable scorecards without creating new state."""
+
+        if page < 1 or page_size < 1:
+            raise ValueError("page and page_size must be positive")
+        normalized_symbol = symbol.strip().upper() if symbol else None
+        normalized_action = action.strip().upper() if action else None
+        normalized_mode = mode.strip().upper() if mode else None
+        rows = self.repository.list_ordered(
+            symbol=normalized_symbol,
+            action=normalized_action,
+        )
+        summaries: list[tuple[datetime, str, dict[str, Any]]] = []
+        for row in rows:
+            scorecard = SingleDecisionScorecard.from_json(row.payload_json)
+            if (
+                scorecard.decision_id != row.decision_id
+                or scorecard.scorecard_hash != row.payload_hash
+            ):
+                raise ValueError("persisted decision scorecard metadata mismatch")
+            if source_report_id is not None and scorecard.source_report_id != source_report_id:
+                continue
+            diagnostics = scorecard.execution_diagnostics
+            scorecard_mode = diagnostics.get("mode")
+            if normalized_mode is not None and scorecard_mode != normalized_mode:
+                continue
+            summaries.append(
+                (scorecard.created_at, scorecard.decision_id, self._summary(scorecard))
+            )
+
+        summaries.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        total = len(summaries)
+        start = (page - 1) * page_size
+        return {
+            "items": [item[2] for item in summaries[start : start + page_size]],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+
+    @staticmethod
+    def _summary(scorecard: SingleDecisionScorecard) -> dict[str, Any]:
+        decision = scorecard.investment_decision
+        diagnostics = scorecard.execution_diagnostics
+        latest_result = scorecard.execution_results[-1] if scorecard.execution_results else None
+
+        def observed(name: str) -> Any:
+            value = getattr(latest_result, name) if latest_result is not None else None
+            return value if value is not None else diagnostics.get(name)
+
+        return {
+            "decision_id": decision.decision_id,
+            "created_at": scorecard.to_payload()["created_at"],
+            "source_report_id": scorecard.source_report_id,
+            "account_id": decision.account_id,
+            "symbol": decision.symbol,
+            "market": decision.market,
+            "action": decision.action,
+            "current_quantity": decision.current_quantity,
+            "target_quantity": decision.target_quantity,
+            "delta_quantity": decision.delta_quantity,
+            "confidence": str(decision.confidence),
+            "rationale": decision.rationale,
+            "mode": diagnostics.get("mode"),
+            "execution_status": observed("execution_state") if latest_result is None else latest_result.status,
+            "reconciliation_status": (
+                observed("reconciliation_state")
+                if latest_result is None
+                else latest_result.reconciliation_status
+            ),
+            "requested_quantity": observed("requested_quantity"),
+            "submitted_quantity": observed("submitted_quantity"),
+            "filled_quantity": observed("filled_quantity"),
+            "remaining_quantity": observed("remaining_quantity"),
+            "average_fill_price": (
+                None
+                if observed("average_fill_price") is None
+                else str(observed("average_fill_price"))
+            ),
+            "block_reason": None if latest_result is None else latest_result.block_reason,
+            "broker_reason": None if latest_result is None else latest_result.broker_reason,
+            "snapshot_b_available": scorecard.portfolio_snapshot_b is not None,
+        }

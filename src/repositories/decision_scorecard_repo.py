@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import desc, select
 from sqlalchemy.exc import IntegrityError
 
 from src.storage import DatabaseManager, SingleDecisionScorecardRecord
@@ -80,6 +80,30 @@ class DecisionScorecardRepository:
                 .where(SingleDecisionScorecardRecord.decision_id == decision_id)
                 .limit(1)
             ).scalar_one_or_none()
+
+    def list_ordered(
+        self,
+        *,
+        symbol: str | None = None,
+        action: str | None = None,
+    ) -> list[SingleDecisionScorecardRecord]:
+        """Return immutable rows newest first for read-only projection.
+
+        Payload-owned filters such as scorecard mode are applied by the service
+        only after each persisted payload has passed canonical validation.
+        """
+
+        query = select(SingleDecisionScorecardRecord)
+        if symbol is not None:
+            query = query.where(SingleDecisionScorecardRecord.symbol == symbol)
+        if action is not None:
+            query = query.where(SingleDecisionScorecardRecord.action == action)
+        query = query.order_by(
+            desc(SingleDecisionScorecardRecord.created_at),
+            desc(SingleDecisionScorecardRecord.id),
+        )
+        with self.db.get_session() as session:
+            return list(session.execute(query).scalars().all())
 
     @staticmethod
     def _assert_same(

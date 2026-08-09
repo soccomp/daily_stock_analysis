@@ -127,16 +127,20 @@ describe('SidebarNav', () => {
     expect(alertsLink).toHaveClass('font-medium');
   });
 
-  it('renders the AI signals navigation item and marks it active', () => {
+  it('renders research and investment decision navigation without changing the research URL', () => {
     render(
       <MemoryRouter initialEntries={['/decision-signals']}>
         <SidebarNav />
       </MemoryRouter>,
     );
 
-    const signalsLink = screen.getByRole('link', { name: 'AI 建议' });
+    const signalsLink = screen.getByRole('link', { name: '研究建议' });
     expect(signalsLink).toHaveAttribute('href', '/decision-signals');
     expect(signalsLink).toHaveClass('font-medium');
+    expect(screen.getByRole('link', { name: '投资决策' })).toHaveAttribute(
+      'href',
+      '/investment-decisions',
+    );
   });
 
   it('opens the logout confirmation and confirms logout', async () => {

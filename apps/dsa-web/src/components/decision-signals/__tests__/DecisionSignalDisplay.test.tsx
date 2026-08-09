@@ -58,7 +58,7 @@ describe('DecisionSignalCard', () => {
     expect(screen.getByText('1600 - 1620')).toBeInTheDocument();
     expect(screen.getByText('业绩窗口')).toBeInTheDocument();
     expect(screen.getByText('跌破 1550')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '查看 贵州茅台 AI 建议详情' }));
+    fireEvent.click(screen.getByRole('button', { name: '查看 贵州茅台 研究建议详情' }));
 
     expect(onSelect).toHaveBeenCalledWith(signal);
     expect(screen.getByText('3 日')).toBeInTheDocument();
@@ -73,7 +73,7 @@ describe('DecisionSignalCard', () => {
     renderCard();
 
     expect(screen.getByText('贵州茅台')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '查看 贵州茅台 AI 建议详情' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '查看 贵州茅台 研究建议详情' })).not.toBeInTheDocument();
   });
 
   it('hides missing optional plan text for sparse legacy signals', () => {
