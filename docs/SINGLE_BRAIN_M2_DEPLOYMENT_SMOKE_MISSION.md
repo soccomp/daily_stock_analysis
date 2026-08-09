@@ -1,10 +1,10 @@
 # Single Brain M2 Deployment Smoke Mission
 
-**Version:** 1.4
+**Version:** 1.5
 
 **Approved:** 2026-08-09
 
-**Mission status:** CLOSEOUT RESUME APPROVED — S2 EVIDENCE REMAINS IMMUTABLE
+**Mission status:** DEPLOYMENT SMOKE PASS
 
 **Normative parents:**
 
@@ -382,3 +382,58 @@ event evidence, a changed reserved-cash value, or an unattributed difference is
 still a hard stop. The existing completed S2 cycle, ResearchBundle, decision,
 and M2 shadow scorecard remain immutable accepted evidence; closeout must not
 rerun S2 or create a replacement cycle.
+
+## 15. Deployment Smoke closeout resume — 2026-08-09
+
+The Owner-approved Section 14 rule was published at DSA
+`athena-integration@621a54853448c4f875edc01e6cdc613db149b51f` before this
+closeout resumed. No DSA or Athena product code, deployed configuration,
+service, scheduler, credential, plist, or runtime process was changed.
+
+### Immutable S2 evidence — revalidated
+
+- The existing completed cycle remains
+  `m2-cycle-8438dd415f3ef5ac66eecbc37da7f509893fedb8`, with exactly one
+  persisted symbol record for `000977` and duplicate-trigger count `1`.
+- Its original authoritative Snapshot A hash remains
+  `80c0b2b11a49ea0f7e53e2db0056d647b057f16bf730b1f04a8798db196fe1b9`.
+- Its decision remains
+  `decision-m2-6c8d4e22ff58fe2e6114fae538300cc94508810d`; its immutable M2
+  shadow scorecard hash remains
+  `f02ca2d0f0d1b157cdf52d58d7bcf9ea20e7da6c2bda7d93ea181135caed4fa7`.
+- The scorecard remains `OFF / NOT_AUTHORIZED`, with no ExecutionMandate,
+  ExecutionResult, or PortfolioSnapshot B. The matching persisted analysis and
+  single scorecard counts remain unchanged.
+
+### Cash closeout rule — satisfied without canonical mutation
+
+The previously observed `+0.00000000012` available-cash difference was already
+attributed to `NUMERIC_REPRESENTATION_JITTER` at the binary64 broker boundary.
+It is less than `0.01` CNY and compares equal at the CNY quantum. The recorded
+evidence also establishes unchanged reserved cash, position quantity/availability/cost,
+active orders, historical orders, executions, equity/nav, and realized PnL, with
+no settlement, fee, dividend, funding, cash-event, submit, cancel, retry,
+reconcile, mandate-dispatch, or execution-lifecycle evidence. This establishes
+Smoke-only zero-mutation semantic equivalence; it did not alter the original or
+later canonical snapshot values, hashes, or decision inputs.
+
+### S3 and final safety state — PASS
+
+- The deployed `--webui-only` DSA service remains loopback-only. Local
+  `GET /api/v1/single-brain/m2/readiness` returned `200`, reported the existing
+  completed cycle, decision, symbol, Athena Runtime portfolio authority, and
+  `execution_authorization=OFF`.
+- The OpenAPI surface exposes the M2 readiness route as `GET` only. It has no
+  mutation, retry, submission, reconciliation, portfolio, or execution-control
+  method. `ADMIN_AUTH_ENABLED=false` remains the Owner-approved policy.
+- Normal DSA scheduling, P1A shadow wiring, P1B canary, and M2 remain OFF.
+  Athena remains `LIVE_TRADING=false`, simulation-only, reconciled, and
+  reachable only through the existing loopback path.
+- Final read-only evidence retained zero active orders, one historical order,
+  one historical execution, and unchanged sanitized trading-evidence digest
+  `d576c77542302cf6b23548c5af5f4511cbf165917ef54a3d25892c0537840853`.
+  No new mandate, result, Snapshot B, submission, cancellation, retry,
+  reconciliation, or portfolio mutation occurred.
+
+Deployment Smoke is complete. This closeout does not authorize recurring M2,
+execution, live trading, or any new deployment change.
