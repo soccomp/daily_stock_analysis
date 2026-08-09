@@ -2,7 +2,7 @@
 
 **Current Mission:** M3 — Autonomous Simulation Trading v1  
 **Canonical mission spec:** `docs/SINGLE_BRAIN_M3_AUTONOMOUS_SIMULATION_TRADING_V1_MISSION.md`  
-**Status:** M3 SIMULATION EXECUTION REVIEW GATE
+**Status:** M3 AUTONOMOUS SIMULATION TRADING V1 PASS
 **Recommended Codex mode:** Sol  
 **Recommended reasoning:** 极高
 
@@ -19,8 +19,11 @@ Follow Autonomous Mission Execution Policy v1.0:
 - Owner escalation: only for genuine Owner-level product/risk/security/real-money decisions;
 - do not split implementation, testing, deployment preparation, canary, reconciliation, and closeout into separate Owner-managed missions.
 
-The one planned human gate for M3 is:
+The one planned human gate for M3 was approved and closed:
 
 `M3 SIMULATION EXECUTION REVIEW GATE`
 
-Stop there before the first broker-mutating simulation order in the running deployment. Before that gate, complete the maximum safe implementation/test/review preparation autonomously.
+M3 is now the active long-running simulation-only operating baseline. Future
+missions must continue to preserve Single Brain authority, exact-quantity or
+zero-submit execution, durable UNKNOWN/restart semantics, and
+`LIVE_TRADING=false` unless a new Owner mission explicitly changes scope.

@@ -1,7 +1,7 @@
 # Single Brain M3 Implementation Status
 
 **Status date:** 2026-08-09
-**State:** REVIEW READY — NO DEPLOYMENT MUTATION PERFORMED
+**State:** M3 AUTONOMOUS SIMULATION TRADING V1 PASS
 **Mission authority:** `docs/SINGLE_BRAIN_M3_AUTONOMOUS_SIMULATION_TRADING_V1_MISSION.md`
 
 ## Implemented boundary
@@ -34,24 +34,39 @@ The existing `p1-scorecard-v1` family remains backward compatible. M3 closes the
 - Existing M2 clock-skew, snapshot authority, policy, sizing, shared-lock, and deduplication checks remain active.
 - Readiness reports mode, authorization, the single scheduler authority, and durable M3 state.
 
-## Review-gate state
+## Deployment and activation
 
-No accepted integration branch, deployed DSA process, environment, scheduler, database, plist, or Athena Worker was changed by this implementation phase. No broker submit/cancel/retry/reconcile operation was called against the deployed runtime. The first deployed simulation-account mutation remains blocked pending the canonical M3 review decision.
+The Owner review gate passed. Canonical integration merges were deployed with
+reversible backups: DSA `athena-integration@923cb09` and Athena M3 runtime
+`integration@1d2418f`, followed by two narrow accepted deployment repairs at
+Athena `integration@a972cd8` and `integration@27f440a`. The DSA service remains
+`--webui-only` on loopback with `ADMIN_AUTH_ENABLED=false` under the Owner's
+existing local passwordless policy.
 
-The non-mutating deployed preflight confirmed the current DSA service is still
-the accepted M2 `--webui-only` loopback deployment with one 3600-second
-`M2_SHADOW_ONLY` authority and execution authorization OFF. Its SQLite
-`PRAGMA quick_check` is `ok`. The authoritative Athena snapshot GET remains
-healthy, authoritative, read-only, reconciled and simulation-only with
-`LIVE_TRADING=false`. The currently deployed Worker still reports its existing
-legacy controlled-experiment mode; therefore M3 activation must replace that
-mode, never coexist with it. The proposed Athena Worker enforces this mutual
-exclusion.
+There is exactly one recurring `M3_SIMULATION_EXECUTION_ONLY` authority at the
+unchanged 3600-second cadence. P1A/P1B remain OFF. The Worker uses its existing
+single Scheduled Task and loopback listener, the legacy experiment action is
+unreachable, `LIVE_TRADING=false`, and the account is simulation-only.
+
+Two genuine scheduled Brain cycles produced ADD with final delta quantity 900.
+For both, the projected mandate and requested quantity were exactly 900. The
+first submitted zero because the current authoritative Snapshot failed the
+pre-fix clock ordering check. After the post-capture validation-clock repair,
+all Snapshot authority, expected-position and conflict checks passed; the
+second submitted zero because the market session was closed. This is the
+constitutional exact-or-zero outcome. No production decision was forged and
+no cadence was accelerated.
+
+Both cycles persisted complete single-scorecard lineage through authoritative
+Snapshot B. Snapshot A/B account facts were unchanged, and broker positions,
+active orders, historical orders and executions remained unchanged. DSA
+restart deduplicated the same logical cycle without new analysis, decision,
+scorecard or dispatch. Athena restart preserved both durable intent/result
+pairs without replay.
 
 ## Verification
 
-- DSA focused P0/P1/M2/M3, cross-repository and architecture suite:
-  `127 passed`.
+- DSA focused cross-repository M3 and architecture suite: `28 passed`.
 - DSA architecture dependency suite: `8 passed`.
 - DSA full gate (`scripts/ci_gate.sh all`): `5871 passed`, `4 deselected`,
   `501 subtests passed`; syntax, critical flake8 and deterministic checks also
@@ -60,15 +75,16 @@ exclusion.
   `ATHENA_REPO` to the sibling M3 worktree in the DSA focused suite.
 - `git diff --check` passes and no credential/account payload is included.
 
-## Known residual risks for gate review
+## Known residual risks
 
-- Activation requires coordinated DSA and Athena deployment because the current Worker is read-only and the new endpoint is absent until Athena is upgraded.
 - M3 uses the existing local-only trust boundary; it does not broaden authentication or network exposure.
 - Worker trading-session authorization uses an explicit operator-supplied trading-day set and must be maintained by the deployment procedure; it does not infer or accelerate cadence.
 - A broker response without a usable correlation identity remains UNKNOWN and cannot be blindly retried; operator reconciliation may be required.
+- The observed production cycles occurred while the CN market was closed, so
+  Athena correctly submitted zero. Deterministic integration coverage remains
+  the evidence for exact filled/partial/UNKNOWN broker paths until a future
+  genuine Brain BUY/ADD reaches an authorized open session.
 
-## Gate
+## Terminal state
 
-Next allowed state-changing action is only after approval of:
-
-`M3 SIMULATION EXECUTION REVIEW GATE`.
+`M3 AUTONOMOUS SIMULATION TRADING V1 PASS`
