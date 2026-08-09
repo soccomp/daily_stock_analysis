@@ -161,3 +161,32 @@ def test_m2_runtime_path_has_no_execution_or_broker_dependency() -> None:
     }
     assert called.isdisjoint(forbidden_calls)
     assert {"ExecutionMandate", "ExecutionResult"}.isdisjoint(referenced)
+
+
+def test_m3_keeps_athena_and_broker_dependencies_outside_dsa_brain() -> None:
+    protected = _python_files("src/investment/research") + _python_files(
+        "src/investment/decision"
+    )
+    protected_imports = _imported_modules(protected)
+    assert not any(
+        "m3" in module
+        or "execution_transport" in module
+        or "athena" in module.lower()
+        or "broker" in module.lower()
+        for module in protected_imports
+    )
+
+    m3_paths = _python_files("src/investment/m3")
+    m3_imports = _imported_modules(m3_paths)
+    assert not any(
+        module.startswith("athena")
+        or module.startswith("gmtrade")
+        or module.startswith("src.brokers")
+        for module in m3_imports
+    )
+
+    transport_source = (
+        ROOT / "src/investment/integration/execution_transport.py"
+    ).read_text(encoding="utf-8")
+    assert "for attempt" not in transport_source
+    assert "while " not in transport_source

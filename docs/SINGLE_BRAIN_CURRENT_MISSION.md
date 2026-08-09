@@ -2,7 +2,7 @@
 
 **Current Mission:** M3 — Autonomous Simulation Trading v1  
 **Canonical mission spec:** `docs/SINGLE_BRAIN_M3_AUTONOMOUS_SIMULATION_TRADING_V1_MISSION.md`  
-**Status:** READY TO START  
+**Status:** M3 SIMULATION EXECUTION REVIEW GATE
 **Recommended Codex mode:** Sol  
 **Recommended reasoning:** 极高
 

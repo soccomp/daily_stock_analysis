@@ -50,6 +50,12 @@ class ShadowLineageStore(Protocol):
     def persist_shadow(self, artifacts: Any) -> dict[str, Any]: ...
 
 
+class M3ExecutionCoordinator(Protocol):
+    def process(self, artifacts: Any) -> Any: ...
+
+    def recover_pending(self) -> Any: ...
+
+
 @dataclass(frozen=True)
 class AnalysisCompletion:
     result: AnalysisResult
@@ -76,11 +82,13 @@ class DSAAnalysisCompletionRunner:
         config: Config,
         db_manager: DatabaseManager | None = None,
         pipeline_factory: Callable[..., Any] | None = None,
+        query_source: str = "single_brain_m2_shadow",
     ) -> None:
         self._config = config
         self._db = db_manager or DatabaseManager.get_instance()
         self._history = HistoryService(db_manager=self._db)
         self._pipeline_factory = pipeline_factory or self._default_pipeline_factory
+        self._query_source = query_source
 
     def complete(
         self,
@@ -103,7 +111,7 @@ class DSAAnalysisCompletionRunner:
             max_workers=1,
             query_id=query_id,
             trace_id=cycle_id,
-            query_source="single_brain_m2_shadow",
+            query_source=self._query_source,
             save_context_snapshot=True,
             investment_runtime_paths_disabled=True,
         )
@@ -168,6 +176,7 @@ class M2ShadowLoopService:
         analysis_runner: DSAAnalysisCompletionRunner,
         lineage_store: ShadowLineageStore,
         repository: M2OperationalRepository,
+        execution_coordinator: M3ExecutionCoordinator | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._config = config
@@ -176,6 +185,7 @@ class M2ShadowLoopService:
         self._analysis_runner = analysis_runner
         self._lineage_store = lineage_store
         self._repository = repository
+        self._execution_coordinator = execution_coordinator
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     @classmethod
@@ -187,6 +197,62 @@ class M2ShadowLoopService:
         from src.services.decision_scorecard_service import DecisionScorecardService
 
         db = DatabaseManager.get_instance()
+        execution_mode = str(
+            getattr(config, "single_brain_execution_mode", "SHADOW") or "SHADOW"
+        ).strip().upper()
+        execution_authorized = bool(
+            getattr(config, "single_brain_simulation_execution_authorized", False)
+        )
+        if execution_mode not in {"SHADOW", "SIMULATION_EXECUTION"}:
+            raise M2ShadowBlocked("Single Brain execution mode is invalid")
+        if execution_mode == "SHADOW" and execution_authorized:
+            raise M2ShadowBlocked("shadow mode contradicts execution authorization")
+        execution_coordinator = None
+        if execution_mode == "SIMULATION_EXECUTION":
+            if not execution_authorized:
+                raise M2ShadowBlocked("simulation execution authorization is OFF")
+            if (
+                getattr(config, "investment_shadow_wiring_enabled", False)
+                or getattr(config, "investment_canary_enabled", False)
+            ):
+                raise M2ShadowBlocked("P1A and P1B must remain OFF for M3")
+            execution_url = str(
+                getattr(config, "single_brain_m3_execution_url", "") or ""
+            ).strip()
+            execution_symbols = frozenset(
+                str(value).strip()
+                for value in (
+                    getattr(config, "single_brain_m3_execution_symbols", ()) or ()
+                )
+                if str(value).strip()
+            )
+            if (
+                not execution_url
+                or not execution_symbols
+                or any(
+                    len(symbol) != 6 or not symbol.isdigit()
+                    for symbol in execution_symbols
+                )
+            ):
+                raise M2ShadowBlocked("M3 execution endpoint and allowlist are required")
+            from src.investment.integration.execution_transport import (
+                CanonicalHttpAthenaExecutionTransport,
+            )
+            from src.investment.m3.orchestration import (
+                M3SimulationExecutionCoordinator,
+            )
+            from src.investment.m3.repository import M3ExecutionRepository
+
+            execution_coordinator = M3SimulationExecutionCoordinator(
+                transport=CanonicalHttpAthenaExecutionTransport(
+                    url=execution_url,
+                    timeout_seconds=config.single_brain_m3_execution_timeout_seconds,
+                ),
+                repository=M3ExecutionRepository(db),
+                scorecard_store=DecisionScorecardService(db_manager=db),
+                m2_repository=M2OperationalRepository(db),
+                allowed_symbols=execution_symbols,
+            )
         return cls(
             config=config,
             snapshot_source=CanonicalHttpPortfolioSnapshotSource(
@@ -194,14 +260,38 @@ class M2ShadowLoopService:
                 timeout_seconds=config.single_brain_m2_snapshot_timeout_seconds,
             ),
             policy_source=CanonicalRiskPolicyLoader(config.single_brain_m2_risk_policy_path),
-            analysis_runner=DSAAnalysisCompletionRunner(config=config, db_manager=db),
+            analysis_runner=DSAAnalysisCompletionRunner(
+                config=config,
+                db_manager=db,
+                query_source=(
+                    "single_brain_m3_simulation_execution"
+                    if execution_coordinator is not None
+                    else "single_brain_m2_shadow"
+                ),
+            ),
             lineage_store=DecisionScorecardService(db_manager=db),
             repository=M2OperationalRepository(db),
+            execution_coordinator=execution_coordinator,
         )
 
     def run_cycle(self, *, scheduled_for: datetime | None = None) -> M2ShadowRunResult:
         if not bool(getattr(self._config, "single_brain_m2_enabled", False)):
             return M2ShadowRunResult(cycle_id=None, status="DISABLED")
+        if self._execution_coordinator is not None:
+            try:
+                recovery = self._execution_coordinator.recover_pending()
+            except Exception as exc:
+                return M2ShadowRunResult(
+                    cycle_id=None,
+                    status="FAILED_CLOSED",
+                    blocked_reasons=(f"M3 recovery failed: {type(exc).__name__}: {exc}",),
+                )
+            if recovery.pending_decision_ids:
+                return M2ShadowRunResult(
+                    cycle_id=None,
+                    status="PENDING_RECONCILIATION",
+                    blocked_reasons=("prior M3 mandate requires reconciliation",),
+                )
         now = self._aware_now()
         account_id = str(getattr(self._config, "single_brain_m2_account_id", "") or "").strip()
         if not account_id:
@@ -288,6 +378,7 @@ class M2ShadowLoopService:
 
         persisted: list[str] = []
         blocked: list[str] = []
+        execution_pending = False
         for scope in symbols:
             symbol = scope["symbol"]
             query_id = analysis_query_id(cycle=cycle, symbol=symbol)
@@ -331,25 +422,45 @@ class M2ShadowLoopService:
                     context_snapshot=completion.context_snapshot,
                     source_report_id=completion.source_report_id,
                     trace_id=cycle,
-                    trigger_source="single_brain_m2_shadow",
+                    trigger_source=(
+                        "single_brain_m3_simulation_execution"
+                        if self._execution_coordinator is not None
+                        else "single_brain_m2_shadow"
+                    ),
                     portfolio_snapshot=snapshot,
                     risk_policy=policy,
                     decision_cycle_id=cycle,
                     decision_id=stable_decision_id,
                     allow_nonpositive_return=True,
                 )
-                self._lineage_store.persist_shadow(artifacts)
                 decision = artifacts.investment_decision
-                self._repository.mark_symbol_persisted(
-                    cycle_id=cycle,
-                    symbol=symbol,
-                    source_report_id=completion.source_report_id,
-                    research_id=artifacts.research_bundle.research_id,
-                    decision_id=decision.decision_id,
-                    decision_action=decision.action,
-                    rationale_summary=decision.rationale,
-                )
-                persisted.append(decision.decision_id)
+                if self._execution_coordinator is None:
+                    self._lineage_store.persist_shadow(artifacts)
+                    self._repository.mark_symbol_persisted(
+                        cycle_id=cycle,
+                        symbol=symbol,
+                        source_report_id=completion.source_report_id,
+                        research_id=artifacts.research_bundle.research_id,
+                        decision_id=decision.decision_id,
+                        decision_action=decision.action,
+                        rationale_summary=decision.rationale,
+                    )
+                    persisted.append(decision.decision_id)
+                else:
+                    execution = self._execution_coordinator.process(artifacts)
+                    if execution.status == "PERSISTED":
+                        persisted.append(execution.decision_id)
+                    else:
+                        execution_pending = True
+                        self._repository.mark_symbol_execution_pending(
+                            cycle_id=cycle,
+                            symbol=symbol,
+                            source_report_id=completion.source_report_id,
+                            research_id=artifacts.research_bundle.research_id,
+                            decision_id=decision.decision_id,
+                            decision_action=decision.action,
+                            rationale_summary=decision.rationale,
+                        )
             except (M2ShadowBlocked, ShadowWiringRejected, M2InputConflictError) as exc:
                 reason = f"{symbol}: {exc}"
                 blocked.append(reason)
@@ -370,6 +481,14 @@ class M2ShadowLoopService:
                 )
                 logger.exception("M2 shadow symbol failed closed: cycle=%s symbol=%s", cycle, symbol)
 
+        if execution_pending:
+            return M2ShadowRunResult(
+                cycle_id=cycle,
+                status="PENDING_RECONCILIATION",
+                persisted_decision_ids=tuple(persisted),
+                blocked_reasons=tuple(blocked),
+                duplicate_trigger=duplicate,
+            )
         try:
             status = self._repository.close_cycle(cycle_id=cycle)
         except Exception as exc:

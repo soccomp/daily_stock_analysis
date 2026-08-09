@@ -20,6 +20,7 @@ from src.investment.contracts.risk_policy import RiskPolicy
 
 if TYPE_CHECKING:
     from src.investment.canary import InvestmentCanaryArtifacts
+    from src.investment.m3.orchestration import M3ExecutionArtifacts
     from src.investment.shadow_wiring import InvestmentShadowArtifacts
 
 
@@ -27,6 +28,7 @@ SCORECARD_SCHEMA_VERSION = "p1-scorecard-v1"
 SHADOW_SCORECARD_MODE = "M2_SHADOW"
 SHADOW_EXECUTION_AUTHORIZATION = "OFF"
 SHADOW_EXECUTION_STATE = "NOT_AUTHORIZED"
+M3_SCORECARD_MODE = "SIMULATION_EXECUTION"
 
 
 def _without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -186,6 +188,54 @@ class SingleDecisionScorecard:
         )
 
     @classmethod
+    def from_m3(
+        cls,
+        artifacts: "M3ExecutionArtifacts",
+    ) -> "SingleDecisionScorecard":
+        """Close one M3 decision with factual Athena execution lineage."""
+
+        decision = artifacts.investment_decision
+        latest = artifacts.execution_results[-1] if artifacts.execution_results else None
+        diagnostics = {
+            "mode": M3_SCORECARD_MODE,
+            "execution_authorization": "ON",
+            "requested_quantity": None if latest is None else latest.requested_quantity,
+            "submitted_quantity": None if latest is None else latest.submitted_quantity,
+            "filled_quantity": None if latest is None else latest.filled_quantity,
+            "remaining_quantity": None if latest is None else latest.remaining_quantity,
+            "average_fill_price": None if latest is None else latest.average_fill_price,
+            "fees": None if latest is None else latest.fees,
+            "slippage_bps": None if latest is None else latest.slippage_bps,
+            "execution_state": "NOT_APPLICABLE" if latest is None else latest.status,
+            "reconciliation_state": (
+                "NOT_APPLICABLE" if latest is None else latest.reconciliation_status
+            ),
+        }
+        draft = cls(
+            scorecard_hash="0" * 64,
+            created_at=decision.created_at,
+            source_report_id=artifacts.source_report_id,
+            research_bundle=artifacts.research_bundle,
+            portfolio_snapshot_a=artifacts.portfolio_snapshot_a,
+            risk_policy=artifacts.risk_policy,
+            investment_decision=decision,
+            decision_signal=_freeze(canonicalize(artifacts.decision_signal)),
+            execution_mandate=artifacts.execution_mandate,
+            execution_results=tuple(artifacts.execution_results),
+            portfolio_snapshot_b=artifacts.portfolio_snapshot_b,
+            execution_diagnostics=_freeze(canonicalize(diagnostics)),
+        )
+        draft._validate_lineage()
+        return cls(
+            **{
+                **draft.__dict__,
+                "scorecard_hash": hashlib.sha256(
+                    canonical_json_bytes(draft._body())
+                ).hexdigest(),
+            }
+        )
+
+    @classmethod
     def from_json(cls, value: str) -> "SingleDecisionScorecard":
         payload = json.loads(value, object_pairs_hook=_without_duplicate_keys)
         expected = {
@@ -314,24 +364,45 @@ class SingleDecisionScorecard:
         if self.execution_diagnostics.get("mode") == SHADOW_SCORECARD_MODE:
             self._validate_shadow_lineage()
             return
+        if self.execution_diagnostics.get("mode") == M3_SCORECARD_MODE:
+            if self.execution_diagnostics.get("execution_authorization") != "ON":
+                raise ValueError("M3 scorecard execution authorization mismatch")
+            if (
+                self.decision_signal.get("shadow_only") is not False
+                or self.decision_signal.get("execution_permitted")
+                is not (decision.action in {"BUY", "ADD"})
+            ):
+                raise ValueError("M3 DecisionSignal execution projection mismatch")
 
         actionable = decision.action in {"BUY", "ADD"}
         if actionable:
             if (
                 self.execution_mandate is None
-                or len(self.execution_results) != 1
+                or (
+                    not self.execution_results
+                    if self.execution_diagnostics.get("mode") == M3_SCORECARD_MODE
+                    else len(self.execution_results) != 1
+                )
                 or self.portfolio_snapshot_b is None
             ):
                 raise ValueError("actionable scorecard requires mandate, result, and Snapshot B")
             self.execution_mandate.assert_matches_decision(decision)
-            result = self.execution_results[0]
-            if (
-                result.decision_id != decision.decision_id
-                or result.decision_hash != decision.content_hash
-                or result.mandate_id != self.execution_mandate.mandate_id
-                or result.mandate_hash != self.execution_mandate.content_hash
-            ):
-                raise ValueError("scorecard execution lineage mismatch")
+            previous = None
+            for result in self.execution_results:
+                if (
+                    result.decision_id != decision.decision_id
+                    or result.decision_hash != decision.content_hash
+                    or result.mandate_id != self.execution_mandate.mandate_id
+                    or result.mandate_hash != self.execution_mandate.content_hash
+                    or result.submitted_quantity not in {0, decision.delta_quantity}
+                    or (
+                        previous is not None
+                        and result.supersedes_id != previous.result_id
+                    )
+                ):
+                    raise ValueError("scorecard execution lineage mismatch")
+                previous = result
+            result = self.execution_results[-1]
             if (
                 result.portfolio_snapshot_after_id
                 != self.portfolio_snapshot_b.snapshot_id

@@ -24,6 +24,7 @@ RUNTIME_SCHEDULER_ARGS_ENV = "DSA_RUNTIME_SCHEDULER_ARGS"
 SCHEDULER_MODE_OFF = "OFF"
 SCHEDULER_MODE_FULL = "FULL"
 SCHEDULER_MODE_M2_SHADOW_ONLY = "M2_SHADOW_ONLY"
+SCHEDULER_MODE_M3_SIMULATION_EXECUTION_ONLY = "M3_SIMULATION_EXECUTION_ONLY"
 _RUNTIME_ANALYSIS_LOCK = threading.Lock()
 SCHEDULE_ARGS_OVERRIDE_KEYS = {
     "no_notify",
@@ -109,6 +110,16 @@ def build_single_brain_m2_background_tasks(
     """Build the default-off M2 shadow task on the existing scheduler lock."""
     if not getattr(config, "single_brain_m2_enabled", False):
         return []
+    execution_mode = str(
+        getattr(config, "single_brain_execution_mode", "SHADOW")
+    ).strip().upper()
+    if execution_mode == "SHADOW":
+        task_name = "single_brain_m2_shadow"
+    elif execution_mode == "SIMULATION_EXECUTION":
+        task_name = "single_brain_m3_simulation_execution"
+    else:
+        logger.error("Single Brain scheduler blocked: invalid execution mode %r", execution_mode)
+        return []
     try:
         interval_minutes = max(
             1,
@@ -121,6 +132,16 @@ def build_single_brain_m2_background_tasks(
         current_config = config_provider()
         if not getattr(current_config, "single_brain_m2_enabled", False):
             return
+        current_mode = str(
+            getattr(current_config, "single_brain_execution_mode", "SHADOW")
+        ).strip().upper()
+        if current_mode != execution_mode:
+            logger.error(
+                "Single Brain scheduler blocked: registered mode %s changed to %s",
+                execution_mode,
+                current_mode,
+            )
+            return
 
         def run_once(
             loaded_config: Config,
@@ -131,7 +152,8 @@ def build_single_brain_m2_background_tasks(
 
             result = M2ShadowLoopService.from_config(loaded_config).run_cycle()
             logger.info(
-                "Single Brain M2 shadow cycle finished: cycle=%s status=%s persisted=%d",
+                "Single Brain %s cycle finished: cycle=%s status=%s persisted=%d",
+                execution_mode,
                 result.cycle_id,
                 result.status,
                 len(result.persisted_decision_ids),
@@ -144,7 +166,7 @@ def build_single_brain_m2_background_tasks(
             blocking=False,
         )
         if not acquired:
-            logger.warning("Single Brain M2 shadow cycle skipped: analysis_already_running")
+            logger.warning("Single Brain cycle skipped: analysis_already_running")
 
     return [{
         "task": m2_shadow_task,
@@ -152,8 +174,19 @@ def build_single_brain_m2_background_tasks(
         "run_immediately": bool(
             getattr(config, "single_brain_m2_run_immediately", False)
         ),
-        "name": "single_brain_m2_shadow",
+        "name": task_name,
     }]
+
+
+def _restricted_single_brain_scheduler_mode(
+    background_tasks: List[Dict[str, Any]],
+) -> str:
+    names = [entry.get("name") for entry in background_tasks]
+    if names == ["single_brain_m2_shadow"]:
+        return SCHEDULER_MODE_M2_SHADOW_ONLY
+    if names == ["single_brain_m3_simulation_execution"]:
+        return SCHEDULER_MODE_M3_SIMULATION_EXECUTION_ONLY
+    return SCHEDULER_MODE_OFF
 
 
 def build_cli_schedule_background_tasks(
@@ -367,6 +400,12 @@ class RuntimeSchedulerService:
                 if not background_tasks:
                     self.stop()
                     return
+                restricted_mode = _restricted_single_brain_scheduler_mode(
+                    background_tasks
+                )
+                if restricted_mode == SCHEDULER_MODE_OFF:
+                    self.stop()
+                    return
                 fingerprint = tuple(
                     (
                         entry.get("name"),
@@ -377,7 +416,7 @@ class RuntimeSchedulerService:
                 )
                 if (
                     self._enabled
-                    and self._mode == SCHEDULER_MODE_M2_SHADOW_ONLY
+                    and self._mode == restricted_mode
                     and self._registration_fingerprint == fingerprint
                 ):
                     return
@@ -425,7 +464,7 @@ class RuntimeSchedulerService:
             self._thread = thread
             self._enabled = True
             self._mode = (
-                SCHEDULER_MODE_M2_SHADOW_ONLY
+                restricted_mode
                 if self._m2_shadow_only
                 else SCHEDULER_MODE_FULL
             )

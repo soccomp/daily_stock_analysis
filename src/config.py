@@ -1188,6 +1188,14 @@ class Config:
     single_brain_m2_snapshot_timeout_seconds: float = 5.0
     single_brain_m2_risk_policy_path: Optional[str] = None
 
+    # Single Brain M3: explicit, independently authorized simulation execution.
+    # SHADOW + false authorization is the fail-closed default.
+    single_brain_execution_mode: str = "SHADOW"
+    single_brain_simulation_execution_authorized: bool = False
+    single_brain_m3_execution_url: Optional[str] = None
+    single_brain_m3_execution_timeout_seconds: float = 5.0
+    single_brain_m3_execution_symbols: List[str] = field(default_factory=list)
+
     # === 回测配置 ===
     backtest_enabled: bool = True
     backtest_eval_window_days: int = 10
@@ -2212,6 +2220,31 @@ class Config:
             single_brain_m2_risk_policy_path=(
                 os.getenv('DSA_SINGLE_BRAIN_M2_RISK_POLICY_PATH') or ''
             ).strip() or None,
+            single_brain_execution_mode=(
+                os.getenv('DSA_SINGLE_BRAIN_EXECUTION_MODE') or 'SHADOW'
+            ).strip().upper(),
+            single_brain_simulation_execution_authorized=parse_env_bool(
+                os.getenv('DSA_SINGLE_BRAIN_SIMULATION_EXECUTION_AUTHORIZED'),
+                default=False,
+            ),
+            single_brain_m3_execution_url=(
+                os.getenv('DSA_SINGLE_BRAIN_M3_EXECUTION_URL') or ''
+            ).strip() or None,
+            single_brain_m3_execution_timeout_seconds=parse_env_float(
+                os.getenv('DSA_SINGLE_BRAIN_M3_EXECUTION_TIMEOUT_SECONDS'),
+                5.0,
+                field_name='DSA_SINGLE_BRAIN_M3_EXECUTION_TIMEOUT_SECONDS',
+                minimum=0.1,
+                maximum=30.0,
+            ),
+            single_brain_m3_execution_symbols=[
+                symbol.strip()
+                for symbol in os.getenv(
+                    'DSA_SINGLE_BRAIN_M3_EXECUTION_SYMBOLS',
+                    '',
+                ).split(',')
+                if symbol.strip()
+            ],
             backtest_enabled=os.getenv('BACKTEST_ENABLED', 'true').lower() == 'true',
             backtest_eval_window_days=parse_env_int(os.getenv('BACKTEST_EVAL_WINDOW_DAYS'), 10, field_name='BACKTEST_EVAL_WINDOW_DAYS', minimum=1),
             backtest_min_age_days=parse_env_int(os.getenv('BACKTEST_MIN_AGE_DAYS'), 14, field_name='BACKTEST_MIN_AGE_DAYS', minimum=1),
