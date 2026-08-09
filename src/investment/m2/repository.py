@@ -265,6 +265,29 @@ class M2OperationalRepository:
             persisted_at=utc_naive_now(),
         )
 
+    def mark_symbol_execution_pending(
+        self,
+        *,
+        cycle_id: str,
+        symbol: str,
+        source_report_id: int,
+        research_id: str,
+        decision_id: str,
+        decision_action: str,
+        rationale_summary: str,
+    ) -> None:
+        self._update_symbol(
+            cycle_id,
+            symbol,
+            status="EXECUTION_PENDING",
+            source_report_id=source_report_id,
+            research_id=research_id,
+            decision_id=decision_id,
+            decision_action=decision_action,
+            rationale_summary=rationale_summary[:2000],
+            failure_reason=None,
+        )
+
     def mark_symbol_failed(
         self,
         *,

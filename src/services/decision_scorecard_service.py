@@ -10,6 +10,7 @@ from src.storage import DatabaseManager
 
 if TYPE_CHECKING:
     from src.investment.canary import InvestmentCanaryArtifacts
+    from src.investment.m3.orchestration import M3ExecutionArtifacts
     from src.investment.shadow_wiring import InvestmentShadowArtifacts
 
 
@@ -50,6 +51,20 @@ class DecisionScorecardService:
         artifacts: "InvestmentShadowArtifacts",
     ) -> dict:
         scorecard = SingleDecisionScorecard.from_shadow(artifacts)
+        payload_json = scorecard.to_json()
+        created = self.repository.create_if_absent(
+            decision_id=scorecard.decision_id,
+            trace_id=scorecard.investment_decision.trace_id,
+            account_id=scorecard.investment_decision.account_id,
+            symbol=scorecard.investment_decision.symbol,
+            action=scorecard.investment_decision.action,
+            payload_hash=scorecard.scorecard_hash,
+            payload_json=payload_json,
+        ).created
+        return {"item": scorecard.to_payload(), "created": created}
+
+    def persist_m3(self, artifacts: "M3ExecutionArtifacts") -> dict:
+        scorecard = SingleDecisionScorecard.from_m3(artifacts)
         payload_json = scorecard.to_json()
         created = self.repository.create_if_absent(
             decision_id=scorecard.decision_id,

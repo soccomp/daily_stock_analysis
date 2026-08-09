@@ -1195,6 +1195,32 @@ class SingleBrainM2SymbolRecord(Base):
     )
 
 
+class SingleBrainM3ExecutionRecord(Base):
+    """Durable no-retry checkpoint for one Brain-owned executable decision."""
+
+    __tablename__ = "single_brain_m3_executions"
+
+    decision_id = Column(String(160), primary_key=True)
+    cycle_id = Column(String(160), nullable=False, index=True)
+    symbol = Column(String(64), nullable=False, index=True)
+    status = Column(String(32), nullable=False, index=True)
+    source_report_id = Column(Integer, nullable=False)
+    mandate_id = Column(String(160), nullable=False, unique=True, index=True)
+    mandate_hash = Column(String(64), nullable=False)
+    idempotency_key = Column(String(64), nullable=False, unique=True, index=True)
+    mandate_json = Column(Text, nullable=False)
+    lineage_json = Column(Text, nullable=False)
+    results_json = Column(Text, nullable=False, default="[]")
+    snapshot_b_id = Column(String(160), index=True)
+    snapshot_b_hash = Column(String(64))
+    snapshot_b_json = Column(Text)
+    dispatch_attempt_count = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text)
+    created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+    updated_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+    completed_at = Column(DateTime, index=True)
+
+
 class DecisionSignalOutcomeRecord(Base):
     """Signal-level forward outcome for Issue #1390 P5."""
 
