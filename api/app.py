@@ -174,6 +174,7 @@ from src.services.runtime_scheduler import (
     CLI_SCHEDULER_OWNER_ENV,
     RUNTIME_SCHEDULER_ARGS_ENV,
     RUNTIME_SCHEDULER_FORCE_ENABLED_ENV,
+    RUNTIME_SCHEDULER_M2_SHADOW_ONLY_ENV,
     RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV,
     RUNTIME_SCHEDULER_SUPPRESS_START_ENV,
     RuntimeSchedulerService,
@@ -255,6 +256,10 @@ async def app_lifespan(app: FastAPI):
         "yes",
         "on",
     }
+    runtime_m2_shadow_only = os.getenv(
+        RUNTIME_SCHEDULER_M2_SHADOW_ONLY_ENV,
+        "",
+    ).strip().lower() in {"1", "true", "yes", "on"}
     runtime_run_immediately_override = os.getenv(RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV)
     if runtime_suppress_start or not runtime_owns_schedule:
         runtime_run_immediately = False
@@ -273,17 +278,21 @@ async def app_lifespan(app: FastAPI):
     os.environ.pop(RUNTIME_SCHEDULER_FORCE_ENABLED_ENV, None)
     os.environ.pop(RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV, None)
     os.environ.pop(RUNTIME_SCHEDULER_SUPPRESS_START_ENV, None)
+    os.environ.pop(RUNTIME_SCHEDULER_M2_SHADOW_ONLY_ENV, None)
     os.environ.pop(RUNTIME_SCHEDULER_ARGS_ENV, None)
-    runtime_scheduler_service = RuntimeSchedulerService(
+    runtime_scheduler_kwargs = dict(
         owns_schedule=runtime_owns_schedule,
         force_enabled=runtime_force_enabled,
         run_immediately_in_background=True,
         schedule_args_overrides=runtime_scheduler_args,
     )
+    if runtime_m2_shadow_only:
+        runtime_scheduler_kwargs["m2_shadow_only"] = True
+    runtime_scheduler_service = RuntimeSchedulerService(**runtime_scheduler_kwargs)
     app.state.runtime_scheduler_service = runtime_scheduler_service
-    if not runtime_suppress_start:
+    if not runtime_suppress_start or runtime_m2_shadow_only:
         app.state.runtime_scheduler_service.reconcile_from_config(
-            run_immediately=runtime_run_immediately,
+            run_immediately=(runtime_run_immediately and not runtime_m2_shadow_only),
         )
     app.state.system_config_service = SystemConfigService(
         runtime_scheduler=app.state.runtime_scheduler_service,

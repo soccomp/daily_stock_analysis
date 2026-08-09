@@ -19,7 +19,11 @@ CLI_SCHEDULER_OWNER_ENV = "DSA_CLI_SCHEDULER_OWNS_SCHEDULE"
 RUNTIME_SCHEDULER_FORCE_ENABLED_ENV = "DSA_RUNTIME_SCHEDULER_FORCE_ENABLED"
 RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV = "DSA_RUNTIME_SCHEDULER_RUN_IMMEDIATELY"
 RUNTIME_SCHEDULER_SUPPRESS_START_ENV = "DSA_RUNTIME_SCHEDULER_SUPPRESS_START"
+RUNTIME_SCHEDULER_M2_SHADOW_ONLY_ENV = "DSA_RUNTIME_SCHEDULER_M2_SHADOW_ONLY"
 RUNTIME_SCHEDULER_ARGS_ENV = "DSA_RUNTIME_SCHEDULER_ARGS"
+SCHEDULER_MODE_OFF = "OFF"
+SCHEDULER_MODE_FULL = "FULL"
+SCHEDULER_MODE_M2_SHADOW_ONLY = "M2_SHADOW_ONLY"
 _RUNTIME_ANALYSIS_LOCK = threading.Lock()
 SCHEDULE_ARGS_OVERRIDE_KEYS = {
     "no_notify",
@@ -182,6 +186,7 @@ class RuntimeSchedulerService:
         owns_schedule: Optional[bool] = None,
         force_enabled: bool = False,
         run_immediately_in_background: bool = False,
+        m2_shadow_only: bool = False,
         background_tasks_provider: Optional[Callable[[Config], List[Dict[str, Any]]]] = None,
         schedule_args_overrides: Optional[Dict[str, Any]] = None,
     ) -> None:
@@ -197,6 +202,7 @@ class RuntimeSchedulerService:
         self._owns_schedule = owns_schedule
         self._force_enabled = force_enabled
         self._run_immediately_in_background = run_immediately_in_background
+        self._m2_shadow_only = m2_shadow_only
         self._background_tasks_provider = background_tasks_provider
         self._schedule_args_overrides = {
             key: value
@@ -210,6 +216,8 @@ class RuntimeSchedulerService:
         self._scheduler: Optional[Scheduler] = None
         self._thread: Optional[threading.Thread] = None
         self._enabled = False
+        self._mode = SCHEDULER_MODE_OFF
+        self._registration_fingerprint: Optional[tuple[Any, ...]] = None
         self._last_run_at: Optional[str] = None
         self._last_success_at: Optional[str] = None
         self._last_error: Optional[str] = None
@@ -285,6 +293,11 @@ class RuntimeSchedulerService:
         return self._force_enabled or bool(getattr(config, "schedule_enabled", False))
 
     def _current_background_tasks(self, config: Config) -> List[Dict[str, Any]]:
+        if self._m2_shadow_only:
+            return build_single_brain_m2_background_tasks(
+                config,
+                config_provider=self._reload_config,
+            )
         if self._background_tasks_provider is not None:
             return self._background_tasks_provider(config)
         return [
@@ -349,10 +362,31 @@ class RuntimeSchedulerService:
                 self.stop()
                 return
             config = self._config_provider()
-            if not self._is_schedule_enabled(config):
+            if self._m2_shadow_only:
+                background_tasks = self._current_background_tasks(config)
+                if not background_tasks:
+                    self.stop()
+                    return
+                fingerprint = tuple(
+                    (
+                        entry.get("name"),
+                        int(entry["interval_seconds"]),
+                        bool(entry.get("run_immediately", False)),
+                    )
+                    for entry in background_tasks
+                )
+                if (
+                    self._enabled
+                    and self._mode == SCHEDULER_MODE_M2_SHADOW_ONLY
+                    and self._registration_fingerprint == fingerprint
+                ):
+                    return
+            elif not self._is_schedule_enabled(config):
                 self.stop()
                 return
-            background_tasks = self._current_background_tasks(config)
+            else:
+                background_tasks = self._current_background_tasks(config)
+                fingerprint = None
             self.stop()
             times = normalize_schedule_times(
                 getattr(config, "schedule_times", None),
@@ -364,10 +398,11 @@ class RuntimeSchedulerService:
                 schedule_times_provider=self._current_times,
                 register_signals=False,
             )
-            if run_immediately and self._run_immediately_in_background:
-                scheduler.set_daily_task(self._run_analysis_once, run_immediately=False)
-            else:
-                scheduler.set_daily_task(self._run_analysis_once, run_immediately=run_immediately)
+            if not self._m2_shadow_only:
+                if run_immediately and self._run_immediately_in_background:
+                    scheduler.set_daily_task(self._run_analysis_once, run_immediately=False)
+                else:
+                    scheduler.set_daily_task(self._run_analysis_once, run_immediately=run_immediately)
             for entry in background_tasks:
                 scheduler.add_background_task(
                     entry["task"],
@@ -375,7 +410,11 @@ class RuntimeSchedulerService:
                     run_immediately=entry.get("run_immediately", False),
                     name=entry.get("name"),
                 )
-            if run_immediately and self._run_immediately_in_background:
+            if (
+                not self._m2_shadow_only
+                and run_immediately
+                and self._run_immediately_in_background
+            ):
                 self._run_in_background_thread(self._run_analysis_once)
             thread = threading.Thread(
                 target=scheduler.run,
@@ -385,6 +424,12 @@ class RuntimeSchedulerService:
             self._scheduler = scheduler
             self._thread = thread
             self._enabled = True
+            self._mode = (
+                SCHEDULER_MODE_M2_SHADOW_ONLY
+                if self._m2_shadow_only
+                else SCHEDULER_MODE_FULL
+            )
+            self._registration_fingerprint = fingerprint
             thread.start()
 
     def stop(self) -> None:
@@ -394,6 +439,8 @@ class RuntimeSchedulerService:
         self._scheduler = None
         self._thread = None
         self._enabled = False
+        self._mode = SCHEDULER_MODE_OFF
+        self._registration_fingerprint = None
 
     def reconcile_from_config(
         self,
@@ -407,7 +454,12 @@ class RuntimeSchedulerService:
             self.stop()
             return
         config = self._config_provider()
-        if self._is_schedule_enabled(config):
+        if self._m2_shadow_only:
+            if getattr(config, "single_brain_m2_enabled", False):
+                self.start(run_immediately=False)
+            else:
+                self.stop()
+        elif self._is_schedule_enabled(config):
             self.start(run_immediately=run_immediately)
         else:
             self.stop()
@@ -453,8 +505,22 @@ class RuntimeSchedulerService:
             except Exception:  # pragma: no cover - defensive status fallback
                 schedule_times = []
         running = self._run_lock.locked()
+        background_tasks = []
+        for entry in getattr(scheduler, "_background_tasks", []) if scheduler else []:
+            last_run = float(entry.get("last_run") or 0)
+            interval_seconds = int(entry.get("interval_seconds") or 0)
+            next_run_at = None
+            if last_run > 0 and interval_seconds > 0:
+                next_run_at = datetime.fromtimestamp(last_run + interval_seconds).isoformat()
+            background_tasks.append({
+                "name": entry.get("name"),
+                "interval_seconds": interval_seconds,
+                "running": bool(entry.get("running", False)),
+                "next_run_at": next_run_at,
+            })
         return {
             "enabled": self._enabled,
+            "mode": self._mode,
             "running": running,
             "schedule_times": schedule_times,
             "next_run_at": next_run,
@@ -463,4 +529,5 @@ class RuntimeSchedulerService:
             "last_error": self._last_error,
             "last_skipped_at": self._last_skipped_at,
             "last_skip_reason": self._last_skip_reason,
+            "background_tasks": background_tasks,
         }

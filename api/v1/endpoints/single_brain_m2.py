@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Security
+from fastapi import APIRouter, Depends, HTTPException, Security
 from fastapi.security import APIKeyCookie
 
 from api.v1.schemas.common import ErrorResponse
 from api.v1.schemas.single_brain_m2 import SingleBrainM2ReadinessResponse
+from api.deps import get_runtime_scheduler_service
 from src.auth import COOKIE_NAME
 from src.services.single_brain_m2_readiness_service import SingleBrainM2ReadinessService
+from src.services.runtime_scheduler import RuntimeSchedulerService
 
 
 logger = logging.getLogger(__name__)
@@ -32,10 +34,16 @@ router = APIRouter(dependencies=[Security(admin_session_cookie)])
     summary="读取 Single Brain M2 影子运行就绪状态",
     operation_id="getSingleBrainM2Readiness",
 )
-def get_readiness() -> SingleBrainM2ReadinessResponse:
+def get_readiness(
+    runtime_scheduler: RuntimeSchedulerService = Depends(
+        get_runtime_scheduler_service
+    ),
+) -> SingleBrainM2ReadinessResponse:
     try:
         return SingleBrainM2ReadinessResponse(
-            item=SingleBrainM2ReadinessService().get()
+            item=SingleBrainM2ReadinessService(
+                runtime_scheduler=runtime_scheduler
+            ).get()
         )
     except Exception as exc:
         logger.error("Read Single Brain M2 readiness failed: %s", exc, exc_info=True)

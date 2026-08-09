@@ -41,6 +41,9 @@ def test_readiness_requires_valid_admin_session_and_exposes_get_only(tmp_path, m
     DatabaseManager.reset_instance()
 
     class _Service:
+        def __init__(self, *, runtime_scheduler=None):
+            assert runtime_scheduler is not None
+
         def get(self):
             return {
                 "execution_authorization": "OFF",
@@ -110,6 +113,9 @@ def test_readiness_failure_returns_500_without_mutating_operational_state(
     DatabaseManager.reset_instance()
 
     class _FailingService:
+        def __init__(self, *, runtime_scheduler=None):
+            assert runtime_scheduler is not None
+
         def get(self):
             raise OSError("read-only storage unavailable")
 
@@ -136,3 +142,46 @@ def test_readiness_failure_returns_500_without_mutating_operational_state(
         DatabaseManager.reset_instance()
         Config.reset_instance()
         _reset_auth_globals()
+
+
+def test_readiness_projects_actual_single_m2_scheduler_authority(monkeypatch):
+    from src.services.single_brain_m2_readiness_service import (
+        SingleBrainM2ReadinessService,
+    )
+
+    class _Repository:
+        def readiness(self):
+            return {"latest_cycle": None, "symbols": []}
+
+        def latest_authoritative_snapshot(self):
+            return None
+
+    class _Scheduler:
+        def status(self):
+            return {
+                "enabled": True,
+                "mode": "M2_SHADOW_ONLY",
+                "background_tasks": [{
+                    "name": "single_brain_m2_shadow",
+                    "interval_seconds": 3600,
+                    "next_run_at": "2026-08-09T03:00:00",
+                }],
+            }
+
+    monkeypatch.setattr(
+        "src.services.single_brain_m2_readiness_service.get_config",
+        lambda: type("_Config", (), {"single_brain_m2_enabled": True})(),
+    )
+    readiness = SingleBrainM2ReadinessService(
+        repository=_Repository(),
+        runtime_scheduler=_Scheduler(),
+    ).get()
+
+    assert readiness["execution_authorization"] == "OFF"
+    assert readiness["recurring_scheduler"] == {
+        "enabled": True,
+        "mode": "M2_SHADOW_ONLY",
+        "authority_count": 1,
+        "interval_seconds": 3600,
+        "next_run_at": "2026-08-09T03:00:00",
+    }

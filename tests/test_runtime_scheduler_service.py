@@ -20,6 +20,7 @@ from src.services.runtime_scheduler import (
     CLI_SCHEDULER_OWNER_ENV,
     RUNTIME_SCHEDULER_ARGS_ENV,
     RUNTIME_SCHEDULER_FORCE_ENABLED_ENV,
+    RUNTIME_SCHEDULER_M2_SHADOW_ONLY_ENV,
     RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV,
     RUNTIME_SCHEDULER_SUPPRESS_START_ENV,
     RuntimeSchedulerService,
@@ -670,6 +671,58 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
             ("stop",),
         ])
         self.assertIsNone(os.getenv(RUNTIME_SCHEDULER_SUPPRESS_START_ENV))
+
+    def test_lifespan_allows_only_explicit_m2_shadow_scheduler_in_serve_only(self) -> None:
+        from api.app import create_app
+
+        events = []
+
+        class FakeRuntimeSchedulerService:
+            def __init__(
+                self,
+                *,
+                owns_schedule=True,
+                force_enabled=False,
+                run_immediately_in_background=False,
+                m2_shadow_only=False,
+                schedule_args_overrides=None,
+            ):
+                events.append(("init", owns_schedule, m2_shadow_only))
+
+            def reconcile_from_config(self, *, run_immediately=False, clear_enabled_override=False):
+                events.append(("reconcile", run_immediately, clear_enabled_override))
+
+            def stop(self):
+                events.append(("stop",))
+
+        class FakeSystemConfigService:
+            def __init__(self, runtime_scheduler=None):
+                self.runtime_scheduler = runtime_scheduler
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                RUNTIME_SCHEDULER_SUPPRESS_START_ENV: "true",
+                RUNTIME_SCHEDULER_M2_SHADOW_ONLY_ENV: "true",
+            },
+            clear=False,
+        ), patch(
+            "src.config.get_config",
+            return_value=SimpleNamespace(schedule_run_immediately=True),
+        ), patch("api.app.RuntimeSchedulerService", FakeRuntimeSchedulerService), patch(
+            "api.app.SystemConfigService",
+            FakeSystemConfigService,
+        ), patch("api.app._schedule_stock_index_background_refresh"):
+            app = create_app(static_dir=Path(temp_dir))
+            with TestClient(app):
+                pass
+
+        self.assertEqual(events, [
+            ("init", True, True),
+            ("reconcile", False, False),
+            ("stop",),
+        ])
+        self.assertIsNone(os.getenv(RUNTIME_SCHEDULER_M2_SHADOW_ONLY_ENV))
 
     def test_lifespan_passes_runtime_scheduler_args_overrides(self) -> None:
         from api.app import create_app

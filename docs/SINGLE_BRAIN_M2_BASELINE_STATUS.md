@@ -1,6 +1,6 @@
 # Single Brain M2 Baseline Status
 
-**Status date:** 2026-08-08
+**Status date:** 2026-08-09
 
 **Lifecycle state:** M2 BASELINE ACCEPTED AND MERGED
 
@@ -66,6 +66,32 @@ These are local implementation verification results; no GitHub Actions status ch
 - Athena remains the sole authoritative portfolio-truth producer.
 - DSA remains the sole investment decision Brain.
 
+## Deployment smoke outcome
+
+The governed M2 Deployment Smoke completed with terminal state `DEPLOYMENT SMOKE PASS`. Its accepted evidence remains observational and does not authorize execution. The Owner subsequently authorized continuous M2 Shadow Operations, but activation found that `--webui-only` set `DSA_RUNTIME_SCHEDULER_SUPPRESS_START=true`, so the accepted recurring M2 task was never reconciled into the running API process. Temporary activation configuration was rolled back.
+
+## Continuous Shadow startup repair — architecture review candidate
+
+**State:** IMPLEMENTED AND TESTED; DRAFT PR #6 OPEN; NOT MERGED; NOT DEPLOYED
+
+The DSA-only repair preserves `--webui-only` and its ordinary scheduler suppression while adding an explicit `M2_SHADOW_ONLY` runtime scheduler mode. In that mode:
+
+- `DSA_SINGLE_BRAIN_M2_ENABLED=false` registers no recurring task;
+- `DSA_SINGLE_BRAIN_M2_ENABLED=true` registers exactly one existing `single_brain_m2_shadow` task;
+- the configured M2 cadence remains unchanged (default and accepted deployment value: 60 minutes);
+- no daily analysis job or Event Monitor task is registered;
+- the existing shared analysis lock and M2 cycle/symbol persistence deduplication remain authoritative;
+- P1A, P1B, execution authorization, mandate dispatch, and all broker operations remain outside the reachable M2 runtime path;
+- the read-only M2 readiness response reports the actual scheduler mode, authority count, interval, and next registered run.
+
+Implementation verification on the review branch recorded:
+
+- focused startup/M2/readiness/recovery/scorecard/architecture suite: 128 passed;
+- architecture boundary suite: 7 passed;
+- repository backend gate: syntax PASS, critical flake8 PASS, deterministic checks PASS, 5,851 passed, 4 deselected, and 501 subtests passed.
+
+No Athena files, canonical contracts, Snapshot semantics, decision authority, RiskPolicy semantics, persistence schemas, authentication policy, network binding, launchd/plist, or deployed configuration are changed by the repair.
+
 ## Next governed step
 
-The next step is a separately governed **M2 Deployment Smoke Mission**. Its purpose is to prove the accepted code against the actually running simulation deployment while preserving zero-execution authority. No deployed configuration change or runtime enablement is authorized merely by this baseline record.
+The repair must stop at `ARCHITECTURE REVIEW GATE: M2_WEBUI_ONLY_SCHEDULER_REPAIR_READY`. After explicit review authorization, the same Continuous Shadow Completion Mission may merge and perform a reversible DSA-only deployment and activation. Until then, M2 recurring scheduling remains OFF in the deployed service.
