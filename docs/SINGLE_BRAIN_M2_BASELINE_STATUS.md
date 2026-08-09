@@ -72,7 +72,7 @@ The governed M2 Deployment Smoke completed with terminal state `DEPLOYMENT SMOKE
 
 ## Continuous Shadow startup repair — architecture review candidate
 
-**State:** IMPLEMENTED AND TESTED; DRAFT PR REQUIRED; NOT MERGED; NOT DEPLOYED
+**State:** IMPLEMENTED AND TESTED; DRAFT PR #6 OPEN; NOT MERGED; NOT DEPLOYED
 
 The DSA-only repair preserves `--webui-only` and its ordinary scheduler suppression while adding an explicit `M2_SHADOW_ONLY` runtime scheduler mode. In that mode:
 
