@@ -954,6 +954,7 @@ class MainScheduleModeTestCase(unittest.TestCase):
     def test_serve_only_suppresses_startup_scheduler_without_disabling_runtime_owner(self) -> None:
         from src.services.runtime_scheduler import (
             CLI_SCHEDULER_OWNER_ENV,
+            RUNTIME_SCHEDULER_M2_SHADOW_ONLY_ENV,
             RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV,
             RUNTIME_SCHEDULER_SUPPRESS_START_ENV,
         )
@@ -962,11 +963,15 @@ class MainScheduleModeTestCase(unittest.TestCase):
         config = self._make_config(webui_enabled=False, schedule_enabled=True)
         marker_seen_by_server = []
         suppress_seen_by_server = []
+        m2_shadow_only_seen_by_server = []
         run_immediately_seen_by_server = []
 
         def fake_start_api_server(host, port, config):
             marker_seen_by_server.append(os.getenv(CLI_SCHEDULER_OWNER_ENV))
             suppress_seen_by_server.append(os.getenv(RUNTIME_SCHEDULER_SUPPRESS_START_ENV))
+            m2_shadow_only_seen_by_server.append(
+                os.getenv(RUNTIME_SCHEDULER_M2_SHADOW_ONLY_ENV)
+            )
             run_immediately_seen_by_server.append(os.getenv(RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV))
 
         with patch.dict(
@@ -986,6 +991,7 @@ class MainScheduleModeTestCase(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(marker_seen_by_server, [None])
         self.assertEqual(suppress_seen_by_server, ["true"])
+        self.assertEqual(m2_shadow_only_seen_by_server, ["true"])
         self.assertEqual(run_immediately_seen_by_server, [None])
         start_bots.assert_called_once_with(config)
         run_with_schedule.assert_not_called()
