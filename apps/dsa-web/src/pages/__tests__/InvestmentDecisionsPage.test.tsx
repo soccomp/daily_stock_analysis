@@ -133,6 +133,7 @@ function detailFor(summary: DecisionScorecardSummary): DecisionScorecardDetail {
       snapshotId: 'snapshot-a',
       contentHash: 'b'.repeat(64),
       accountMode: 'SIMULATION',
+      currency: 'HKD',
       source: 'ATHENA_RUNTIME',
       authoritative: true,
       readOnly: true,
@@ -143,15 +144,26 @@ function detailFor(summary: DecisionScorecardSummary): DecisionScorecardDetail {
       availableCash: '400000.00',
       reservedCash: '0.00',
       reconciliationStatus: 'RECONCILED',
-      positions: [{
-        symbol: summary.symbol,
-        market: summary.market,
-        quantity: summary.currentQuantity,
-        availableQuantity: summary.currentQuantity,
-        avgCost: '100.00',
-        lastPrice: '105.00',
-        marketValue: '31500.00',
-      }],
+      positions: [
+        {
+          symbol: summary.symbol,
+          market: 'HK',
+          quantity: 999,
+          availableQuantity: 999,
+          avgCost: '9.00',
+          lastPrice: '9.50',
+          marketValue: '9490.50',
+        },
+        {
+          symbol: summary.symbol,
+          market: summary.market,
+          quantity: summary.currentQuantity,
+          availableQuantity: summary.currentQuantity,
+          avgCost: '100.00',
+          lastPrice: '105.00',
+          marketValue: '31500.00',
+        },
+      ],
     },
     riskPolicy: {
       policyId: 'policy-ui',
@@ -233,6 +245,7 @@ function detailSnapshot() {
     snapshotId: 'snapshot-a',
     contentHash: 'b'.repeat(64),
     accountMode: 'SIMULATION',
+    currency: 'HKD',
     source: 'ATHENA_RUNTIME',
     authoritative: true,
     readOnly: true,
@@ -282,6 +295,7 @@ describe('InvestmentDecisionsPage', () => {
     expect(screen.getByText('继续持有，本轮无需交易。')).toBeInTheDocument();
     expect(screen.getByText(/市场已休市/)).toBeInTheDocument();
     expect(screen.getAllByText('已阻止').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('决策置信度 84.00%').length).toBeGreaterThan(0);
     expect(screen.queryByText('投资决策失败')).not.toBeInTheDocument();
 
     const blockedCard = screen.getByRole('button', { name: '查看 600519 决策档案' }).closest('.rounded-2xl');
@@ -311,6 +325,11 @@ describe('InvestmentDecisionsPage', () => {
     expect(screen.getByText('决策前账户')).toBeInTheDocument();
     expect(screen.getByText('风险约束')).toBeInTheDocument();
     expect(screen.getByText('决策后账户')).toBeInTheDocument();
+    expect(screen.getAllByText('决策置信度').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('1,000,000.00 HKD').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('105.00 HKD').length).toBeGreaterThan(0);
+    expect(screen.queryByText('999 股')).not.toBeInTheDocument();
+    expect(screen.queryByText(/ CNY$/)).not.toBeInTheDocument();
     expect(screen.getByText('系统正在等待账户事实核对，不会自动再次提交。')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /重试|提交|买入|卖出|撤单/ })).not.toBeInTheDocument();
 

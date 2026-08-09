@@ -7,6 +7,7 @@ import {
   actionPresentation,
   blockReasonLabel,
   executionLabel,
+  formatPercent,
   reconciliationLabel,
 } from './presentation';
 
@@ -34,6 +35,7 @@ export const DecisionCard: React.FC<DecisionCardProps> = ({ item, onOpen }) => {
             <p className="mt-2 text-xs text-muted-text">{formatDateTime(item.createdAt)}</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="default">决策置信度 {formatPercent(item.confidence)}</Badge>
             <Badge variant={execution.variant}>{execution.label}</Badge>
             {reconciliation ? <Badge variant={reconciliation.variant}>{reconciliation.label}</Badge> : null}
           </div>

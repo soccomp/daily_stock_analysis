@@ -62,6 +62,7 @@ const DecisionArchive: React.FC<{ detail: DecisionScorecardDetail }> = ({ detail
   ));
   const reconciliation = reconciliationLabel(result?.reconciliationStatus);
   const blockReason = blockReasonLabel(result?.blockReason);
+  const currency = detail.portfolioSnapshotA.currency;
 
   return (
     <div className="space-y-5 pb-4">
@@ -91,7 +92,11 @@ const DecisionArchive: React.FC<{ detail: DecisionScorecardDetail }> = ({ detail
       </ArchiveSection>
 
       <ArchiveSection icon={<WalletCards className="h-4 w-4" />} title="决策前账户">
-        <SnapshotFacts snapshot={detail.portfolioSnapshotA} symbol={decision.symbol} />
+        <SnapshotFacts
+          snapshot={detail.portfolioSnapshotA}
+          symbol={decision.symbol}
+          market={decision.market}
+        />
       </ArchiveSection>
 
       <ArchiveSection icon={<ShieldCheck className="h-4 w-4" />} title="风险约束">
@@ -122,6 +127,7 @@ const DecisionArchive: React.FC<{ detail: DecisionScorecardDetail }> = ({ detail
           <Metric label="目标权重" value={formatPercent(decision.targetWeight)} />
           <Metric label="预期收益" value={formatPercent(decision.expectedReturn)} />
           <Metric label="预期风险" value={formatPercent(decision.expectedRisk)} />
+          <Metric label="决策置信度" value={formatPercent(decision.confidence)} />
         </div>
         <Narrative title="决策理由" text={decision.rationale} />
         <Narrative title="风险理由" text={decision.riskReasoning} />
@@ -142,9 +148,9 @@ const DecisionArchive: React.FC<{ detail: DecisionScorecardDetail }> = ({ detail
               <Metric label="提交数量" value={result ? `${result.submittedQuantity} 股` : '—'} />
               <Metric label="成交数量" value={result ? `${result.filledQuantity} 股` : '—'} />
               <Metric label="剩余数量" value={result ? `${result.remainingQuantity} 股` : '—'} />
-              <Metric label="限价" value={mandate ? formatDecimal(mandate.limitPrice, ' CNY') : '—'} />
-              <Metric label="成交均价" value={formatDecimal(result?.averageFillPrice, result?.averageFillPrice ? ' CNY' : '')} />
-              <Metric label="费用" value={result ? formatDecimal(result.fees, ' CNY') : '—'} />
+              <Metric label="限价" value={mandate ? formatDecimal(mandate.limitPrice, ` ${currency}`) : '—'} />
+              <Metric label="成交均价" value={formatDecimal(result?.averageFillPrice, result?.averageFillPrice ? ` ${currency}` : '')} />
+              <Metric label="费用" value={result ? formatDecimal(result.fees, ` ${currency}`) : '—'} />
               <Metric label="滑点" value={result?.slippageBps == null ? '—' : `${result.slippageBps} bps`} />
             </div>
             {blockReason || result?.brokerReason ? (
@@ -169,7 +175,11 @@ const DecisionArchive: React.FC<{ detail: DecisionScorecardDetail }> = ({ detail
 
       <ArchiveSection icon={<AlertTriangle className="h-4 w-4" />} title="决策后账户">
         {detail.portfolioSnapshotB ? (
-          <SnapshotFacts snapshot={detail.portfolioSnapshotB} symbol={decision.symbol} />
+          <SnapshotFacts
+            snapshot={detail.portfolioSnapshotB}
+            symbol={decision.symbol}
+            market={decision.market}
+          />
         ) : (
           <p className="text-sm text-secondary-text">尚无决策后账户快照</p>
         )}
@@ -245,9 +255,16 @@ const Narrative: React.FC<{ title: string; text: string }> = ({ title, text }) =
   </div>
 );
 
-const SnapshotFacts: React.FC<{ snapshot: PortfolioSnapshotView; symbol: string }> = ({ snapshot, symbol }) => {
-  const position = snapshot.positions.find((item) => item.symbol === symbol);
+const SnapshotFacts: React.FC<{
+  snapshot: PortfolioSnapshotView;
+  symbol: string;
+  market: string;
+}> = ({ snapshot, symbol, market }) => {
+  const position = snapshot.positions.find(
+    (item) => item.symbol === symbol && item.market === market,
+  );
   const reconciliation = reconciliationLabel(snapshot.reconciliationStatus);
+  const currency = ` ${snapshot.currency}`;
   return (
     <>
       <div className="mb-4 flex flex-wrap gap-2">
@@ -256,12 +273,12 @@ const SnapshotFacts: React.FC<{ snapshot: PortfolioSnapshotView; symbol: string 
       </div>
       <FactGrid
         facts={[
-          ['账户权益', formatDecimal(snapshot.equity, ' CNY')],
-          ['现金', formatDecimal(snapshot.cash, ' CNY')],
-          ['可用资金', formatDecimal(snapshot.availableCash, ' CNY')],
+          ['账户权益', formatDecimal(snapshot.equity, currency)],
+          ['现金', formatDecimal(snapshot.cash, currency)],
+          ['可用资金', formatDecimal(snapshot.availableCash, currency)],
           ['相关股票数量', position ? `${position.quantity} 股` : '0 股'],
-          ['持仓成本', position ? formatDecimal(position.avgCost, ' CNY') : '—'],
-          ['持仓市值', position ? formatDecimal(position.marketValue, ' CNY') : '—'],
+          ['持仓成本', position ? formatDecimal(position.avgCost, currency) : '—'],
+          ['持仓市值', position ? formatDecimal(position.marketValue, currency) : '—'],
           ['快照时间', formatDateTime(snapshot.asOf)],
           ['事实来源', snapshot.authoritative && snapshot.readOnly ? '已连接账户（只读）' : '无法确认'],
         ]}

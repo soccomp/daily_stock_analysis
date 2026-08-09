@@ -95,6 +95,7 @@ export interface PortfolioSnapshotView {
   snapshotId: string;
   contentHash: string;
   accountMode: string;
+  currency: string;
   source: string;
   authoritative: boolean;
   readOnly: boolean;

@@ -88,6 +88,7 @@ Each decision card separates the Brain decision from execution:
 
 - BUY / ADD: current X → target Y; this change Z.
 - HOLD: current X → target X; “继续持有，本轮无需交易。”
+- Decision confidence is shown as the immutable Brain output, distinct from research confidence.
 - Requested, submitted, filled, and remaining quantities remain separate.
 - BLOCKED describes why execution submitted zero; it never labels the investment decision itself a failure.
 
@@ -107,6 +108,8 @@ The fixed user order is:
 6. 决策后账户
 
 Snapshot A and B are displayed only when present in the immutable scorecard. Missing Snapshot B is shown as “尚无决策后账户快照”; it is never calculated from Snapshot A and fills.
+
+Position facts match the decision instrument by the exact canonical `(market, symbol)` pair. Monetary facts display the snapshot's canonical `currency`; the UI never assumes CNY or converts values.
 
 The recoverable URL is `/investment-decisions?decision=<decision_id>`. Refresh restores the same drawer when the ID exists; closing removes only the `decision` query parameter and returns to the list.
 
