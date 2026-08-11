@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from src.config import get_config
 from src.investment.m2.repository import M2OperationalRepository
+from src.investment.m2.runtime_diagnostics import classify_runtime_failure
 from src.investment.m3.repository import M3ExecutionRepository
 from src.services.runtime_scheduler import RuntimeSchedulerService
 from src.storage import DatabaseManager
@@ -68,6 +69,9 @@ class SingleBrainM2ReadinessService:
             )
         )
         operational = self._repository.readiness()
+        latest_cycle_diagnostics = self._latest_cycle_diagnostics(
+            operational.get("latest_cycle")
+        )
         canonical_snapshot = self._repository.latest_authoritative_snapshot()
         snapshot = None
         if canonical_snapshot is not None:
@@ -93,5 +97,81 @@ class SingleBrainM2ReadinessService:
             "recurring_scheduler": self._recurring_scheduler(),
             "latest_authoritative_snapshot": snapshot,
             "simulation_execution": self._m3_repository.readiness(),
+            "latest_cycle_diagnostics": latest_cycle_diagnostics,
             **operational,
+        }
+
+    def _latest_cycle_diagnostics(self, latest_cycle: dict | None) -> dict | None:
+        if not latest_cycle:
+            return None
+        cycle_id = str(latest_cycle.get("decision_cycle_id") or "").strip()
+        cycle_symbols = ()
+        symbol_reader = getattr(self._repository, "cycle_symbols", None)
+        if cycle_id and callable(symbol_reader):
+            cycle_symbols = tuple(symbol_reader(cycle_id))
+
+        research_completed_count = sum(
+            item.get("source_report_id") is not None for item in cycle_symbols
+        )
+        decision_count = sum(bool(item.get("decision_id")) for item in cycle_symbols)
+        expected_symbol_count = len(cycle_symbols)
+        research_completed = (
+            expected_symbol_count > 0
+            and research_completed_count == expected_symbol_count
+        )
+
+        execution = None
+        execution_reader = getattr(self._m3_repository, "readiness_for_cycle", None)
+        if cycle_id and callable(execution_reader):
+            execution = execution_reader(cycle_id)
+        if execution is None:
+            execution = {
+                "mandate_count": 0 if decision_count == 0 else None,
+                "dispatch_attempt_count": 0 if decision_count == 0 else None,
+                "broker_submission_state": "NONE" if decision_count == 0 else "UNKNOWN",
+                "recorded_submitted_quantity": 0 if decision_count == 0 else None,
+            }
+
+        explanation = classify_runtime_failure(
+            (
+                latest_cycle.get("failure_reason"),
+                *(item.get("failure_reason") for item in cycle_symbols),
+            ),
+            research_incomplete=(
+                latest_cycle.get("status") == "FAILED_CLOSED"
+                and not research_completed
+            ),
+        )
+        return {
+            "decision_cycle_id": cycle_id,
+            "status": latest_cycle.get("status"),
+            "failure_stage": (
+                explanation.stage
+                if latest_cycle.get("status") in {"FAILED", "FAILED_CLOSED"}
+                else None
+            ),
+            "failure_code": (
+                explanation.code
+                if latest_cycle.get("status") in {"FAILED", "FAILED_CLOSED"}
+                else None
+            ),
+            "failure_summary": (
+                explanation.summary
+                if latest_cycle.get("status") in {"FAILED", "FAILED_CLOSED"}
+                else None
+            ),
+            "expected_symbol_count": expected_symbol_count,
+            "research_completed_count": research_completed_count,
+            "research_completed": research_completed,
+            "decision_count": decision_count,
+            "decision_created": decision_count > 0,
+            "mandate_count": execution.get("mandate_count"),
+            "mandate_created": (
+                None
+                if execution.get("mandate_count") is None
+                else int(execution.get("mandate_count") or 0) > 0
+            ),
+            "dispatch_attempt_count": execution.get("dispatch_attempt_count"),
+            "broker_submission_state": execution.get("broker_submission_state"),
+            "recorded_submitted_quantity": execution.get("recorded_submitted_quantity"),
         }

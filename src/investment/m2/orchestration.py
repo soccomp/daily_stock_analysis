@@ -29,6 +29,7 @@ from src.investment.m2.identity import (
 )
 from src.investment.m2.policy import CanonicalRiskPolicyLoader
 from src.investment.m2.repository import M2InputConflictError, M2OperationalRepository
+from src.investment.m2.runtime_diagnostics import analysis_failure_marker
 from src.investment.shadow_wiring import InvestmentShadowWiringService, ShadowWiringRejected
 from src.services.history_service import HistoryService
 from src.storage import DatabaseManager
@@ -124,7 +125,12 @@ class DSAAnalysisCompletionRunner:
             current_time=current_time,
         )
         if not isinstance(result, AnalysisResult) or not result.success:
-            raise M2ShadowBlocked("real DSA analysis did not complete successfully")
+            error_message = (
+                getattr(result, "error_message", None)
+                if isinstance(result, AnalysisResult)
+                else None
+            )
+            raise M2ShadowBlocked(analysis_failure_marker(error_message))
         records = self._db.get_analysis_history(
             code=symbol,
             query_id=query_id,

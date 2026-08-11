@@ -208,6 +208,23 @@ export interface SingleBrainReadiness {
     completedAt?: string | null;
     status: string;
   } | null;
+  latestCycleDiagnostics?: {
+    decisionCycleId: string;
+    status: string;
+    failureStage?: 'RESEARCH' | 'AUTHORITY_INPUT' | 'DECISION' | 'EXECUTION' | 'CYCLE' | null;
+    failureCode?: string | null;
+    failureSummary?: string | null;
+    expectedSymbolCount: number;
+    researchCompletedCount: number;
+    researchCompleted: boolean;
+    decisionCount: number;
+    decisionCreated: boolean;
+    mandateCount?: number | null;
+    mandateCreated?: boolean | null;
+    dispatchAttemptCount?: number | null;
+    brokerSubmissionState: 'NONE' | 'RECORDED' | 'UNKNOWN';
+    recordedSubmittedQuantity?: number | null;
+  } | null;
   simulationExecution?: {
     pendingExecutionCount?: number;
     latestExecutionState?: string | null;

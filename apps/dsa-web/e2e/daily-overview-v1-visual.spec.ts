@@ -33,7 +33,16 @@ function decision(decisionId: string, action: 'HOLD' | 'ADD' | 'BUY', executionS
   };
 }
 
-async function installOverviewFacts(page: Page, options: { unavailable?: boolean } = {}) {
+type OverviewScenario = 'completed' | 'failed-closed-known' | 'failed-closed-unknown';
+
+async function installOverviewFacts(page: Page, options: {
+  unavailable?: boolean;
+  scenario?: OverviewScenario;
+  preserveEarlierHistory?: boolean;
+} = {}) {
+  const scenario = options.scenario ?? 'completed';
+  const failedClosed = scenario !== 'completed';
+  const showHistory = !failedClosed || options.preserveEarlierHistory === true;
   await page.addInitScript(() => localStorage.setItem('dsa.uiLanguage', 'zh'));
   await page.route('**/api/v1/auth/status', (route) => json(route, { auth_enabled: false, logged_in: false, password_set: false, password_changeable: false, setup_state: 'no_password' }));
   await page.route('**/api/v1/screening/status', (route) => json(route, { enabled: false, available: false }));
@@ -41,20 +50,31 @@ async function installOverviewFacts(page: Page, options: { unavailable?: boolean
   await page.route('**/api/v1/agent/skills', (route) => json(route, { skills: [], default_skill_id: '' }));
   await page.route('**/api/v1/stocks/watchlist', (route) => json(route, { stock_codes: ['600519', '000001'] }));
   await page.route('**/api/v1/analysis/tasks?**', (route) => json(route, { total: 0, pending: 0, processing: 0, tasks: [] }));
-  await page.route('**/api/v1/history/stocks?**', (route) => json(route, { total: 1, items: [{ id: 1, stock_code: '600519', stock_name: '贵州茅台', report_type: 'detailed', sentiment_score: 78, operation_advice: '中期趋势保持积极', analysis_count: 1, last_analysis_time: '2026-08-11T01:03:00Z' }] }));
+  await page.route('**/api/v1/history/stocks?**', (route) => json(route, showHistory ? { total: 1, items: [{ id: 1, stock_code: '600519', stock_name: '贵州茅台', report_type: 'detailed', sentiment_score: 78, operation_advice: '中期趋势保持积极', analysis_count: 1, last_analysis_time: '2026-08-11T01:03:00Z' }] } : { total: 0, items: [] }));
   await page.route('**/api/v1/history/1', (route) => json(route, { meta: { id: 1, query_id: 'q-sanitized', stock_code: '600519', stock_name: '贵州茅台', report_type: 'detailed', report_language: 'zh', created_at: '2026-08-11T01:03:00Z' }, summary: { analysis_summary: '趋势保持积极', operation_advice: '中期趋势保持积极', trend_prediction: '震荡偏强', sentiment_score: 78 } }));
-  await page.route('**/api/v1/history?**', (route) => json(route, { total: 1, page: 1, limit: 100, items: [{ id: 1, query_id: 'q-sanitized', stock_code: '600519', stock_name: '贵州茅台', report_type: 'detailed', sentiment_score: 78, operation_advice: '中期趋势保持积极', created_at: '2026-08-11T01:03:00Z' }] }));
+  await page.route('**/api/v1/history?**', (route) => json(route, showHistory ? { total: 1, page: 1, limit: 100, items: [{ id: 1, query_id: 'q-sanitized', stock_code: '600519', stock_name: '贵州茅台', report_type: 'detailed', sentiment_score: 78, operation_advice: '中期趋势保持积极', created_at: '2026-08-11T01:03:00Z' }] } : { total: 0, page: 1, limit: 100, items: [] }));
   await page.route('**/api/v1/portfolio/connected-snapshot', (route) => options.unavailable ? json(route, { detail: 'snapshot unavailable' }, 503) : json(route, { item: snapshot }));
   await page.route('**/api/v1/decision-scorecards?**', (route) => {
     const mode = new URL(route.request().url()).searchParams.get('mode');
     if (mode !== 'SIMULATION_EXECUTION') return json(route, { detail: 'mode required' }, 400);
-    return json(route, { items: [decision('decision-hold', 'HOLD', 'NOT_APPLICABLE'), decision('decision-blocked', 'ADD', 'BLOCKED'), decision('decision-unknown', 'BUY', 'UNKNOWN'), decision('decision-shadow', 'BUY', 'NOT_AUTHORIZED', 'M2_SHADOW')], total: 4, page: 1, page_size: 20 });
+    const items = showHistory ? [decision('decision-hold', 'HOLD', 'NOT_APPLICABLE'), decision('decision-blocked', 'ADD', 'BLOCKED'), decision('decision-unknown', 'BUY', 'UNKNOWN'), decision('decision-shadow', 'BUY', 'NOT_AUTHORIZED', 'M2_SHADOW')] : [];
+    return json(route, { items, total: items.length, page: 1, page_size: 20 });
   });
   await page.route('**/api/v1/single-brain/m2/readiness', (route) => json(route, { item: {
     feature_enabled: true, execution_mode: 'SIMULATION_EXECUTION', execution_authorization: 'ON',
     recurring_scheduler: { enabled: true, mode: 'M3_SIMULATION_EXECUTION_ONLY', authority_count: 1, interval_seconds: 3600, next_run_at: '2026-08-11T02:00:00Z' },
     latest_authoritative_snapshot: { as_of: '2026-08-11T01:05:00Z', reconciliation_status: 'RECONCILED' },
-    latest_cycle: { scheduled_for: '2026-08-11T01:00:00Z', completed_at: '2026-08-11T01:10:00Z', status: 'COMPLETED' },
+    latest_cycle: { scheduled_for: '2026-08-11T01:00:00Z', completed_at: '2026-08-11T01:10:00Z', status: failedClosed ? 'FAILED_CLOSED' : 'COMPLETED' },
+    latest_cycle_diagnostics: failedClosed ? {
+      decision_cycle_id: `cycle-${scenario}`,
+      status: 'FAILED_CLOSED',
+      failure_stage: 'RESEARCH',
+      failure_code: scenario === 'failed-closed-known' ? 'AI_QUOTA_EXHAUSTED' : 'RESEARCH_INCOMPLETE',
+      failure_summary: scenario === 'failed-closed-known' ? 'AI 分析额度不足' : '研究阶段未完成，具体原因待确认',
+      expected_symbol_count: 1, research_completed_count: 0, research_completed: false,
+      decision_count: 0, decision_created: false, mandate_count: 0, mandate_created: false,
+      dispatch_attempt_count: 0, broker_submission_state: 'NONE', recorded_submitted_quantity: 0,
+    } : null,
     simulation_execution: { pending_execution_count: 0, latest_execution_state: 'NOT_APPLICABLE' },
   } }));
   await page.route('**/api/v1/alerts/unread-count', (route) => json(route, { count: 0 }));
@@ -88,13 +108,42 @@ test.describe('daily overview v1 visual evidence', () => {
 
   test('mobile keeps the operating-priority order readable', async ({ page }, testInfo) => {
     await page.setViewportSize({ width: 390, height: 844 });
-    await installOverviewFacts(page);
+    await installOverviewFacts(page, { scenario: 'failed-closed-known' });
     await page.goto('/');
     await expect(page.getByTestId('daily-overview')).toBeVisible();
     await expect(page.getByText('自动投资状态')).toBeVisible();
     await expect(page.getByText('账户概览')).toBeVisible();
     await expect(page.getByText('需要关注')).toBeVisible();
-    await capture(page, testInfo, 'daily-overview-mobile');
+    await expect(page.getByTestId('overview-fail-closed')).toBeVisible();
+    await capture(page, testInfo, 'runtime-reason-failed-closed-mobile');
+  });
+
+  test('failed-closed known reason explains zero research and decision artifacts', async ({ page }, testInfo) => {
+    await installOverviewFacts(page, { scenario: 'failed-closed-known' });
+    await page.goto('/');
+    await expect(page.getByTestId('overview-fail-closed')).toBeVisible();
+    await expect(page.getByText('原因 · AI 分析额度不足')).toBeVisible();
+    await expect(page.getByText('本轮未生成新的投资决策')).toBeVisible();
+    await expect(page.getByTestId('overview-cycle-proof-submission')).toContainText('0');
+    await capture(page, testInfo, 'runtime-reason-failed-closed-known');
+  });
+
+  test('failed-closed unknown reason stays evidence-safe', async ({ page }, testInfo) => {
+    await installOverviewFacts(page, { scenario: 'failed-closed-unknown' });
+    await page.goto('/');
+    await expect(page.getByText('原因 · 研究阶段未完成，具体原因待确认')).toBeVisible();
+    await expect(page.getByText(/额度不足/)).toHaveCount(0);
+    await capture(page, testInfo, 'runtime-reason-failed-closed-unknown');
+  });
+
+  test('earlier research and decisions remain visible after a later failed-closed cycle', async ({ page }, testInfo) => {
+    await installOverviewFacts(page, { scenario: 'failed-closed-known', preserveEarlierHistory: true });
+    await page.goto('/');
+    await expect(page.getByText('贵州茅台', { exact: true })).toBeVisible();
+    await expect(page.getByTestId('overview-execution-decision-hold')).toBeVisible();
+    await expect(page.getByText('最近一轮研究未完成')).toBeVisible();
+    await expect(page.getByText('最近一轮未生成新的投资决策')).toBeVisible();
+    await capture(page, testInfo, 'runtime-reason-history-preserved');
   });
 
   test('connected unavailable remains explicit while research and decisions survive', async ({ page }, testInfo) => {

@@ -260,6 +260,56 @@ class M3ExecutionRepository:
             ),
         }
 
+    def readiness_for_cycle(self, cycle_id: str) -> dict[str, Any]:
+        """Project factual execution reachability for one cycle without mutation."""
+
+        with self.db.get_session() as session:
+            rows = tuple(
+                session.execute(
+                    select(SingleBrainM3ExecutionRecord)
+                    .where(SingleBrainM3ExecutionRecord.cycle_id == cycle_id)
+                    .order_by(SingleBrainM3ExecutionRecord.created_at)
+                ).scalars()
+            )
+        submitted_quantity = 0
+        uncertain = False
+        for row in rows:
+            try:
+                results = json.loads(row.results_json or "[]")
+            except (TypeError, json.JSONDecodeError):
+                uncertain = True
+                continue
+            row_submitted_quantity = 0
+            for result in results:
+                if not isinstance(result, dict):
+                    uncertain = True
+                    continue
+                if result.get("status") == "UNKNOWN":
+                    uncertain = True
+                try:
+                    row_submitted_quantity = max(
+                        row_submitted_quantity,
+                        int(result.get("submitted_quantity") or 0),
+                    )
+                except (TypeError, ValueError):
+                    uncertain = True
+            submitted_quantity += row_submitted_quantity
+            if int(row.dispatch_attempt_count or 0) > 0 and not results:
+                uncertain = True
+        submission_state = (
+            "RECORDED"
+            if submitted_quantity > 0
+            else "UNKNOWN"
+            if uncertain
+            else "NONE"
+        )
+        return {
+            "mandate_count": len(rows),
+            "dispatch_attempt_count": sum(int(row.dispatch_attempt_count or 0) for row in rows),
+            "broker_submission_state": submission_state,
+            "recorded_submitted_quantity": submitted_quantity,
+        }
+
     @staticmethod
     def _validate_same(existing, proposed) -> None:
         for name in (

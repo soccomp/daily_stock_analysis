@@ -390,6 +390,19 @@ class M2OperationalRepository:
                 "last_successful_shadow_persistence_at": self._iso(latest_persisted),
             }
 
+    def cycle_symbols(self, cycle_id: str) -> tuple[dict[str, Any], ...]:
+        """Return immutable operational facts for one cycle; no work is initiated."""
+
+        with self.db.get_session() as session:
+            rows = tuple(
+                session.execute(
+                    select(SingleBrainM2SymbolRecord)
+                    .where(SingleBrainM2SymbolRecord.cycle_id == cycle_id)
+                    .order_by(SingleBrainM2SymbolRecord.symbol)
+                ).scalars()
+            )
+        return tuple(self._symbol_payload(row) for row in rows)
+
     def latest_authoritative_snapshot(self) -> PortfolioSnapshot | None:
         """Return the newest immutable Athena mirror used by any M2 cycle."""
 

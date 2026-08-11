@@ -243,6 +243,73 @@ describe('DailyOverview', () => {
     expect(screen.getByTestId('overview-timeline-decision-timeline-rejected')).toHaveAttribute('data-tone', 'danger');
   });
 
+  it('explains a known failed-closed research cycle without treating the scheduler as failed', async () => {
+    listDecisions.mockResolvedValueOnce({ items: [], total: 0, page: 1, pageSize: 20 });
+    getReadiness.mockResolvedValueOnce({
+      ...readiness,
+      latestCycle: { ...readiness.latestCycle!, status: 'FAILED_CLOSED' },
+      latestCycleDiagnostics: {
+        decisionCycleId: 'cycle-quota', status: 'FAILED_CLOSED', failureStage: 'RESEARCH',
+        failureCode: 'AI_QUOTA_EXHAUSTED', failureSummary: 'AI 分析额度不足',
+        expectedSymbolCount: 1, researchCompletedCount: 0, researchCompleted: false,
+        decisionCount: 0, decisionCreated: false, mandateCount: 0, mandateCreated: false,
+        dispatchAttemptCount: 0, brokerSubmissionState: 'NONE', recordedSubmittedQuantity: 0,
+      },
+    });
+    renderOverview({ researchItems: [] });
+
+    expect(await screen.findByTestId('overview-fail-closed')).toBeInTheDocument();
+    expect(screen.getByText('运行中', { exact: true })).toHaveClass('text-success');
+    expect(screen.getAllByText('本轮研究未完成')).toHaveLength(2);
+    expect(screen.getAllByText(/AI 分析额度不足/).length).toBeGreaterThan(0);
+    expect(screen.getByTestId('overview-cycle-proof-decision')).toHaveTextContent('未生成');
+    expect(screen.getByText('本轮未生成新的投资决策')).toBeInTheDocument();
+    expect(screen.getByTestId('overview-cycle-proof-submission')).toHaveTextContent('0');
+    expect(screen.getByTestId('overview-timeline-cycle-cycle-quota')).toHaveAttribute('data-tone', 'warning');
+    expect(screen.queryByText('自动投资：未运行')).not.toBeInTheDocument();
+  });
+
+  it('uses an evidence-safe unknown reason and never invents quota language', async () => {
+    listDecisions.mockResolvedValueOnce({ items: [], total: 0, page: 1, pageSize: 20 });
+    getReadiness.mockResolvedValueOnce({
+      ...readiness,
+      latestCycle: { ...readiness.latestCycle!, status: 'FAILED_CLOSED' },
+      latestCycleDiagnostics: {
+        decisionCycleId: 'cycle-unknown', status: 'FAILED_CLOSED', failureStage: 'RESEARCH',
+        failureCode: 'RESEARCH_INCOMPLETE', failureSummary: '研究阶段未完成，具体原因待确认',
+        expectedSymbolCount: 1, researchCompletedCount: 0, researchCompleted: false,
+        decisionCount: 0, decisionCreated: false, mandateCount: 0, mandateCreated: false,
+        dispatchAttemptCount: 0, brokerSubmissionState: 'NONE', recordedSubmittedQuantity: 0,
+      },
+    });
+    renderOverview({ researchItems: [] });
+
+    expect(await screen.findByTestId('overview-cycle-reason')).toHaveTextContent('研究阶段未完成，具体原因待确认');
+    expect(screen.queryByText(/额度不足/)).not.toBeInTheDocument();
+  });
+
+  it('preserves earlier research and decisions while explaining the later failed-closed cycle', async () => {
+    getReadiness.mockResolvedValueOnce({
+      ...readiness,
+      latestCycle: { ...readiness.latestCycle!, status: 'FAILED_CLOSED' },
+      latestCycleDiagnostics: {
+        decisionCycleId: 'cycle-later', status: 'FAILED_CLOSED', failureStage: 'RESEARCH',
+        failureCode: 'AI_SERVICE_UNAVAILABLE', failureSummary: 'AI 分析服务暂时不可用',
+        expectedSymbolCount: 1, researchCompletedCount: 0, researchCompleted: false,
+        decisionCount: 0, decisionCreated: false, mandateCount: 0, mandateCreated: false,
+        dispatchAttemptCount: 0, brokerSubmissionState: 'NONE', recordedSubmittedQuantity: 0,
+      },
+    });
+    renderOverview();
+
+    expect(await screen.findByText('贵州茅台')).toBeInTheDocument();
+    expect(screen.getByTestId('overview-execution-decision-hold')).toBeInTheDocument();
+    expect(screen.getByText('最近一轮研究未完成')).toBeInTheDocument();
+    expect(screen.getByText('最近一轮未生成新的投资决策')).toBeInTheDocument();
+    expect(screen.getByText('存在交易状态待确认的投资决策')).toBeInTheDocument();
+    expect(screen.getByText(/最近一轮安全停止/)).toBeInTheDocument();
+  });
+
   it('uses the required mobile information order classes without page-wide horizontal overflow', async () => {
     const { container } = renderOverview();
     await waitFor(() => expect(getReadiness).toHaveBeenCalled());
