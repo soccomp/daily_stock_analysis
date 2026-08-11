@@ -203,7 +203,8 @@ def test_one_cycle_persists_stable_lineage_and_duplicate_trigger_is_noop(m2_db):
     assert first.status == "COMPLETED"
     assert len(first.persisted_decision_ids) == 1
     assert second.status == "DEDUPLICATED"
-    assert snapshots.calls == policies.calls == 1
+    assert snapshots.calls == 2
+    assert policies.calls == 1
     assert len(runner.calls) == 1
     payload = scorecards.get(first.persisted_decision_ids[0])["item"]
     assert payload["investment_decision"]["decision_cycle_id"] == first.cycle_id
@@ -233,7 +234,7 @@ def test_response_receipt_time_replaces_pre_request_clock_and_dedupe_is_unchange
 
     assert first.status == "COMPLETED"
     assert duplicate.status == "DEDUPLICATED"
-    assert snapshots.calls == 1
+    assert snapshots.calls == 2
     assert len(runner.calls) == 1
     assert scorecards.get(first.persisted_decision_ids[0])["item"][
         "portfolio_snapshot_a"
@@ -330,7 +331,7 @@ def test_restart_after_persistence_failure_reuses_immutable_authority_mirror(m2_
 
     assert failed.status == "FAILED_CLOSED"
     assert recovered.status == "COMPLETED"
-    assert snapshots.calls == 1
+    assert snapshots.calls == 3
     assert policies.calls == 2
     assert len(recovered.persisted_decision_ids) == 1
     assert recovered.duplicate_trigger is True
@@ -357,7 +358,7 @@ def test_restart_fails_closed_when_explicit_policy_changes_inside_cycle(m2_db):
     assert failed.status == "FAILED_CLOSED"
     assert conflicted.status == "FAILED_CLOSED"
     assert "RiskPolicy changed" in " ".join(conflicted.blocked_reasons)
-    assert snapshots.calls == 1
+    assert snapshots.calls == 2
     assert policies.calls == 2
     assert not conflicted.persisted_decision_ids
 

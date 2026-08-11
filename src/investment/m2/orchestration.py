@@ -409,18 +409,20 @@ class M2ShadowLoopService:
                     symbol=symbol,
                     source_report_id=completion.source_report_id,
                 )
-                decision_now = self._aware_now()
+                decision_snapshot = self._snapshot_source.capture_snapshot()
+                snapshot_validation_time = self._snapshot_receipt_time()
                 self._validate_authority_inputs(
-                    snapshot=snapshot,
+                    snapshot=decision_snapshot,
                     policy=policy,
                     account_id=account_id,
-                    now=decision_now,
+                    now=snapshot_validation_time,
                 )
+                decision_now = self._aware_now()
                 stable_decision_id = build_decision_id(
                     cycle=cycle,
                     symbol=symbol,
                     source_report_id=completion.source_report_id,
-                    snapshot_hash=snapshot.content_hash,
+                    snapshot_hash=decision_snapshot.content_hash,
                     policy_hash=policy.content_hash,
                 )
                 artifacts = InvestmentShadowWiringService(clock=lambda: decision_now).build_from_analysis(
@@ -433,7 +435,7 @@ class M2ShadowLoopService:
                         if self._execution_coordinator is not None
                         else "single_brain_m2_shadow"
                     ),
-                    portfolio_snapshot=snapshot,
+                    portfolio_snapshot=decision_snapshot,
                     risk_policy=policy,
                     decision_cycle_id=cycle,
                     decision_id=stable_decision_id,
