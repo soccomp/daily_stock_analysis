@@ -18,14 +18,14 @@ const snapshot = {
   trace_id: 'sanitized-trace', created_at: '2026-08-11T01:05:00Z', producer: 'ATHENA_RUNTIME', content_hash: 'a'.repeat(64), supersedes_id: 'snapshot-sanitized-previous',
 };
 
-function decision(decisionId: string, action: 'HOLD' | 'ADD' | 'BUY', executionStatus: string) {
+function decision(decisionId: string, action: 'HOLD' | 'ADD' | 'BUY', executionStatus: string, mode = 'SIMULATION_EXECUTION') {
   const delta = action === 'HOLD' ? 0 : action === 'ADD' ? 200 : 100;
   return {
     decision_id: decisionId, created_at: '2026-08-11T01:08:00Z', source_report_id: 1,
     account_id: 'sanitized-account', symbol: '600519', market: 'CN', action,
     current_quantity: action === 'BUY' ? 0 : 300, target_quantity: action === 'HOLD' ? 300 : action === 'ADD' ? 500 : 100,
     delta_quantity: delta, confidence: '0.82', rationale: action === 'HOLD' ? '现有仓位已达到风险预算目标。' : '风险预算允许本轮目标变化。',
-    mode: 'M3_SIMULATION_EXECUTION_ONLY', execution_status: executionStatus,
+    mode, execution_status: executionStatus,
     reconciliation_status: executionStatus === 'UNKNOWN' ? 'PENDING_RECONCILIATION' : 'NOT_REQUIRED',
     requested_quantity: action === 'HOLD' ? null : delta, submitted_quantity: 0, filled_quantity: 0,
     remaining_quantity: action === 'HOLD' ? null : delta, block_reason: executionStatus === 'BLOCKED' ? 'MARKET_SESSION_CLOSED' : null,
@@ -45,9 +45,13 @@ async function installOverviewFacts(page: Page, options: { unavailable?: boolean
   await page.route('**/api/v1/history/1', (route) => json(route, { meta: { id: 1, query_id: 'q-sanitized', stock_code: '600519', stock_name: '贵州茅台', report_type: 'detailed', report_language: 'zh', created_at: '2026-08-11T01:03:00Z' }, summary: { analysis_summary: '趋势保持积极', operation_advice: '中期趋势保持积极', trend_prediction: '震荡偏强', sentiment_score: 78 } }));
   await page.route('**/api/v1/history?**', (route) => json(route, { total: 1, page: 1, limit: 100, items: [{ id: 1, query_id: 'q-sanitized', stock_code: '600519', stock_name: '贵州茅台', report_type: 'detailed', sentiment_score: 78, operation_advice: '中期趋势保持积极', created_at: '2026-08-11T01:03:00Z' }] }));
   await page.route('**/api/v1/portfolio/connected-snapshot', (route) => options.unavailable ? json(route, { detail: 'snapshot unavailable' }, 503) : json(route, { item: snapshot }));
-  await page.route('**/api/v1/decision-scorecards?**', (route) => json(route, { items: [decision('decision-hold', 'HOLD', 'NOT_APPLICABLE'), decision('decision-blocked', 'ADD', 'BLOCKED'), decision('decision-unknown', 'BUY', 'UNKNOWN')], total: 3, page: 1, page_size: 20 }));
+  await page.route('**/api/v1/decision-scorecards?**', (route) => {
+    const mode = new URL(route.request().url()).searchParams.get('mode');
+    if (mode !== 'SIMULATION_EXECUTION') return json(route, { detail: 'mode required' }, 400);
+    return json(route, { items: [decision('decision-hold', 'HOLD', 'NOT_APPLICABLE'), decision('decision-blocked', 'ADD', 'BLOCKED'), decision('decision-unknown', 'BUY', 'UNKNOWN'), decision('decision-shadow', 'BUY', 'NOT_AUTHORIZED', 'M2_SHADOW')], total: 4, page: 1, page_size: 20 });
+  });
   await page.route('**/api/v1/single-brain/m2/readiness', (route) => json(route, { item: {
-    feature_enabled: true, execution_mode: 'M3_SIMULATION_EXECUTION_ONLY', execution_authorization: 'OFF',
+    feature_enabled: true, execution_mode: 'SIMULATION_EXECUTION', execution_authorization: 'ON',
     recurring_scheduler: { enabled: true, mode: 'M3_SIMULATION_EXECUTION_ONLY', authority_count: 1, interval_seconds: 3600, next_run_at: '2026-08-11T02:00:00Z' },
     latest_authoritative_snapshot: { as_of: '2026-08-11T01:05:00Z', reconciliation_status: 'RECONCILED' },
     latest_cycle: { scheduled_for: '2026-08-11T01:00:00Z', completed_at: '2026-08-11T01:10:00Z', status: 'COMPLETED' },
@@ -72,6 +76,9 @@ test.describe('daily overview v1 visual evidence', () => {
     await expect(page.getByText('继续持有，本轮无需交易', { exact: true })).toBeVisible();
     await expect(page.getByText('市场已休市', { exact: true })).toBeVisible();
     await expect(page.getByTestId('overview-execution-decision-unknown')).toHaveText('状态待确认');
+    await expect(page.getByTestId('overview-execution-decision-shadow')).toHaveCount(0);
+    await expect(page.getByText('模拟执行授权：开启')).toBeVisible();
+    await expect(page.getByTestId('overview-timeline-decision-decision-hold')).toHaveAttribute('data-tone', 'neutral');
     await capture(page, testInfo, 'daily-overview-desktop');
     await page.getByRole('heading', { name: '当前持仓' }).scrollIntoViewIfNeeded();
     await capture(page, testInfo, 'daily-overview-holdings');

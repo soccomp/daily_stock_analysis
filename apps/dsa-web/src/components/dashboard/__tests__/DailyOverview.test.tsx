@@ -73,7 +73,7 @@ function decision(overrides: Partial<DecisionScorecardSummary>): DecisionScoreca
     deltaQuantity: 0,
     confidence: '0.82',
     rationale: '现有仓位已达到风险预算目标。',
-    mode: 'M3_SIMULATION_EXECUTION_ONLY',
+    mode: 'SIMULATION_EXECUTION',
     executionStatus: 'NOT_APPLICABLE',
     reconciliationStatus: 'NOT_APPLICABLE',
     requestedQuantity: null,
@@ -90,8 +90,8 @@ function decision(overrides: Partial<DecisionScorecardSummary>): DecisionScoreca
 
 const readiness: SingleBrainReadiness = {
   featureEnabled: true,
-  executionMode: 'M3_SIMULATION_EXECUTION_ONLY',
-  executionAuthorization: 'OFF',
+  executionMode: 'SIMULATION_EXECUTION',
+  executionAuthorization: 'ON',
   recurringScheduler: {
     enabled: true,
     mode: 'M3_SIMULATION_EXECUTION_ONLY',
@@ -149,8 +149,12 @@ describe('DailyOverview', () => {
           deltaQuantity: 100, executionStatus: 'UNKNOWN', reconciliationStatus: 'PENDING_RECONCILIATION',
           requestedQuantity: 100, submittedQuantity: 100, filledQuantity: 0, remainingQuantity: 100,
         }),
+        decision({
+          decisionId: 'decision-shadow', action: 'BUY', currentQuantity: 0, targetQuantity: 50,
+          deltaQuantity: 50, mode: 'M2_SHADOW', executionStatus: 'NOT_AUTHORIZED',
+        }),
       ],
-      total: 3,
+      total: 4,
       page: 1,
       pageSize: 20,
     });
@@ -167,6 +171,9 @@ describe('DailyOverview', () => {
     expect(screen.getByTestId('overview-holding-CN-600519')).toBeInTheDocument();
     expect(screen.getByTestId('overview-holding-HK-600519')).toBeInTheDocument();
     expect(screen.getByText('共 2 项持仓')).toBeInTheDocument();
+    expect(listDecisions).toHaveBeenCalledWith({ page: 1, pageSize: 20, mode: 'SIMULATION_EXECUTION' });
+    expect(screen.queryByTestId('overview-execution-decision-shadow')).not.toBeInTheDocument();
+    expect(screen.getByText('模拟执行授权：开启')).toHaveClass('text-success');
     expect(screen.getByText('研究观点', { exact: true })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '今日投资决策' })).toBeInTheDocument();
     expect(screen.getAllByText('继续持有，本轮无需交易', { exact: false }).length).toBeGreaterThan(0);
@@ -180,6 +187,9 @@ describe('DailyOverview', () => {
     expect(unknownBadge).toHaveTextContent('状态待确认');
     expect(unknownBadge).toHaveClass('text-warning');
     expect(unknownBadge).not.toHaveClass('text-danger');
+    expect(screen.getByTestId('overview-timeline-decision-decision-hold')).toHaveAttribute('data-tone', 'neutral');
+    expect(screen.getByTestId('overview-timeline-decision-decision-blocked')).toHaveAttribute('data-tone', 'warning');
+    expect(screen.getByTestId('overview-timeline-decision-decision-unknown')).toHaveAttribute('data-tone', 'warning');
 
     fireEvent.click(screen.getByRole('button', { name: '查看全部持仓' }));
     expect(props.onNavigate).toHaveBeenCalledWith('/portfolio?account=connected');
@@ -205,12 +215,32 @@ describe('DailyOverview', () => {
     expect(screen.getByTestId('overview-execution-decision-hold')).toBeInTheDocument();
   });
 
-  it('treats any non-OFF execution authorization as a warning fact', async () => {
-    getReadiness.mockResolvedValueOnce({ ...readiness, executionAuthorization: 'UNKNOWN' });
+  it('treats contradictory simulation execution authorization as a warning fact', async () => {
+    getReadiness.mockResolvedValueOnce({ ...readiness, executionAuthorization: 'OFF' });
     renderOverview();
 
     expect(await screen.findByText('执行授权：状态待确认')).toHaveClass('text-warning');
-    expect(screen.getByText('执行授权状态需要核对')).toBeInTheDocument();
+    expect(screen.getByText('模拟执行授权或运行模式需要核对')).toBeInTheDocument();
+  });
+
+  it('maps decision timeline tones by decision and execution semantics', async () => {
+    listDecisions.mockResolvedValueOnce({
+      items: [
+        decision({ decisionId: 'timeline-hold' }),
+        decision({ decisionId: 'timeline-filled', action: 'BUY', currentQuantity: 0, targetQuantity: 100, deltaQuantity: 100, executionStatus: 'FILLED' }),
+        decision({ decisionId: 'timeline-active', action: 'ADD', targetQuantity: 400, deltaQuantity: 100, executionStatus: 'ACTIVE' }),
+        decision({ decisionId: 'timeline-rejected', action: 'BUY', currentQuantity: 0, targetQuantity: 100, deltaQuantity: 100, executionStatus: 'BROKER_REJECTED' }),
+      ],
+      total: 4,
+      page: 1,
+      pageSize: 20,
+    });
+    renderOverview();
+
+    expect(await screen.findByTestId('overview-timeline-decision-timeline-hold')).toHaveAttribute('data-tone', 'neutral');
+    expect(screen.getByTestId('overview-timeline-decision-timeline-filled')).toHaveAttribute('data-tone', 'success');
+    expect(screen.getByTestId('overview-timeline-decision-timeline-active')).toHaveAttribute('data-tone', 'info');
+    expect(screen.getByTestId('overview-timeline-decision-timeline-rejected')).toHaveAttribute('data-tone', 'danger');
   });
 
   it('uses the required mobile information order classes without page-wide horizontal overflow', async () => {

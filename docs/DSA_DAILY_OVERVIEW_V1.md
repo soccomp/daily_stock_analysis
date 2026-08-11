@@ -12,7 +12,7 @@ DSA 首页默认显示“今日总览”，并保留原有“研究工作台”�
 | --- | --- | --- |
 | 账户与持仓 | `GET /api/v1/portfolio/connected-snapshot` | 明确显示已连接账户不可用；不补零，不回退到手工账户 |
 | 今日研究 | 现有分析历史、任务和观察列表数据 | 仅该分区显示不可用；研究观点不表述为投资决策 |
-| 投资决策与执行状态 | `GET /api/v1/decision-scorecards` | 仅该分区显示不可用；HOLD、BLOCKED、UNKNOWN 保持不同语义 |
+| 投资决策与执行状态 | `GET /api/v1/decision-scorecards?mode=SIMULATION_EXECUTION` | 仅展示 authoritative M3 simulation-execution scorecard；HOLD、BLOCKED、UNKNOWN 保持不同语义 |
 | 自动投资状态 | `GET /api/v1/single-brain/m2/readiness` | 显示状态需要关注；不推断 scheduler 或执行事实 |
 
 所有分区独立加载。任一来源失败不会清空其他已经确认的事实。
@@ -24,6 +24,8 @@ DSA 首页默认显示“今日总览”，并保留原有“研究工作台”�
 - 研究卡片只显示研究观点。最终 BUY / ADD / HOLD 和数量只来自 `InvestmentDecision` / Decision Scorecard。
 - “执行指令已生成”只在 Decision Scorecard 已记录请求数量时显示；HOLD 显示本轮无需生成，字段缺失时显示“未记录”，不从研究观点或目标数量猜测。
 - HOLD 是中性决策；BLOCKED 是执行条件未满足；UNKNOWN 显示“状态待确认”并使用 warning 语义。
+- 健康的 M3 simulation runtime 使用 `execution_mode=SIMULATION_EXECUTION`、`execution_authorization=ON` 与 scheduler mode `M3_SIMULATION_EXECUTION_ONLY`；这里的 ON 仅表示已授权现有 simulation execution，不代表 LIVE 权限。
+- 今日动态中的 HOLD 使用 neutral；BLOCKED / UNKNOWN 使用 warning；ACCEPTED / ACTIVE / PARTIALLY_FILLED 使用 info；FILLED 使用 success；BROKER_REJECTED 使用 danger。
 - 今日总览不创建 `ExecutionMandate`、不重试、不撤单、不核对、不提交订单，也不修改 RiskPolicy 或 PortfolioSnapshot。
 
 ## 导航与发现性

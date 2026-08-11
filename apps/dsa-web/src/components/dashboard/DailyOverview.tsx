@@ -51,7 +51,7 @@ type TimelineItem = {
   occurredAt: string;
   title: string;
   detail: string;
-  tone: 'info' | 'success' | 'warning';
+  tone: 'neutral' | 'info' | 'success' | 'warning' | 'danger';
 };
 
 function shanghaiDateKey(value: string | Date): string {
@@ -85,7 +85,28 @@ function runtimePresentation(readiness: SingleBrainReadiness | null, error: stri
   if (readiness.recurringScheduler.authorityCount !== 1 || readiness.latestCycle?.status === 'FAILED') {
     return { label: '需要关注', variant: 'warning' as const, description: '运行状态存在需要核对的事项。' };
   }
+  if (!isHealthySimulationAuthorization(readiness)) {
+    return { label: '需要关注', variant: 'warning' as const, description: '模拟执行授权或运行模式需要核对。' };
+  }
   return { label: '运行中', variant: 'success' as const, description: '系统按既定周期进行研究与投资决策。' };
+}
+
+function isHealthySimulationAuthorization(readiness: SingleBrainReadiness): boolean {
+  return readiness.executionMode === 'SIMULATION_EXECUTION'
+    && readiness.executionAuthorization === 'ON'
+    && readiness.recurringScheduler.mode === 'M3_SIMULATION_EXECUTION_ONLY';
+}
+
+function authorizationPresentation(readiness: SingleBrainReadiness | null) {
+  if (!readiness) return { label: '状态待确认', variant: 'warning' as const };
+  if (readiness.featureEnabled && readiness.recurringScheduler.enabled) {
+    return isHealthySimulationAuthorization(readiness)
+      ? { label: '模拟执行授权：开启', variant: 'success' as const }
+      : { label: '执行授权：状态待确认', variant: 'warning' as const };
+  }
+  return readiness.executionAuthorization === 'OFF'
+    ? { label: '执行授权：关闭', variant: 'default' as const }
+    : { label: '执行授权：状态待确认', variant: 'warning' as const };
 }
 
 function cycleStatusLabel(status?: string | null): string {
@@ -129,6 +150,23 @@ function brokerSubmissionSummary(item: DecisionScorecardSummary): string {
   return (item.submittedQuantity ?? 0) > 0 ? `已提交 ${formatQuantity(item.submittedQuantity)}` : '未提交';
 }
 
+function decisionTimelineTone(item: DecisionScorecardSummary): TimelineItem['tone'] {
+  if (item.action === 'HOLD') return 'neutral';
+  if (item.executionStatus === 'UNKNOWN' || item.executionStatus === 'BLOCKED') return 'warning';
+  if (item.executionStatus === 'FILLED') return 'success';
+  if (item.executionStatus === 'ACCEPTED' || item.executionStatus === 'ACTIVE' || item.executionStatus === 'PARTIALLY_FILLED') return 'info';
+  if (item.executionStatus === 'BROKER_REJECTED') return 'danger';
+  return 'neutral';
+}
+
+function timelineDotClass(tone: TimelineItem['tone']): string {
+  if (tone === 'danger') return 'bg-danger';
+  if (tone === 'warning') return 'bg-warning';
+  if (tone === 'success') return 'bg-success';
+  if (tone === 'info') return 'bg-cyan';
+  return 'bg-muted-text';
+}
+
 const SectionHeading: React.FC<{
   icon: React.ReactNode;
   title: string;
@@ -168,8 +206,8 @@ const DailyOverview: React.FC<DailyOverviewProps> = ({
     portfolioApi.getConnectedSnapshot()
       .then((data) => active && setPortfolio({ data, loading: false, error: null }))
       .catch((error: unknown) => active && setPortfolio({ data: null, loading: false, error: error instanceof Error ? error.message : '权威账户快照暂时不可用' }));
-    investmentDecisionsApi.list({ page: 1, pageSize: 20 })
-      .then((data) => active && setDecisions({ data: data.items, loading: false, error: null }))
+    investmentDecisionsApi.list({ page: 1, pageSize: 20, mode: 'SIMULATION_EXECUTION' })
+      .then((data) => active && setDecisions({ data: data.items.filter((item) => item.mode === 'SIMULATION_EXECUTION'), loading: false, error: null }))
       .catch((error: unknown) => active && setDecisions({ data: null, loading: false, error: error instanceof Error ? error.message : '投资决策暂时不可用' }));
     investmentDecisionsApi.readiness()
       .then((data) => active && setReadiness({ data, loading: false, error: null }))
@@ -198,6 +236,7 @@ const DailyOverview: React.FC<DailyOverviewProps> = ({
   );
   const runningTasks = activeTasks.filter((task) => task.status === 'pending' || task.status === 'processing');
   const runtime = runtimePresentation(readiness.data, readiness.error);
+  const authorization = authorizationPresentation(readiness.data);
 
   const attentionItems = useMemo(() => {
     const items: string[] = [];
@@ -207,7 +246,7 @@ const DailyOverview: React.FC<DailyOverviewProps> = ({
     }
     if (portfolio.data && ['LOW', 'UNKNOWN'].includes(portfolio.data.dataQuality)) items.push('账户数据质量需要关注');
     if (readiness.error) items.push('自动投资运行状态暂时不可用');
-    if (readiness.data && readiness.data.executionAuthorization !== 'OFF') items.push('执行授权状态需要核对');
+    if (readiness.data && authorization.variant === 'warning') items.push('模拟执行授权或运行模式需要核对');
     if (readiness.data?.recurringScheduler.authorityCount !== undefined && readiness.data.recurringScheduler.authorityCount !== 1) items.push('自动投资调度状态需要核对');
     if (readiness.data?.latestCycle?.status === 'FAILED') items.push('最近一轮自动投资运行失败');
     if (researchUnavailable) items.push('今日研究记录暂时不可用');
@@ -215,7 +254,7 @@ const DailyOverview: React.FC<DailyOverviewProps> = ({
     const pendingCount = readiness.data?.simulationExecution?.pendingExecutionCount ?? 0;
     if (pendingCount > 0) items.push(`有 ${pendingCount} 项执行事实待核对`);
     return [...new Set(items)];
-  }, [portfolio.data, portfolio.error, readiness.data, readiness.error, researchUnavailable, todayDecisions]);
+  }, [authorization.variant, portfolio.data, portfolio.error, readiness.data, readiness.error, researchUnavailable, todayDecisions]);
 
   const timeline = useMemo<TimelineItem[]>(() => {
     const items: TimelineItem[] = todayResearch.flatMap((item) => item.lastAnalysisTime ? [{
@@ -231,7 +270,7 @@ const DailyOverview: React.FC<DailyOverviewProps> = ({
         occurredAt: item.createdAt,
         title: `${item.symbol}：Brain 决定${actionPresentation[item.action].label}`,
         detail: decisionExecutionSummary(item),
-        tone: item.executionStatus === 'UNKNOWN' || item.executionStatus === 'BLOCKED' ? 'warning' : 'success',
+        tone: decisionTimelineTone(item),
       });
     }
     if (portfolio.data && isToday(portfolio.data.asOf)) items.push({
@@ -246,7 +285,7 @@ const DailyOverview: React.FC<DailyOverviewProps> = ({
       occurredAt: readiness.data.latestCycle.completedAt,
       title: '自动投资完成本轮运行',
       detail: `运行结果：${cycleStatusLabel(readiness.data.latestCycle.status)}`,
-      tone: readiness.data.latestCycle.status === 'FAILED' ? 'warning' : 'success',
+      tone: readiness.data.latestCycle.status === 'FAILED' ? 'danger' : 'success',
     });
     return items.filter((item) => !Number.isNaN(Date.parse(item.occurredAt)))
       .sort((left, right) => Date.parse(right.occurredAt) - Date.parse(left.occurredAt)).slice(0, 12);
@@ -287,7 +326,7 @@ const DailyOverview: React.FC<DailyOverviewProps> = ({
               <RuntimeFact label="待核对事项" value={`${readiness.data?.simulationExecution?.pendingExecutionCount ?? 0} 项`} />
               <RuntimeFact label="最近账户快照" value={readiness.data?.latestAuthoritativeSnapshot?.asOf ? formatDateTime(readiness.data.latestAuthoritativeSnapshot.asOf) : '暂无记录'} />
             </dl>
-            <div className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-xs ${readiness.data?.executionAuthorization === 'OFF' ? 'border-success/15 bg-success/5 text-success' : 'border-warning/20 bg-warning/5 text-warning'}`}><ShieldCheck className="h-4 w-4 shrink-0" />执行授权：{readiness.data?.executionAuthorization === 'OFF' ? '关闭' : '状态待确认'}</div>
+            <div className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-xs ${authorization.variant === 'success' ? 'border-success/15 bg-success/5 text-success' : authorization.variant === 'warning' ? 'border-warning/20 bg-warning/5 text-warning' : 'border-border/60 bg-elevated/35 text-secondary-text'}`}><ShieldCheck className="h-4 w-4 shrink-0" />{authorization.label}</div>
           </div> : null}
         </Card>
       </div>
@@ -345,7 +384,7 @@ const DailyOverview: React.FC<DailyOverviewProps> = ({
 
       <Card padding="lg">
         <SectionHeading icon={<Clock3 className="h-4 w-4" />} title="今日动态" description="按已有时间戳排列事实；没有证据的事件不会出现在这里。" />
-        {timeline.length === 0 ? <EmptyState title="今天还没有可确认的动态" description="账户、研究或决策事实更新后会显示在这里。" /> : <ol className="relative space-y-4 border-l border-border/70 pl-5">{timeline.map((item) => <li key={item.id} className="relative"><span className={`absolute -left-[1.55rem] top-1.5 h-2.5 w-2.5 rounded-full border-2 border-surface ${item.tone === 'warning' ? 'bg-warning' : item.tone === 'success' ? 'bg-success' : 'bg-cyan'}`} /><div className="flex flex-wrap items-baseline gap-x-3 gap-y-1"><time className="font-mono text-xs text-muted-text">{formatDateTime(item.occurredAt)}</time><p className="text-sm font-medium text-foreground">{item.title}</p></div><p className="mt-1 text-xs leading-5 text-secondary-text">{item.detail}</p></li>)}</ol>}
+        {timeline.length === 0 ? <EmptyState title="今天还没有可确认的动态" description="账户、研究或决策事实更新后会显示在这里。" /> : <ol className="relative space-y-4 border-l border-border/70 pl-5">{timeline.map((item) => <li key={item.id} data-testid={`overview-timeline-${item.id.replace(':', '-')}`} data-tone={item.tone} className="relative"><span className={`absolute -left-[1.55rem] top-1.5 h-2.5 w-2.5 rounded-full border-2 border-surface ${timelineDotClass(item.tone)}`} /><div className="flex flex-wrap items-baseline gap-x-3 gap-y-1"><time className="font-mono text-xs text-muted-text">{formatDateTime(item.occurredAt)}</time><p className="text-sm font-medium text-foreground">{item.title}</p></div><p className="mt-1 text-xs leading-5 text-secondary-text">{item.detail}</p></li>)}</ol>}
       </Card>
     </div>
   );
