@@ -88,6 +88,20 @@ function runtimePresentation(readiness: SingleBrainReadiness | null, error: stri
   if (!isHealthySimulationAuthorization(readiness)) {
     return { label: '需要关注', variant: 'warning' as const, description: '模拟执行授权或运行模式需要核对。' };
   }
+  if (readiness.latestCycle?.status === 'FAILED_CLOSED') {
+    if (!hasProvenSchedulerContinuation(readiness)) {
+      return {
+        label: '需要关注',
+        variant: 'warning' as const,
+        description: '最近一轮已安全停止；自动投资调度状态需要核对。',
+      };
+    }
+    return {
+      label: '运行中',
+      variant: 'success' as const,
+      description: '调度正常；最近一轮已安全停止，系统会按计划继续运行。',
+    };
+  }
   return { label: '运行中', variant: 'success' as const, description: '系统按既定周期进行研究与投资决策。' };
 }
 
@@ -95,6 +109,15 @@ function isHealthySimulationAuthorization(readiness: SingleBrainReadiness): bool
   return readiness.executionMode === 'SIMULATION_EXECUTION'
     && readiness.executionAuthorization === 'ON'
     && readiness.recurringScheduler.mode === 'M3_SIMULATION_EXECUTION_ONLY';
+}
+
+function hasProvenSchedulerContinuation(readiness: SingleBrainReadiness): boolean {
+  const nextRunAt = readiness.recurringScheduler.nextRunAt;
+  return readiness.featureEnabled
+    && readiness.recurringScheduler.enabled
+    && readiness.recurringScheduler.authorityCount === 1
+    && isHealthySimulationAuthorization(readiness)
+    && Boolean(nextRunAt && !Number.isNaN(Date.parse(nextRunAt)));
 }
 
 function authorizationPresentation(readiness: SingleBrainReadiness | null) {
@@ -113,11 +136,41 @@ function cycleStatusLabel(status?: string | null): string {
   if (!status) return '暂无运行记录';
   return ({
     COMPLETED: '已完成',
+    PARTIAL: '部分完成',
+    FAILED_CLOSED: '本轮安全停止',
     FAILED: '运行失败',
     BLOCKED: '本轮未生成决策',
     RUNNING: '运行中',
     PENDING: '等待运行',
   } as Record<string, string>)[status] ?? '状态待确认';
+}
+
+function failClosedTitle(readiness: SingleBrainReadiness): string {
+  const stage = readiness.latestCycleDiagnostics?.failureStage;
+  if (stage === 'RESEARCH') return '本轮研究未完成';
+  if (stage === 'DECISION') return '本轮投资决策未完成';
+  return '本轮安全停止';
+}
+
+function failClosedReason(readiness: SingleBrainReadiness): string {
+  return readiness.latestCycleDiagnostics?.failureSummary || '具体原因待确认';
+}
+
+function failClosedConsequence(readiness: SingleBrainReadiness): string {
+  const facts = readiness.latestCycleDiagnostics;
+  if (!facts) return '系统已安全停止本轮流程。';
+  if (!facts.decisionCreated && facts.mandateCreated === false) {
+    return '系统已安全停止本轮流程，没有生成新的投资决策或交易指令。';
+  }
+  if (!facts.decisionCreated) return '系统已安全停止本轮流程，没有生成新的投资决策。';
+  if (facts.brokerSubmissionState === 'UNKNOWN') return '系统已安全停止本轮流程；券商提交事实仍待核对。';
+  return '系统已安全停止本轮流程，已确认事实不会被改写。';
+}
+
+function proofLabel(value: boolean | null | undefined, present: string, absent: string): string {
+  if (value === true) return present;
+  if (value === false) return absent;
+  return '状态待确认';
 }
 
 function researchView(item: StockBarItem): string {
@@ -185,6 +238,37 @@ const SectionHeading: React.FC<{
   </div>
 );
 
+const FailClosedPanel: React.FC<{ readiness: SingleBrainReadiness }> = ({ readiness }) => {
+  const facts = readiness.latestCycleDiagnostics;
+  return <div data-testid="overview-fail-closed" className="rounded-2xl border border-warning/25 bg-warning/5 p-4 text-warning">
+    <div className="flex items-start gap-3">
+      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+      <div className="min-w-0">
+        <p className="text-sm font-semibold">{failClosedTitle(readiness)}</p>
+        <p className="mt-1 text-xs leading-5 text-secondary-text">{failClosedConsequence(readiness)}</p>
+        <p data-testid="overview-cycle-reason" className="mt-2 text-xs">原因 · {failClosedReason(readiness)}</p>
+      </div>
+    </div>
+    {facts ? <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+      <RuntimeProof label="研究结果" value={proofLabel(facts.researchCompleted, '已完成', '未完成')} />
+      <RuntimeProof dataTestId="overview-cycle-proof-decision" label="新投资决策" value={proofLabel(facts.decisionCreated, '已生成', '未生成')} />
+      <RuntimeProof label="交易指令" value={proofLabel(facts.mandateCreated, '已生成', '未生成')} />
+      <RuntimeProof dataTestId="overview-cycle-proof-submission" label="券商提交" value={facts.brokerSubmissionState === 'RECORDED' ? '已记录' : facts.brokerSubmissionState === 'NONE' ? '0' : '状态待确认'} />
+    </div> : null}
+    <details className="mt-3 border-t border-warning/15 pt-3 text-xs text-secondary-text">
+      <summary className="cursor-pointer select-none text-muted-text">技术详情</summary>
+      <div className="mt-2 grid gap-1 sm:grid-cols-2">
+        <span>周期状态 · {readiness.latestCycle?.status}</span>
+        <span>失败阶段 · {facts?.failureStage ?? '待确认'}</span>
+        <span>安全原因代码 · {facts?.failureCode ?? '待确认'}</span>
+        <span>调度模式 · {readiness.recurringScheduler.mode}</span>
+        <span>调度权威数量 · {readiness.recurringScheduler.authorityCount}</span>
+        <span>下次预计 · {readiness.recurringScheduler.nextRunAt ? formatDateTime(readiness.recurringScheduler.nextRunAt) : '尚未登记'}</span>
+      </div>
+    </details>
+  </div>;
+};
+
 const DailyOverview: React.FC<DailyOverviewProps> = ({
   researchItems,
   researchLoading,
@@ -237,6 +321,7 @@ const DailyOverview: React.FC<DailyOverviewProps> = ({
   const runningTasks = activeTasks.filter((task) => task.status === 'pending' || task.status === 'processing');
   const runtime = runtimePresentation(readiness.data, readiness.error);
   const authorization = authorizationPresentation(readiness.data);
+  const failedClosed = readiness.data?.latestCycle?.status === 'FAILED_CLOSED' ? readiness.data : null;
 
   const attentionItems = useMemo(() => {
     const items: string[] = [];
@@ -249,6 +334,15 @@ const DailyOverview: React.FC<DailyOverviewProps> = ({
     if (readiness.data && authorization.variant === 'warning') items.push('模拟执行授权或运行模式需要核对');
     if (readiness.data?.recurringScheduler.authorityCount !== undefined && readiness.data.recurringScheduler.authorityCount !== 1) items.push('自动投资调度状态需要核对');
     if (readiness.data?.latestCycle?.status === 'FAILED') items.push('最近一轮自动投资运行失败');
+    if (readiness.data?.latestCycle?.status === 'FAILED_CLOSED') {
+      const continuationProven = hasProvenSchedulerContinuation(readiness.data);
+      items.push(continuationProven
+        ? `最近一轮安全停止：${failClosedReason(readiness.data)}；系统将在下一计划周期继续运行`
+        : `最近一轮安全停止：${failClosedReason(readiness.data)}`);
+      if (!continuationProven && !items.includes('自动投资调度状态需要核对')) {
+        items.push('自动投资调度状态需要核对');
+      }
+    }
     if (researchUnavailable) items.push('今日研究记录暂时不可用');
     if (todayDecisions.some((item) => item.executionStatus === 'UNKNOWN')) items.push('存在交易状态待确认的投资决策');
     const pendingCount = readiness.data?.simulationExecution?.pendingExecutionCount ?? 0;
@@ -281,11 +375,13 @@ const DailyOverview: React.FC<DailyOverviewProps> = ({
       tone: portfolio.data.reconciliationStatus === 'RECONCILED' ? 'success' : 'warning',
     });
     if (readiness.data?.latestCycle?.completedAt && isToday(readiness.data.latestCycle.completedAt)) items.push({
-      id: `cycle:${readiness.data.latestCycle.scheduledFor ?? readiness.data.latestCycle.completedAt}`,
+      id: `cycle:${readiness.data.latestCycleDiagnostics?.decisionCycleId ?? readiness.data.latestCycle.scheduledFor ?? readiness.data.latestCycle.completedAt}`,
       occurredAt: readiness.data.latestCycle.completedAt,
-      title: '自动投资完成本轮运行',
-      detail: `运行结果：${cycleStatusLabel(readiness.data.latestCycle.status)}`,
-      tone: readiness.data.latestCycle.status === 'FAILED' ? 'danger' : 'success',
+      title: readiness.data.latestCycle.status === 'FAILED_CLOSED' ? '自动投资本轮安全停止' : '自动投资完成本轮运行',
+      detail: readiness.data.latestCycle.status === 'FAILED_CLOSED'
+        ? `${failClosedReason(readiness.data)}；${failClosedConsequence(readiness.data)}`
+        : `运行结果：${cycleStatusLabel(readiness.data.latestCycle.status)}`,
+      tone: readiness.data.latestCycle.status === 'FAILED' ? 'danger' : readiness.data.latestCycle.status === 'FAILED_CLOSED' ? 'warning' : 'success',
     });
     return items.filter((item) => !Number.isNaN(Date.parse(item.occurredAt)))
       .sort((left, right) => Date.parse(right.occurredAt) - Date.parse(left.occurredAt)).slice(0, 12);
@@ -318,11 +414,12 @@ const DailyOverview: React.FC<DailyOverviewProps> = ({
           {readiness.loading ? <EmptyState title="正在确认运行状态" description="稍候显示最近运行与下一次预计时间。" /> : null}
           {!readiness.loading ? <div className="space-y-4">
             <p className="text-sm text-secondary-text">{runtime.description}</p>
+            {failedClosed ? <FailClosedPanel readiness={failedClosed} /> : null}
             <dl className="grid grid-cols-2 gap-3 text-sm">
               <RuntimeFact label="当前模式" value={readiness.data?.executionMode?.includes('SIMULATION') ? '模拟交易' : '状态待确认'} />
               <RuntimeFact label="最近结果" value={cycleStatusLabel(readiness.data?.latestCycle?.status)} />
               <RuntimeFact label="最近运行" value={readiness.data?.latestCycle?.completedAt ? formatDateTime(readiness.data.latestCycle.completedAt) : '暂无记录'} />
-              <RuntimeFact label="下次预计" value={readiness.data?.recurringScheduler.nextRunAt ? formatDateTime(readiness.data.recurringScheduler.nextRunAt) : '尚未登记'} />
+              <RuntimeFact label="下次预计" value={readiness.data && hasProvenSchedulerContinuation(readiness.data) ? formatDateTime(readiness.data.recurringScheduler.nextRunAt!) : '尚未确认'} />
               <RuntimeFact label="待核对事项" value={`${readiness.data?.simulationExecution?.pendingExecutionCount ?? 0} 项`} />
               <RuntimeFact label="最近账户快照" value={readiness.data?.latestAuthoritativeSnapshot?.asOf ? formatDateTime(readiness.data.latestAuthoritativeSnapshot.asOf) : '暂无记录'} />
             </dl>
@@ -356,7 +453,8 @@ const DailyOverview: React.FC<DailyOverviewProps> = ({
           <SectionHeading icon={<BriefcaseBusiness className="h-4 w-4" />} title="今日投资决策" description="仅展示 Brain 的最终投资决策与真实执行状态。" action={<button type="button" className="btn-secondary text-xs" onClick={() => onNavigate('/investment-decisions')}>全部决策</button>} />
           {decisions.loading ? <EmptyState title="正在读取投资决策" description="稍候显示今天的决策。" /> : null}
           {decisions.error ? <InlineAlert variant="warning" title="投资决策暂时不可用" message="账户与研究信息仍可独立查看。" /> : null}
-          {!decisions.loading && !decisions.error && todayDecisions.length === 0 ? <EmptyState title="今天还没有投资决策" description="研究观点不会自动当作投资决策。" /> : null}
+          {failedClosed && todayDecisions.length > 0 && failedClosed.latestCycleDiagnostics?.decisionCreated === false ? <InlineAlert variant="warning" title="最近一轮未生成新的投资决策" message={`${failClosedReason(failedClosed)}；今天较早的有效投资决策继续保留。`} /> : null}
+          {!decisions.loading && !decisions.error && todayDecisions.length === 0 ? <EmptyState title={failedClosed?.latestCycleDiagnostics?.decisionCreated === false ? '本轮未生成新的投资决策' : '今天还没有投资决策'} description={failedClosed?.latestCycleDiagnostics?.decisionCreated === false ? `${failedClosed.latestCycleDiagnostics.failureStage === 'RESEARCH' ? '研究阶段未完成，因此 Brain 没有进入新的资本配置决策。' : '本轮在投资决策前安全停止。'}原因：${failClosedReason(failedClosed)}` : '研究观点不会自动当作投资决策。'} /> : null}
           <div className="space-y-2">{todayDecisions.map((item) => {
             const action = actionPresentation[item.action]; const execution = executionLabel(item.executionStatus);
             return <button key={item.decisionId} type="button" onClick={() => onNavigate(`/investment-decisions?decision=${encodeURIComponent(item.decisionId)}`)} className="w-full rounded-xl border border-border/50 bg-elevated/35 px-4 py-3 text-left transition-colors hover:border-cyan/30 hover:bg-elevated/60">
@@ -374,7 +472,8 @@ const DailyOverview: React.FC<DailyOverviewProps> = ({
           <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4"><RuntimeFact label="已完成分析" value={`${allTodayResearch.length} 项`} /><RuntimeFact label="正在分析" value={`${runningTasks.length} 项`} /><RuntimeFact label="观察列表覆盖" value={watchlistTotal > 0 ? `${watchlistCovered} / ${watchlistTotal}` : '暂无观察列表'} /><RuntimeFact label="最近市场复盘" value={latestMarketReviewAt ? formatDateTime(latestMarketReviewAt) : '暂无记录'} /></div>
           {researchLoading ? <EmptyState title="正在读取今日研究" description="研究记录加载不会影响账户事实。" /> : null}
           {researchUnavailable ? <InlineAlert variant="warning" title="今日研究暂时不可用" message="账户与投资决策仍可独立查看。" /> : null}
-          {!researchLoading && !researchUnavailable && todayResearch.length === 0 ? <EmptyState title="今天还没有完成研究" description="新的研究完成后会出现在这里。" /> : null}
+          {failedClosed && todayResearch.length > 0 && failedClosed.latestCycleDiagnostics?.researchCompleted === false ? <InlineAlert variant="warning" title="最近一轮研究未完成" message={`${failClosedReason(failedClosed)}；今天较早完成的研究继续保留。`} /> : null}
+          {!researchLoading && !researchUnavailable && todayResearch.length === 0 ? <EmptyState title={failedClosed?.latestCycleDiagnostics?.researchCompleted === false ? '本轮研究未完成' : '今天还没有完成研究'} description={failedClosed?.latestCycleDiagnostics?.researchCompleted === false ? `因此今天还没有新的研究结果。原因：${failClosedReason(failedClosed)}` : '新的研究完成后会出现在这里。'} /> : null}
           <div className="space-y-2">{todayResearch.map((item) => <button key={`${item.id}:${item.stockCode}`} type="button" onClick={() => onOpenResearch(item)} className="w-full rounded-xl border border-border/50 bg-elevated/35 px-4 py-3 text-left transition-colors hover:border-cyan/30 hover:bg-elevated/60">
             <div className="flex flex-wrap items-center gap-2"><Badge variant="history">研究观点</Badge><span className="font-semibold text-foreground">{item.stockName || item.stockCode}</span><span className="font-mono text-xs text-muted-text">{item.stockCode}</span><span className="ml-auto text-xs text-muted-text">{item.lastAnalysisTime ? formatDateTime(item.lastAnalysisTime) : '时间待确认'}</span></div>
             <p className="mt-2 text-sm text-secondary-text">{researchView(item)}</p>{item.sentimentScore != null ? <p className="mt-1 text-xs text-muted-text">研究情绪分 {item.sentimentScore}</p> : null}
@@ -391,6 +490,7 @@ const DailyOverview: React.FC<DailyOverviewProps> = ({
 };
 
 const RuntimeFact: React.FC<{ label: string; value: string }> = ({ label, value }) => <div className="rounded-xl border border-border/50 bg-elevated/35 px-3 py-2.5"><dt className="text-xs text-muted-text">{label}</dt><dd className="mt-1 text-sm font-medium text-foreground">{value}</dd></div>;
+const RuntimeProof: React.FC<{ label: string; value: string; dataTestId?: string }> = ({ label, value, dataTestId }) => <div data-testid={dataTestId} className="rounded-xl border border-warning/15 bg-surface/35 px-3 py-2"><p className="text-[11px] text-muted-text">{label}</p><p className="mt-1 font-medium text-foreground">{value}</p></div>;
 const HoldingFact: React.FC<{ label: string; value: string; className?: string }> = ({ label, value, className = '' }) => <div className={className}><p className="text-[11px] text-muted-text">{label}</p><p className="mt-1 text-xs font-medium text-foreground">{value}</p></div>;
 
 export default DailyOverview;

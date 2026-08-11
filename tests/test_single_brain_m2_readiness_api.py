@@ -81,6 +81,7 @@ def test_readiness_route_and_service_contain_no_mutation_methods():
     for relative in (
         "api/v1/endpoints/single_brain_m2.py",
         "src/services/single_brain_m2_readiness_service.py",
+        "src/investment/m2/runtime_diagnostics.py",
     ):
         source = (root / relative).read_text(encoding="utf-8").lower()
         assert "@router.post" not in source

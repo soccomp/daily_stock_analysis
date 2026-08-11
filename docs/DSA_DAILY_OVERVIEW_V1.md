@@ -17,6 +17,35 @@ DSA 首页默认显示“今日总览”，并保留原有“研究工作台”�
 
 所有分区独立加载。任一来源失败不会清空其他已经确认的事实。
 
+## 运行原因可解释性
+
+Readiness 在原有 cycle/symbol/M3 checkpoint 事实之上追加只读
+`latest_cycle_diagnostics` 投影；它不是新的运行状态表。该投影只返回：
+
+- 最新 cycle 的终态、失败阶段和稳定安全原因代码；
+- research、InvestmentDecision、ExecutionMandate 是否已由现有持久化事实证明产生；
+- broker submission 是已记录、明确为零，还是仍属 UNKNOWN；
+- 不包含原始异常、provider secret、账户标识或 stack trace。
+
+`FAILED_CLOSED` 是一等 cycle 结果：scheduler authority 健康时，“自动投资”继续显示
+“运行中”，最近一轮显示“本轮安全停止”。它不是 HOLD、执行 BLOCKED、执行 UNKNOWN，
+也不是 scheduler 停止。
+
+只有 feature/scheduler 已启用、调度权威数量为 1、simulation execution 模式与授权一致，
+且 readiness 已记录合法 `next_run_at` 时，界面才会说明系统将在下一计划周期继续运行。
+任一事实缺失或冲突时，界面只陈述本轮安全停止，并将 scheduler 状态作为独立关注项。
+
+安全原因只在持久化证据明确时映射为有限中文词汇，例如“AI 分析额度不足”、
+“AI 分析服务暂时不可用”或“账户快照已过期”。证据不足时固定显示
+“研究阶段未完成，具体原因待确认”，不得从历史背景猜测 provider 或额度原因。
+历史自由文本中的 `no data`、`prerequisite`、`api key` 等弱词只有在同时存在明确
+research/analysis/LLM/provider 上下文时才可映射为具体研究原因。
+
+当最新一轮在 decision 之前 fail closed 时，今日总览会明确显示没有生成新的
+InvestmentDecision、ExecutionMandate 或 broker submission。今天较早的有效研究和决策
+继续显示，不会被最近一次失败覆盖；执行侧 UNKNOWN / pending reconciliation 仍作为独立
+关注事项呈现。
+
 ## 权限边界
 
 - 已连接账户继续以 Athena authoritative `PortfolioSnapshot` 为账户事实；DSA 不写入手工 portfolio ledger。
@@ -40,6 +69,8 @@ DSA 首页默认显示“今日总览”，并保留原有“研究工作台”�
 - 今日动态只合并带可靠时间戳的现有账户、研究、决策和周期事实；不会补齐缺失事件或推断因果关系。
 - 当前研究历史没有统一 canonical market 字段时，首页不会猜测市场。
 - 今日总览不计算合约中不存在的“当日盈亏”。
+- 历史 cycle 若只保存了泛化失败文本，readiness 只能返回“具体原因待确认”；新失败会把
+  `AnalysisResult` 的错误归一为稳定安全类别，但不会保存或展示原始 provider 错误。
 
 ## Sanitized 视觉证据
 
@@ -50,5 +81,9 @@ DSA 首页默认显示“今日总览”，并保留原有“研究工作台”�
 - `assets/dsa-daily-overview-v1-connected-unavailable.png`：connected snapshot 不可用时的独立降级，不补零。
 - `assets/dsa-daily-overview-v1-research-workbench.png`：原研究工作台保留。
 - `assets/dsa-daily-overview-v1-connected-portfolio.png`：`/portfolio?account=connected` 深链。
+- Playwright PR artifact `runtime-reason-failed-closed-known.png`：健康 scheduler + 已知安全原因。
+- Playwright PR artifact `runtime-reason-failed-closed-unknown.png`：未知原因不猜测 provider/额度。
+- Playwright PR artifact `runtime-reason-history-preserved.png`：较早研究/决策在后续 fail closed 后仍保留。
+- Playwright PR artifact `runtime-reason-failed-closed-mobile.png`：390px 失败原因与零执行事实可读。
 
 所有 fixture 都使用 sanitized account、broker、snapshot 与 lineage 标识，不包含真实账户信息或凭据。

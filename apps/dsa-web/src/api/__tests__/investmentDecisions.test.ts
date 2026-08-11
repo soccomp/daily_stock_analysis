@@ -63,6 +63,23 @@ describe('investmentDecisionsApi', () => {
             execution_mode: 'SIMULATION_EXECUTION',
             execution_authorization: 'ON',
             recurring_scheduler: { enabled: true, authority_count: 1 },
+            latest_cycle_diagnostics: {
+              decision_cycle_id: 'cycle-1',
+              status: 'FAILED_CLOSED',
+              failure_stage: 'RESEARCH',
+              failure_code: 'AI_QUOTA_EXHAUSTED',
+              failure_summary: 'AI 分析额度不足',
+              expected_symbol_count: 1,
+              research_completed_count: 0,
+              research_completed: false,
+              decision_count: 0,
+              decision_created: false,
+              mandate_count: 0,
+              mandate_created: false,
+              dispatch_attempt_count: 0,
+              broker_submission_state: 'NONE',
+              recorded_submitted_quantity: 0,
+            },
           },
         },
       });
@@ -93,6 +110,8 @@ describe('investmentDecisionsApi', () => {
     expect(list.items[0].submittedQuantity).toBe(0);
     expect(list.items[0].filledQuantity).toBe(0);
     expect(readiness.recurringScheduler.authorityCount).toBe(1);
+    expect(readiness.latestCycleDiagnostics?.failureSummary).toBe('AI 分析额度不足');
+    expect(readiness.latestCycleDiagnostics?.decisionCreated).toBe(false);
     expect(post).not.toHaveBeenCalled();
     expect(put).not.toHaveBeenCalled();
     expect(patch).not.toHaveBeenCalled();
