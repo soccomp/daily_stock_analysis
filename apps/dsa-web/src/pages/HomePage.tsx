@@ -1,6 +1,6 @@
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BarChart3, Check, SlidersHorizontal, X } from 'lucide-react';
+import { BarChart3, Check, LayoutDashboard, Microscope, SlidersHorizontal, X } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { getParsedApiError, type ParsedApiError } from '../api/error';
 import { analysisApi, DuplicateTaskError } from '../api/analysis';
@@ -8,7 +8,7 @@ import { historyApi } from '../api/history';
 import { agentApi, type SkillInfo } from '../api/agent';
 import { systemConfigApi } from '../api/systemConfig';
 import { ApiErrorAlert, Button, Drawer, EmptyState, InlineAlert } from '../components/common';
-import { DashboardStateBlock } from '../components/dashboard';
+import { DailyOverview, DashboardStateBlock } from '../components/dashboard';
 import { StockAutocomplete } from '../components/StockAutocomplete';
 import { StockHistoryTrendDrawer } from '../components/history';
 import { ReportMarkdownDrawer } from '../components/report/ReportMarkdownDrawer';
@@ -57,6 +57,12 @@ type StockAnalysisNavigationState = {
   selectionSource?: string;
   skills?: string[];
 };
+
+type HomeMode = 'overview' | 'workbench';
+
+interface HomePageProps {
+  initialMode?: HomeMode;
+}
 
 const DUPLICATE_BANNER_AUTO_DISMISS_MS = 5000;
 const BATCH_ANALYSIS_CHUNK_SIZE = 50;
@@ -244,11 +250,12 @@ async function getTodayAnalysisItems(dateKey: string): Promise<StockBarItem[]> {
   return items;
 }
 
-const HomePage: React.FC = () => {
+const HomePage: React.FC<HomePageProps> = ({ initialMode = 'overview' }) => {
   const navigate = useNavigate();
   const location = useLocation();
   const { language: uiLanguage, t } = useUiLanguage();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [homeMode, setHomeMode] = useState<HomeMode>(initialMode);
   const [isSubmittingMarketReview, setIsSubmittingMarketReview] = useState(false);
   const [marketReviewNotice, setMarketReviewNotice] = useState<MarketReviewNotice>(null);
   const [marketReviewError, setMarketReviewError] = useState<ParsedApiError | null>(null);
@@ -1061,7 +1068,7 @@ const HomePage: React.FC = () => {
 
   const todayDateKey = getTodayInShanghai();
   useEffect(() => {
-    if (sidebarWorkspaceTab !== 'today') {
+    if (sidebarWorkspaceTab !== 'today' && homeMode !== 'overview') {
       return undefined;
     }
 
@@ -1090,7 +1097,7 @@ const HomePage: React.FC = () => {
     return () => {
       active = false;
     };
-  }, [sidebarWorkspaceTab, todayAnalysisRefreshVersion, todayDateKey]);
+  }, [homeMode, sidebarWorkspaceTab, todayAnalysisRefreshVersion, todayDateKey]);
 
   const activeTaskByCode = useMemo(() => {
     const tasksByCode = new Map<string, TaskInfo>();
@@ -1423,12 +1430,71 @@ const HomePage: React.FC = () => {
     ],
   );
 
+  const homeModeTabs = (
+    <div className="inline-flex rounded-xl border border-border/70 bg-elevated/55 p-1" role="tablist" aria-label="首页模式">
+      <button
+        type="button"
+        role="tab"
+        aria-selected={homeMode === 'overview'}
+        onClick={() => setHomeMode('overview')}
+        className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${homeMode === 'overview' ? 'bg-surface text-foreground shadow-soft-card' : 'text-secondary-text hover:text-foreground'}`}
+      >
+        <LayoutDashboard className="h-4 w-4" aria-hidden="true" />
+        今日总览
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={homeMode === 'workbench'}
+        onClick={() => setHomeMode('workbench')}
+        className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${homeMode === 'workbench' ? 'bg-surface text-foreground shadow-soft-card' : 'text-secondary-text hover:text-foreground'}`}
+      >
+        <Microscope className="h-4 w-4" aria-hidden="true" />
+        研究工作台
+      </button>
+    </div>
+  );
+
+  if (homeMode === 'overview') {
+    return (
+      <div className="h-[calc(100vh-5rem)] overflow-y-auto px-3 pb-6 pt-3 sm:h-[calc(100vh-5.5rem)] md:px-6 lg:h-[calc(100vh-2rem)]" data-testid="home-overview-shell">
+        <header className="mx-auto mb-5 flex w-full max-w-7xl flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <p className="label-uppercase">Single Brain · 每日事实</p>
+            <h1 className="mt-2 text-2xl font-semibold tracking-tight text-foreground md:text-3xl">今天，系统做了什么</h1>
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-secondary-text">账户、研究、投资决策和运行状态来自各自权威数据面；缺失的事实不会被猜测或补零。</p>
+          </div>
+          {homeModeTabs}
+        </header>
+        <DailyOverview
+          researchItems={todayAnalysisItems}
+          researchLoading={isLoadingTodayAnalysisItems}
+          researchUnavailable={todayAnalysisLoadFailed}
+          activeTasks={activeTasks}
+          watchlistCovered={watchlistAnalyzedTodayCount}
+          watchlistTotal={watchlistState.watchlistCodes.length}
+          latestMarketReviewAt={marketReviewHistoryItems[0]?.createdAt}
+          onOpenResearch={(item) => {
+            setHomeMode('workbench');
+            handleHistoryItemClick(item.id);
+          }}
+          onOpenWorkbench={() => setHomeMode('workbench')}
+          onNavigate={navigate}
+        />
+      </div>
+    );
+  }
+
   return (
     <div
       data-testid="home-dashboard"
       className="flex h-[calc(100vh-5rem)] w-full flex-col overflow-hidden md:flex-row sm:h-[calc(100vh-5.5rem)] lg:h-[calc(100vh-2rem)]"
     >
       <div className="flex-1 flex flex-col min-h-0 min-w-0 max-w-full lg:max-w-6xl mx-auto w-full">
+        <div className="flex flex-shrink-0 items-center justify-between gap-3 px-3 pt-3 md:px-4">
+          <div className="hidden text-xs text-muted-text sm:block">研究解释资产与市场；投资决策由 Single Brain 单独产生。</div>
+          {homeModeTabs}
+        </div>
         <header className="relative z-30 flex min-w-0 flex-shrink-0 items-center overflow-visible px-3 py-3 md:px-4 md:py-4">
           <div className="flex min-w-0 flex-1 flex-col gap-2.5 md:flex-row md:items-center">
             <div className="flex min-w-0 flex-1 items-center gap-2.5">

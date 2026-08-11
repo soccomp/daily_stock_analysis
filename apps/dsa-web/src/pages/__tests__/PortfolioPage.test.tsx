@@ -363,6 +363,7 @@ describe('PortfolioPage FX refresh', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     window.localStorage.clear();
+    window.history.replaceState({}, '', '/portfolio?account=all');
 
     getAccounts.mockResolvedValue(makeAccounts());
     getConnectedSnapshot.mockResolvedValue(makeConnectedSnapshot());
@@ -428,6 +429,29 @@ describe('PortfolioPage FX refresh', () => {
 
     expect(getSnapshot).toHaveBeenCalledWith({ accountId: undefined, costMethod: 'fifo', includeRealtime: false });
     expect(getRisk).toHaveBeenCalledWith({ accountId: undefined, costMethod: 'fifo', includeRealtime: false });
+  });
+
+  it('defaults to the authoritative connected account when no account query is provided', async () => {
+    window.history.replaceState({}, '', '/portfolio');
+    render(<PortfolioPage />);
+
+    expect(await screen.findByTestId('connected-account-view')).toBeInTheDocument();
+    expect(screen.getAllByRole('combobox')[0]).toHaveValue('connected');
+    expect(window.location.search).toBe('?account=connected');
+    expect(screen.queryByRole('button', { name: '提交交易' })).not.toBeInTheDocument();
+  });
+
+  it('honors URL-driven connected, aggregate, and manual account selection', async () => {
+    window.history.replaceState({}, '', '/portfolio?account=connected');
+    const { unmount } = render(<PortfolioPage />);
+    expect(await screen.findByTestId('connected-account-view')).toBeInTheDocument();
+    expect(screen.getAllByRole('combobox')[0]).toHaveValue('connected');
+    unmount();
+
+    window.history.replaceState({}, '', '/portfolio?account=1');
+    render(<PortfolioPage />);
+    expect(await screen.findByRole('button', { name: '提交交易' })).toBeInTheDocument();
+    expect(screen.getAllByRole('combobox')[0]).toHaveValue('1');
   });
 
   it('separates connected facts from writable manual accounts', async () => {

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] DSA 首页新增默认“今日总览”模式，以现有只读 API 分区展示 authoritative connected account、精确 `(market, symbol)` 持仓、今日研究、Single Brain 投资决策、执行状态、运行 readiness 与注意事项；原研究工作台完整保留，持仓页新增 URL 驱动的 connected/manual 账户选择且不混合账户事实。
 - [新功能] 新增默认关闭、双重显式授权的 Single Brain M3 simulation-execution 模式：沿用唯一 recurring Brain scheduler，将真实 DSA 分析决策确定性投影为 exact-quantity BUY/ADD LIMIT mandate；DSA 以 SQLite 持久化单次 dispatch claim，UNKNOWN 只允许 reconciliation，最终把 Athena ExecutionResult 与 authoritative Snapshot B 写回同一 Decision Scorecard。SHADOW、P1A、P1B 和现有 Web UI 默认行为不变。
 - [新功能] 新增默认关闭的 Single Brain M2 recurring shadow operations：通过固定 loopback canonical Snapshot GET、显式 RiskPolicy、现有 DSA scheduler/真实分析完成路径和确定性 SQLite checkpoint，持续生成零执行授权的跨周期研究与 Brain 决策 lineage。
 - [新功能] P1C 为每个 `decision_id` 持久化一份不可变 Single Decision Scorecard，并通过只读 API 返回 Research、Snapshot A、RiskPolicy、Decision、DecisionSignal、Mandate、ExecutionResult、Snapshot B 与即时执行诊断的完整 lineage。
