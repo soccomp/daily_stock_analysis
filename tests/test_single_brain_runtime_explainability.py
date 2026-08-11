@@ -144,6 +144,8 @@ def test_authority_failure_uses_exact_persisted_snapshot_reason(monkeypatch):
     ("raw", "expected"),
     (
         ("429 RESOURCE_EXHAUSTED: token=secret", "runtime_reason=AI_QUOTA_EXHAUSTED"),
+        ("api key missing", "runtime_reason=AI_SERVICE_UNAVAILABLE"),
+        ("no data returned", "runtime_reason=RESEARCH_DATA_UNAVAILABLE"),
         ("unclassified provider failure token=secret", "runtime_reason=RESEARCH_INCOMPLETE"),
     ),
 )
@@ -212,3 +214,25 @@ def test_runtime_reason_classifier_keeps_execution_uncertainty_separate():
     explanation = classify_runtime_failure(("M3 recovery failed: pending_reconciliation",))
     assert explanation.stage == "EXECUTION"
     assert explanation.code == "EXECUTION_PENDING"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    (
+        "no database connection",
+        "prerequisite migration missing",
+        "api key missing from unrelated integration",
+        "login_required by admin console",
+    ),
+)
+def test_legacy_weak_tokens_do_not_invent_research_or_provider_cause(reason):
+    explanation = classify_runtime_failure((reason,))
+    assert explanation.stage == "CYCLE"
+    assert explanation.code == "CYCLE_FAILURE"
+
+    proven_research_failure = classify_runtime_failure(
+        (reason,),
+        research_incomplete=True,
+    )
+    assert proven_research_failure.stage == "RESEARCH"
+    assert proven_research_failure.code == "RESEARCH_INCOMPLETE"

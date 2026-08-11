@@ -89,16 +89,18 @@ def classify_runtime_failure(
             "too many requests", "429", "额度", "限流",
         )):
             return _explanation("RESEARCH", "AI_QUOTA_EXHAUSTED")
-        if any(token in normalized for token in (
+        if research_context and any(token in normalized for token in (
             "backend_not_configured", "api key", "api_key", "login_required",
-        )) or research_context and any(token in normalized for token in (
             "unavailable", "connection refused", "connection error", "timeout",
         )):
             return _explanation("RESEARCH", "AI_SERVICE_UNAVAILABLE")
-        if any(token in normalized for token in (
-            "research data", "market data", "data unavailable", "no data",
-            "prerequisite", "研究所需数据",
-        )):
+        explicit_research_data = any(token in normalized for token in (
+            "research data", "market data", "研究所需数据",
+        ))
+        weak_data_failure = any(token in normalized for token in (
+            "data unavailable", "no data", "prerequisite",
+        ))
+        if explicit_research_data or research_context and weak_data_failure:
             return _explanation("RESEARCH", "RESEARCH_DATA_UNAVAILABLE")
         if any(token in normalized for token in (
             "real dsa analysis", "analysis did not complete", "analysis result",

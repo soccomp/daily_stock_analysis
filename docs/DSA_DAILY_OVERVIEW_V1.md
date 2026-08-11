@@ -31,9 +31,15 @@ Readiness 在原有 cycle/symbol/M3 checkpoint 事实之上追加只读
 “运行中”，最近一轮显示“本轮安全停止”。它不是 HOLD、执行 BLOCKED、执行 UNKNOWN，
 也不是 scheduler 停止。
 
+只有 feature/scheduler 已启用、调度权威数量为 1、simulation execution 模式与授权一致，
+且 readiness 已记录合法 `next_run_at` 时，界面才会说明系统将在下一计划周期继续运行。
+任一事实缺失或冲突时，界面只陈述本轮安全停止，并将 scheduler 状态作为独立关注项。
+
 安全原因只在持久化证据明确时映射为有限中文词汇，例如“AI 分析额度不足”、
 “AI 分析服务暂时不可用”或“账户快照已过期”。证据不足时固定显示
 “研究阶段未完成，具体原因待确认”，不得从历史背景猜测 provider 或额度原因。
+历史自由文本中的 `no data`、`prerequisite`、`api key` 等弱词只有在同时存在明确
+research/analysis/LLM/provider 上下文时才可映射为具体研究原因。
 
 当最新一轮在 decision 之前 fail closed 时，今日总览会明确显示没有生成新的
 InvestmentDecision、ExecutionMandate 或 broker submission。今天较早的有效研究和决策

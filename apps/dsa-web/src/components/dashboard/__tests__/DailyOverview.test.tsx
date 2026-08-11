@@ -288,6 +288,60 @@ describe('DailyOverview', () => {
     expect(screen.queryByText(/额度不足/)).not.toBeInTheDocument();
   });
 
+  it('does not promise another run when a failed-closed cycle has degraded scheduler facts', async () => {
+    listDecisions.mockResolvedValueOnce({ items: [], total: 0, page: 1, pageSize: 20 });
+    getReadiness.mockResolvedValueOnce({
+      ...readiness,
+      recurringScheduler: {
+        ...readiness.recurringScheduler,
+        enabled: false,
+      },
+      latestCycle: { ...readiness.latestCycle!, status: 'FAILED_CLOSED' },
+      latestCycleDiagnostics: {
+        decisionCycleId: 'cycle-disabled', status: 'FAILED_CLOSED', failureStage: 'RESEARCH',
+        failureCode: 'RESEARCH_INCOMPLETE', failureSummary: '研究阶段未完成，具体原因待确认',
+        expectedSymbolCount: 1, researchCompletedCount: 0, researchCompleted: false,
+        decisionCount: 0, decisionCreated: false, mandateCount: 0, mandateCreated: false,
+        dispatchAttemptCount: 0, brokerSubmissionState: 'NONE', recordedSubmittedQuantity: 0,
+      },
+    });
+    renderOverview({ researchItems: [] });
+
+    expect(await screen.findByTestId('overview-fail-closed')).toBeInTheDocument();
+    expect(screen.getByText('未运行', { exact: true })).toBeInTheDocument();
+    expect(screen.getAllByText('自动投资调度状态需要核对').length).toBeGreaterThan(0);
+    expect(screen.getByText('尚未确认')).toBeInTheDocument();
+    expect(screen.queryByText(/下一计划周期继续运行/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/系统会按计划继续运行/)).not.toBeInTheDocument();
+  });
+
+  it('requires a recorded next run before promising failed-closed continuation', async () => {
+    listDecisions.mockResolvedValueOnce({ items: [], total: 0, page: 1, pageSize: 20 });
+    getReadiness.mockResolvedValueOnce({
+      ...readiness,
+      recurringScheduler: {
+        ...readiness.recurringScheduler,
+        nextRunAt: null,
+      },
+      latestCycle: { ...readiness.latestCycle!, status: 'FAILED_CLOSED' },
+      latestCycleDiagnostics: {
+        decisionCycleId: 'cycle-next-run-missing', status: 'FAILED_CLOSED', failureStage: 'RESEARCH',
+        failureCode: 'RESEARCH_INCOMPLETE', failureSummary: '研究阶段未完成，具体原因待确认',
+        expectedSymbolCount: 1, researchCompletedCount: 0, researchCompleted: false,
+        decisionCount: 0, decisionCreated: false, mandateCount: 0, mandateCreated: false,
+        dispatchAttemptCount: 0, brokerSubmissionState: 'NONE', recordedSubmittedQuantity: 0,
+      },
+    });
+    renderOverview({ researchItems: [] });
+
+    expect(await screen.findByTestId('overview-fail-closed')).toBeInTheDocument();
+    expect(screen.getAllByText('需要关注', { exact: true }).length).toBeGreaterThan(0);
+    expect(screen.getAllByText('自动投资调度状态需要核对').length).toBeGreaterThan(0);
+    expect(screen.getByText('尚未确认')).toBeInTheDocument();
+    expect(screen.queryByText(/下一计划周期继续运行/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/系统会按计划继续运行/)).not.toBeInTheDocument();
+  });
+
   it('preserves earlier research and decisions while explaining the later failed-closed cycle', async () => {
     getReadiness.mockResolvedValueOnce({
       ...readiness,

@@ -89,6 +89,13 @@ function runtimePresentation(readiness: SingleBrainReadiness | null, error: stri
     return { label: '需要关注', variant: 'warning' as const, description: '模拟执行授权或运行模式需要核对。' };
   }
   if (readiness.latestCycle?.status === 'FAILED_CLOSED') {
+    if (!hasProvenSchedulerContinuation(readiness)) {
+      return {
+        label: '需要关注',
+        variant: 'warning' as const,
+        description: '最近一轮已安全停止；自动投资调度状态需要核对。',
+      };
+    }
     return {
       label: '运行中',
       variant: 'success' as const,
@@ -102,6 +109,15 @@ function isHealthySimulationAuthorization(readiness: SingleBrainReadiness): bool
   return readiness.executionMode === 'SIMULATION_EXECUTION'
     && readiness.executionAuthorization === 'ON'
     && readiness.recurringScheduler.mode === 'M3_SIMULATION_EXECUTION_ONLY';
+}
+
+function hasProvenSchedulerContinuation(readiness: SingleBrainReadiness): boolean {
+  const nextRunAt = readiness.recurringScheduler.nextRunAt;
+  return readiness.featureEnabled
+    && readiness.recurringScheduler.enabled
+    && readiness.recurringScheduler.authorityCount === 1
+    && isHealthySimulationAuthorization(readiness)
+    && Boolean(nextRunAt && !Number.isNaN(Date.parse(nextRunAt)));
 }
 
 function authorizationPresentation(readiness: SingleBrainReadiness | null) {
@@ -319,7 +335,13 @@ const DailyOverview: React.FC<DailyOverviewProps> = ({
     if (readiness.data?.recurringScheduler.authorityCount !== undefined && readiness.data.recurringScheduler.authorityCount !== 1) items.push('自动投资调度状态需要核对');
     if (readiness.data?.latestCycle?.status === 'FAILED') items.push('最近一轮自动投资运行失败');
     if (readiness.data?.latestCycle?.status === 'FAILED_CLOSED') {
-      items.push(`最近一轮安全停止：${failClosedReason(readiness.data)}；系统将在下一计划周期继续运行`);
+      const continuationProven = hasProvenSchedulerContinuation(readiness.data);
+      items.push(continuationProven
+        ? `最近一轮安全停止：${failClosedReason(readiness.data)}；系统将在下一计划周期继续运行`
+        : `最近一轮安全停止：${failClosedReason(readiness.data)}`);
+      if (!continuationProven && !items.includes('自动投资调度状态需要核对')) {
+        items.push('自动投资调度状态需要核对');
+      }
     }
     if (researchUnavailable) items.push('今日研究记录暂时不可用');
     if (todayDecisions.some((item) => item.executionStatus === 'UNKNOWN')) items.push('存在交易状态待确认的投资决策');
@@ -397,7 +419,7 @@ const DailyOverview: React.FC<DailyOverviewProps> = ({
               <RuntimeFact label="当前模式" value={readiness.data?.executionMode?.includes('SIMULATION') ? '模拟交易' : '状态待确认'} />
               <RuntimeFact label="最近结果" value={cycleStatusLabel(readiness.data?.latestCycle?.status)} />
               <RuntimeFact label="最近运行" value={readiness.data?.latestCycle?.completedAt ? formatDateTime(readiness.data.latestCycle.completedAt) : '暂无记录'} />
-              <RuntimeFact label="下次预计" value={readiness.data?.recurringScheduler.nextRunAt ? formatDateTime(readiness.data.recurringScheduler.nextRunAt) : '尚未登记'} />
+              <RuntimeFact label="下次预计" value={readiness.data && hasProvenSchedulerContinuation(readiness.data) ? formatDateTime(readiness.data.recurringScheduler.nextRunAt!) : '尚未确认'} />
               <RuntimeFact label="待核对事项" value={`${readiness.data?.simulationExecution?.pendingExecutionCount ?? 0} 项`} />
               <RuntimeFact label="最近账户快照" value={readiness.data?.latestAuthoritativeSnapshot?.asOf ? formatDateTime(readiness.data.latestAuthoritativeSnapshot.asOf) : '暂无记录'} />
             </dl>
