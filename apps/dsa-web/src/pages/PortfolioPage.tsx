@@ -65,6 +65,24 @@ const FALLBACK_BROKERS: PortfolioImportBrokerItem[] = [
 ];
 
 type AccountOption = 'connected' | 'all' | number;
+
+function readAccountSelectionFromUrl(): { value: AccountOption; explicit: boolean } {
+  if (typeof window === 'undefined') return { value: 'all', explicit: false };
+  const value = new URLSearchParams(window.location.search).get('account');
+  if (!value) return { value: 'all', explicit: false };
+  if (value === 'connected' || value === 'all') return { value, explicit: true };
+  const accountId = Number(value);
+  return Number.isSafeInteger(accountId) && accountId > 0
+    ? { value: accountId, explicit: true }
+    : { value: 'all', explicit: true };
+}
+
+function writeAccountSelectionToUrl(value: AccountOption): void {
+  if (typeof window === 'undefined') return;
+  const url = new URL(window.location.href);
+  url.searchParams.set('account', String(value));
+  window.history.replaceState(window.history.state, '', url);
+}
 type EventType = 'trade' | 'cash' | 'corporate';
 
 type FlatPosition = PortfolioPositionItem & {
@@ -192,7 +210,9 @@ const PortfolioPage: React.FC = () => {
   }, [text.documentTitle]);
 
   const [accounts, setAccounts] = useState<PortfolioAccountItem[]>([]);
-  const [selectedAccount, setSelectedAccount] = useState<AccountOption>('all');
+  const initialAccountSelection = useMemo(readAccountSelectionFromUrl, []);
+  const accountSelectionIsExplicitRef = useRef(initialAccountSelection.explicit);
+  const [selectedAccount, setSelectedAccount] = useState<AccountOption>(initialAccountSelection.value);
   const [connectedSnapshot, setConnectedSnapshot] = useState<ConnectedPortfolioSnapshot | null>(null);
   const [connectedLoading, setConnectedLoading] = useState(false);
   const [connectedError, setConnectedError] = useState<string | null>(null);
@@ -326,12 +346,33 @@ const PortfolioPage: React.FC = () => {
       const item = await portfolioApi.getConnectedSnapshot();
       setConnectedSnapshot(item);
       setConnectedError(null);
+      if (!accountSelectionIsExplicitRef.current) {
+        accountSelectionIsExplicitRef.current = true;
+        setSelectedAccount('connected');
+        writeAccountSelectionToUrl('connected');
+      }
     } catch (err) {
       setConnectedSnapshot(null);
       setConnectedError(getParsedApiError(err).message || '无法读取 Athena 权威账户快照。');
     } finally {
       setConnectedLoading(false);
     }
+  }, []);
+
+  const selectAccount = useCallback((value: AccountOption) => {
+    accountSelectionIsExplicitRef.current = true;
+    setSelectedAccount(value);
+    writeAccountSelectionToUrl(value);
+  }, []);
+
+  useEffect(() => {
+    const syncSelectionFromUrl = () => {
+      const next = readAccountSelectionFromUrl();
+      accountSelectionIsExplicitRef.current = next.explicit;
+      setSelectedAccount(next.value);
+    };
+    window.addEventListener('popstate', syncSelectionFromUrl);
+    return () => window.removeEventListener('popstate', syncSelectionFromUrl);
   }, []);
 
   const loadBrokers = useCallback(async () => {
@@ -1004,7 +1045,7 @@ const PortfolioPage: React.FC = () => {
                   value={String(selectedAccount)}
                   onChange={(e) => {
                     const value = e.target.value;
-                    setSelectedAccount(value === 'connected' || value === 'all' ? value : Number(value));
+                    selectAccount(value === 'connected' || value === 'all' ? value : Number(value));
                   }}
                   className={PORTFOLIO_SELECT_CLASS}
                 >

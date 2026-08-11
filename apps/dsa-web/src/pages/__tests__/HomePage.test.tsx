@@ -66,6 +66,19 @@ vi.mock('../../api/agent', () => ({
   },
 }));
 
+vi.mock('../../api/portfolio', () => ({
+  portfolioApi: {
+    getConnectedSnapshot: vi.fn().mockRejectedValue(new Error('snapshot unavailable')),
+  },
+}));
+
+vi.mock('../../api/investmentDecisions', () => ({
+  investmentDecisionsApi: {
+    list: vi.fn().mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 20 }),
+    readiness: vi.fn().mockRejectedValue(new Error('readiness unavailable')),
+  },
+}));
+
 vi.mock('../../hooks/useTaskStream', () => ({
   useTaskStream: vi.fn(),
 }));
@@ -240,6 +253,23 @@ describe('HomePage', () => {
     });
   });
 
+  it('defaults to 今日总览 and preserves the complete 研究工作台 mode', async () => {
+    vi.mocked(historyApi.getList).mockResolvedValue({ total: 0, page: 1, limit: 20, items: [] });
+    vi.mocked(historyApi.getDetail).mockResolvedValue(historyReport);
+
+    render(
+      <MemoryRouter>
+        <HomePage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('daily-overview')).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: '今日总览' })).toHaveAttribute('aria-selected', 'true');
+    fireEvent.click(screen.getByRole('tab', { name: '研究工作台' }));
+    expect(screen.getByTestId('home-dashboard')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/输入股票/)).toBeInTheDocument();
+  });
+
   it('renders the dashboard workspace and auto-loads the first report', async () => {
     vi.mocked(historyApi.getList).mockResolvedValue({
       total: 1,
@@ -255,7 +285,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -288,7 +318,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -315,7 +345,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -353,7 +383,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -377,7 +407,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -425,7 +455,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -471,7 +501,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -517,7 +547,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -558,7 +588,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -597,7 +627,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -649,7 +679,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -731,7 +761,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -803,7 +833,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -862,7 +892,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -984,7 +1014,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -1042,7 +1072,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -1109,7 +1139,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -1202,7 +1232,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -1270,7 +1300,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -1345,7 +1375,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -1428,7 +1458,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -1461,7 +1491,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -1518,7 +1548,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -1605,7 +1635,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -1667,7 +1697,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -1749,7 +1779,7 @@ describe('HomePage', () => {
 
       render(
         <MemoryRouter>
-          <HomePage />
+          <HomePage initialMode="workbench" />
         </MemoryRouter>,
       );
 
@@ -1808,7 +1838,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -1853,7 +1883,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -1919,7 +1949,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -1973,7 +2003,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -2007,7 +2037,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -2042,7 +2072,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -2071,7 +2101,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -2091,7 +2121,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -2113,7 +2143,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -2153,7 +2183,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -2180,7 +2210,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -2204,7 +2234,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -2233,7 +2263,7 @@ describe('HomePage', () => {
 
       render(
         <MemoryRouter>
-          <HomePage />
+          <HomePage initialMode="workbench" />
         </MemoryRouter>,
       );
 
@@ -2274,7 +2304,7 @@ describe('HomePage', () => {
 
       render(
         <MemoryRouter>
-          <HomePage />
+          <HomePage initialMode="workbench" />
         </MemoryRouter>,
       );
 
@@ -2338,7 +2368,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -2383,7 +2413,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -2435,7 +2465,7 @@ describe('HomePage', () => {
     render(
       <UiLanguageProvider>
         <MemoryRouter>
-          <HomePage />
+          <HomePage initialMode="workbench" />
         </MemoryRouter>
       </UiLanguageProvider>,
     );
@@ -2491,7 +2521,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -2525,7 +2555,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -2622,7 +2652,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -2678,7 +2708,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -2699,7 +2729,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -2721,7 +2751,7 @@ describe('HomePage', () => {
 
     const { container } = render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -2784,7 +2814,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -2843,7 +2873,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -2866,7 +2896,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -2911,7 +2941,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -2947,7 +2977,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -2997,7 +3027,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 
@@ -3083,7 +3113,7 @@ describe('HomePage', () => {
 
     render(
       <MemoryRouter>
-        <HomePage />
+        <HomePage initialMode="workbench" />
       </MemoryRouter>,
     );
 

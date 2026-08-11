@@ -148,12 +148,13 @@ The connected-account view is observational and GET-only. It preserves canonical
 ## 11. Deferred phases
 
 - Multiple connected accounts and connection management.
-- 首页 “今日投资动态”.
 - Richer deterministic 研究建议 ↔ 投资决策 navigation.
 - Alert/backtest relationships to real investment decisions.
 - Long-horizon outcome evaluation beyond immediate execution diagnostics.
 
 None of these deferred items grants UI transaction authority.
+
+The accepted read-only 首页 daily operating view is documented in `DSA_DAILY_OVERVIEW_V1.md`.
 
 ## 12. Sanitized review evidence
 
