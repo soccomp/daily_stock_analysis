@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, select, update
 from sqlalchemy.exc import IntegrityError
 
 from src.investment.contracts.portfolio_snapshot import PortfolioSnapshot
@@ -240,6 +240,42 @@ class M2OperationalRepository:
             source_report_id=source_report_id,
             failure_reason=None,
         )
+
+    def reserve_symbol_decision(
+        self,
+        *,
+        cycle_id: str,
+        symbol: str,
+        source_report_id: int,
+        decision_id: str,
+    ) -> str:
+        """Keep one durable decision identity across restart recovery."""
+
+        now = utc_naive_now()
+        with self.db.session_scope() as session:
+            session.execute(
+                update(SingleBrainM2SymbolRecord)
+                .where(
+                    SingleBrainM2SymbolRecord.cycle_id == cycle_id,
+                    SingleBrainM2SymbolRecord.symbol == symbol,
+                    SingleBrainM2SymbolRecord.source_report_id == source_report_id,
+                    SingleBrainM2SymbolRecord.decision_id.is_(None),
+                )
+                .values(decision_id=decision_id, updated_at=now)
+            )
+            row = session.execute(
+                select(SingleBrainM2SymbolRecord).where(
+                    SingleBrainM2SymbolRecord.cycle_id == cycle_id,
+                    SingleBrainM2SymbolRecord.symbol == symbol,
+                )
+            ).scalar_one()
+            if row.source_report_id != source_report_id:
+                raise M2InputConflictError(
+                    "persisted Research identity changed inside one cycle"
+                )
+            if not row.decision_id:
+                raise RuntimeError("M2 decision identity reservation failed")
+            return str(row.decision_id)
 
     def mark_symbol_persisted(
         self,

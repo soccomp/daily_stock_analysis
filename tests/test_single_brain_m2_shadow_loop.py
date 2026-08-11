@@ -67,7 +67,7 @@ class _AnalysisRunner:
         return AnalysisCompletion(
             result=result,
             context_snapshot={"data_quality": {"level": "good"}},
-            source_report_id=42 + len(self.calls),
+            source_report_id=43,
             recovered=False,
         )
 
@@ -82,6 +82,9 @@ class _FailOnceStore:
         if self.calls == 1:
             raise OSError("temporary sqlite failure")
         return self.real.persist_shadow(artifacts)
+
+    def get(self, decision_id):
+        return self.real.get(decision_id)
 
 
 @pytest.fixture
