@@ -31,6 +31,7 @@ from src.investment.m2.policy import CanonicalRiskPolicyLoader
 from src.investment.m2.repository import M2InputConflictError, M2OperationalRepository
 from src.investment.m2.runtime_diagnostics import analysis_failure_marker
 from src.investment.shadow_wiring import InvestmentShadowWiringService, ShadowWiringRejected
+from src.services.decision_scorecard_service import DecisionScorecardNotFoundError
 from src.services.history_service import HistoryService
 from src.storage import DatabaseManager
 from src.utils.data_processing import parse_json_field
@@ -49,6 +50,8 @@ class RiskPolicySource(Protocol):
 
 class ShadowLineageStore(Protocol):
     def persist_shadow(self, artifacts: Any) -> dict[str, Any]: ...
+
+    def get(self, decision_id: str) -> dict[str, Any]: ...
 
 
 class M3ExecutionCoordinator(Protocol):
@@ -409,20 +412,46 @@ class M2ShadowLoopService:
                     symbol=symbol,
                     source_report_id=completion.source_report_id,
                 )
-                decision_now = self._aware_now()
+                decision_snapshot = self._snapshot_source.capture_snapshot()
+                snapshot_validation_time = self._snapshot_receipt_time()
                 self._validate_authority_inputs(
-                    snapshot=snapshot,
+                    snapshot=decision_snapshot,
                     policy=policy,
                     account_id=account_id,
-                    now=decision_now,
+                    now=snapshot_validation_time,
                 )
-                stable_decision_id = build_decision_id(
+                decision_now = self._aware_now()
+                proposed_decision_id = build_decision_id(
                     cycle=cycle,
                     symbol=symbol,
                     source_report_id=completion.source_report_id,
-                    snapshot_hash=snapshot.content_hash,
+                    snapshot_hash=decision_snapshot.content_hash,
                     policy_hash=policy.content_hash,
                 )
+                stable_decision_id = self._repository.reserve_symbol_decision(
+                    cycle_id=cycle,
+                    symbol=symbol,
+                    source_report_id=completion.source_report_id,
+                    decision_id=proposed_decision_id,
+                )
+                existing_lineage = self._existing_lineage(
+                    decision_id=stable_decision_id,
+                    cycle_id=cycle,
+                    symbol=symbol,
+                    source_report_id=completion.source_report_id,
+                )
+                if existing_lineage is not None:
+                    self._repository.mark_symbol_persisted(
+                        cycle_id=cycle,
+                        symbol=symbol,
+                        source_report_id=completion.source_report_id,
+                        research_id=existing_lineage["research_id"],
+                        decision_id=stable_decision_id,
+                        decision_action=existing_lineage["action"],
+                        rationale_summary=existing_lineage["rationale"],
+                    )
+                    persisted.append(stable_decision_id)
+                    continue
                 artifacts = InvestmentShadowWiringService(clock=lambda: decision_now).build_from_analysis(
                     result=completion.result,
                     context_snapshot=completion.context_snapshot,
@@ -433,7 +462,7 @@ class M2ShadowLoopService:
                         if self._execution_coordinator is not None
                         else "single_brain_m2_shadow"
                     ),
-                    portfolio_snapshot=snapshot,
+                    portfolio_snapshot=decision_snapshot,
                     risk_policy=policy,
                     decision_cycle_id=cycle,
                     decision_id=stable_decision_id,
@@ -521,6 +550,36 @@ class M2ShadowLoopService:
             blocked_reasons=tuple(blocked),
             duplicate_trigger=duplicate,
         )
+
+    def _existing_lineage(
+        self,
+        *,
+        decision_id: str,
+        cycle_id: str,
+        symbol: str,
+        source_report_id: int,
+    ) -> dict[str, str] | None:
+        try:
+            item = self._lineage_store.get(decision_id)["item"]
+        except DecisionScorecardNotFoundError:
+            return None
+        decision = item["investment_decision"]
+        research = item["research_bundle"]
+        if (
+            item["source_report_id"] != source_report_id
+            or decision["decision_id"] != decision_id
+            or decision["decision_cycle_id"] != cycle_id
+            or decision["symbol"] != symbol
+            or decision["research_ids"] != [research["research_id"]]
+        ):
+            raise M2InputConflictError(
+                "persisted decision scorecard recovery lineage mismatch"
+            )
+        return {
+            "research_id": str(research["research_id"]),
+            "action": str(decision["action"]),
+            "rationale": str(decision["rationale"]),
+        }
 
     def _validate_authority_inputs(
         self,
