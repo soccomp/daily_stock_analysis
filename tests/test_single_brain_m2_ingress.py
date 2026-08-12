@@ -111,6 +111,21 @@ def test_ingress_records_receipt_after_full_response_without_mutating_contract()
     assert observed.supersedes_id == previous.snapshot_id
 
 
+def test_ingress_exposes_elapsed_transport_observation_outside_contract():
+    ticks = iter((10.0, 10.023))
+    source = CanonicalHttpPortfolioSnapshotSource(
+        url=URL,
+        opener=lambda *_args, **_kwargs: _Response(_snapshot().canonical_json().encode("utf-8")),
+        clock=lambda: NOW,
+        monotonic_clock=lambda: next(ticks),
+    )
+
+    snapshot = source.capture_snapshot()
+
+    assert source.last_transport_elapsed_ms == pytest.approx(23.0)
+    assert snapshot.canonical_json() == _snapshot().canonical_json()
+
+
 @pytest.mark.parametrize(
     "url",
     (

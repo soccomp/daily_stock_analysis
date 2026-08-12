@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timezone
+from time import monotonic
 from typing import Protocol
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -41,6 +42,7 @@ class CanonicalHttpPortfolioSnapshotSource:
         timeout_seconds: float = 5.0,
         opener: Callable[..., object] | None = None,
         clock: Callable[[], datetime] | None = None,
+        monotonic_clock: Callable[[], float] | None = None,
     ) -> None:
         parsed = urlsplit(str(url or "").strip())
         if (
@@ -61,7 +63,9 @@ class CanonicalHttpPortfolioSnapshotSource:
         self._timeout_seconds = float(timeout_seconds)
         self._opener = opener or build_opener(_RejectRedirects()).open
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._monotonic_clock = monotonic_clock or monotonic
         self._last_response_received_at: datetime | None = None
+        self._last_transport_elapsed_ms: float | None = None
 
     @property
     def last_response_received_at(self) -> datetime | None:
@@ -69,13 +73,21 @@ class CanonicalHttpPortfolioSnapshotSource:
 
         return self._last_response_received_at
 
+    @property
+    def last_transport_elapsed_ms(self) -> float | None:
+        """Elapsed GET/read time only; never part of the canonical contract."""
+
+        return self._last_transport_elapsed_ms
+
     def capture_snapshot(self) -> PortfolioSnapshot:
         self._last_response_received_at = None
+        self._last_transport_elapsed_ms = None
         request = Request(
             self._url,
             method="GET",
             headers={"Accept": "application/json"},
         )
+        started_at = self._monotonic_clock()
         try:
             with self._opener(request, timeout=self._timeout_seconds) as response:
                 final_url = str(getattr(response, "geturl", lambda: self._url)())
@@ -85,6 +97,9 @@ class CanonicalHttpPortfolioSnapshotSource:
                 if status != 200:
                     raise SnapshotIngressError(f"snapshot endpoint returned HTTP {status}")
                 payload = response.read(self.MAX_RESPONSE_BYTES + 1)
+            self._last_transport_elapsed_ms = max(
+                0.0, (self._monotonic_clock() - started_at) * 1000.0
+            )
             received_at = self._clock()
             if (
                 not isinstance(received_at, datetime)

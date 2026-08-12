@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import desc, select, update
@@ -14,6 +15,7 @@ from src.investment.contracts.portfolio_snapshot import PortfolioSnapshot
 from src.storage import (
     DatabaseManager,
     SingleBrainM2CycleRecord,
+    SingleBrainM2SnapshotClockDiagnosticRecord,
     SingleBrainM2SymbolRecord,
     to_utc_naive_datetime,
     utc_naive_now,
@@ -375,6 +377,68 @@ class M2OperationalRepository:
             row.completed_at = utc_naive_now()
             row.updated_at = row.completed_at
 
+    def record_snapshot_clock_diagnostic(
+        self,
+        *,
+        cycle_id: str,
+        stage: str,
+        snapshot_revision: int,
+        snapshot_as_of: datetime,
+        snapshot_created_at: datetime,
+        response_received_at: datetime,
+        future_offset_ms: Decimal,
+        transport_elapsed_ms: Decimal | None,
+        validation_result: str,
+    ) -> None:
+        """Persist timing evidence only; never stores account facts or payloads."""
+
+        with self.db.session_scope() as session:
+            session.add(
+                SingleBrainM2SnapshotClockDiagnosticRecord(
+                    cycle_id=cycle_id,
+                    stage=stage,
+                    snapshot_revision=int(snapshot_revision),
+                    snapshot_as_of=to_utc_naive_datetime(snapshot_as_of),
+                    snapshot_created_at=to_utc_naive_datetime(snapshot_created_at),
+                    response_received_at=to_utc_naive_datetime(response_received_at),
+                    future_offset_ms=format(future_offset_ms, "f"),
+                    transport_elapsed_ms=(
+                        None
+                        if transport_elapsed_ms is None
+                        else format(transport_elapsed_ms, "f")
+                    ),
+                    validation_result=validation_result,
+                )
+            )
+
+    def snapshot_clock_diagnostics(self, cycle_id: str) -> tuple[dict[str, Any], ...]:
+        """Return sanitized persisted timing evidence without initiating work."""
+
+        with self.db.get_session() as session:
+            rows = tuple(
+                session.execute(
+                    select(SingleBrainM2SnapshotClockDiagnosticRecord)
+                    .where(
+                        SingleBrainM2SnapshotClockDiagnosticRecord.cycle_id == cycle_id
+                    )
+                    .order_by(SingleBrainM2SnapshotClockDiagnosticRecord.id)
+                ).scalars()
+            )
+        return tuple(
+            {
+                "cycle_id": row.cycle_id,
+                "stage": row.stage,
+                "snapshot_revision": int(row.snapshot_revision),
+                "as_of": self._iso(row.snapshot_as_of),
+                "created_at": self._iso(row.snapshot_created_at),
+                "last_response_received_at": self._iso(row.response_received_at),
+                "future_offset_ms": row.future_offset_ms,
+                "transport_elapsed_ms": row.transport_elapsed_ms,
+                "validation_result": row.validation_result,
+            }
+            for row in rows
+        )
+
     def readiness(self) -> dict[str, Any]:
         with self.db.get_session() as session:
             cycle = session.execute(
@@ -424,6 +488,9 @@ class M2OperationalRepository:
                 ),
                 "symbols": [self._symbol_payload(row) for row in symbols],
                 "last_successful_shadow_persistence_at": self._iso(latest_persisted),
+                "snapshot_clock_diagnostics": self.snapshot_clock_diagnostics(
+                    str(cycle.cycle_id)
+                ),
             }
 
     def cycle_symbols(self, cycle_id: str) -> tuple[dict[str, Any], ...]:

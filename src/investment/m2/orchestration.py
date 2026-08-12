@@ -6,6 +6,7 @@ import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any, Protocol
 
 from data_provider.base import canonical_stock_code, normalize_stock_code
@@ -327,11 +328,13 @@ class M2ShadowLoopService:
         try:
             mirror = self._repository.load_authority_mirror(cycle)
             if mirror is None:
+                snapshot_was_captured = True
                 snapshot = self._snapshot_source.capture_snapshot()
                 snapshot_validation_time = self._snapshot_receipt_time()
                 policy = self._policy_source.load()
                 symbols = self._select_symbols(snapshot)
             else:
+                snapshot_was_captured = False
                 snapshot = PortfolioSnapshot.model_validate_json(mirror.snapshot_json)
                 snapshot_validation_time = self._aware_now()
                 policy = RiskPolicy.model_validate_json(mirror.risk_policy_json)
@@ -346,6 +349,14 @@ class M2ShadowLoopService:
                         "explicit RiskPolicy changed inside one decision cycle"
                     )
                 symbols = [dict(item) for item in mirror.symbols]
+            if snapshot_was_captured:
+                self._validate_snapshot_with_diagnostics(
+                    cycle_id=cycle,
+                    stage="initial",
+                    snapshot=snapshot,
+                    account_id=account_id,
+                    now=snapshot_validation_time,
+                )
             self._validate_authority_inputs(
                 snapshot=snapshot,
                 policy=policy,
@@ -414,6 +425,13 @@ class M2ShadowLoopService:
                 )
                 decision_snapshot = self._snapshot_source.capture_snapshot()
                 snapshot_validation_time = self._snapshot_receipt_time()
+                self._validate_snapshot_with_diagnostics(
+                    cycle_id=cycle,
+                    stage="post-research-final-refresh",
+                    snapshot=decision_snapshot,
+                    account_id=account_id,
+                    now=snapshot_validation_time,
+                )
                 self._validate_authority_inputs(
                     snapshot=decision_snapshot,
                     policy=policy,
@@ -589,6 +607,28 @@ class M2ShadowLoopService:
         account_id: str,
         now: datetime,
     ) -> None:
+        self._validate_snapshot_authority(
+            snapshot=snapshot,
+            account_id=account_id,
+            now=now,
+        )
+        if not isinstance(policy, RiskPolicy):
+            raise M2ShadowBlocked("explicit canonical RiskPolicy is required")
+        if not policy.applies_to(account_id):
+            raise M2ShadowBlocked("RiskPolicy does not apply to the M2 account")
+        if not policy.is_effective_at(now):
+            raise M2ShadowBlocked("RiskPolicy is not currently effective")
+        quality_rank = {"UNKNOWN": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3}
+        if quality_rank[snapshot.data_quality] < quality_rank[policy.min_data_quality]:
+            raise M2ShadowBlocked("PortfolioSnapshot is below RiskPolicy data quality")
+
+    def _validate_snapshot_authority(
+        self,
+        *,
+        snapshot: PortfolioSnapshot,
+        account_id: str,
+        now: datetime,
+    ) -> None:
         if not isinstance(snapshot, PortfolioSnapshot):
             raise M2ShadowBlocked("canonical PortfolioSnapshot is required")
         if (
@@ -616,15 +656,90 @@ class M2ShadowLoopService:
             raise M2ShadowBlocked("authoritative PortfolioSnapshot is stale")
         if snapshot.data_quality not in {"HIGH", "MEDIUM"}:
             raise M2ShadowBlocked("authoritative PortfolioSnapshot data quality is insufficient")
-        if not isinstance(policy, RiskPolicy):
-            raise M2ShadowBlocked("explicit canonical RiskPolicy is required")
-        if not policy.applies_to(account_id):
-            raise M2ShadowBlocked("RiskPolicy does not apply to the M2 account")
-        if not policy.is_effective_at(now):
-            raise M2ShadowBlocked("RiskPolicy is not currently effective")
-        quality_rank = {"UNKNOWN": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3}
-        if quality_rank[snapshot.data_quality] < quality_rank[policy.min_data_quality]:
-            raise M2ShadowBlocked("PortfolioSnapshot is below RiskPolicy data quality")
+
+    def _validate_snapshot_with_diagnostics(
+        self,
+        *,
+        cycle_id: str,
+        stage: str,
+        snapshot: PortfolioSnapshot,
+        account_id: str,
+        now: datetime,
+    ) -> None:
+        result = "accepted"
+        try:
+            self._validate_snapshot_authority(
+                snapshot=snapshot,
+                account_id=account_id,
+                now=now,
+            )
+        except M2ShadowBlocked as exc:
+            message = str(exc)
+            result = (
+                "future-dated"
+                if "future-dated" in message
+                else "stale"
+                if "stale" in message
+                else "rejected"
+            )
+            self._record_snapshot_clock_diagnostic(
+                cycle_id=cycle_id,
+                stage=stage,
+                snapshot=snapshot,
+                received_at=now,
+                validation_result=result,
+            )
+            raise
+        self._record_snapshot_clock_diagnostic(
+            cycle_id=cycle_id,
+            stage=stage,
+            snapshot=snapshot,
+            received_at=now,
+            validation_result=result,
+        )
+
+    def _record_snapshot_clock_diagnostic(
+        self,
+        *,
+        cycle_id: str,
+        stage: str,
+        snapshot: PortfolioSnapshot,
+        received_at: datetime,
+        validation_result: str,
+    ) -> None:
+        """Best-effort audit evidence must never alter safety or execution behavior."""
+
+        offset_ms = self._timedelta_milliseconds(snapshot.as_of - received_at)
+        elapsed = getattr(self._snapshot_source, "last_transport_elapsed_ms", None)
+        try:
+            elapsed_ms = None if elapsed is None else Decimal(str(elapsed))
+            self._repository.record_snapshot_clock_diagnostic(
+                cycle_id=cycle_id,
+                stage=stage,
+                snapshot_revision=snapshot.revision,
+                snapshot_as_of=snapshot.as_of,
+                snapshot_created_at=snapshot.created_at,
+                response_received_at=received_at,
+                future_offset_ms=offset_ms,
+                transport_elapsed_ms=elapsed_ms,
+                validation_result=validation_result,
+            )
+        except Exception:
+            logger.warning(
+                "M2 snapshot clock diagnostic persistence failed: cycle=%s stage=%s",
+                cycle_id,
+                stage,
+                exc_info=True,
+            )
+
+    @staticmethod
+    def _timedelta_milliseconds(value: timedelta) -> Decimal:
+        microseconds = (
+            value.days * 86_400_000_000
+            + value.seconds * 1_000_000
+            + value.microseconds
+        )
+        return Decimal(microseconds) / Decimal(1000)
 
     def _select_symbols(self, snapshot: PortfolioSnapshot) -> list[dict[str, str]]:
         max_symbols = min(50, max(1, int(getattr(self._config, "single_brain_m2_max_symbols", 10))))

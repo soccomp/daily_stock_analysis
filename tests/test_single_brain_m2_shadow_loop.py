@@ -28,16 +28,22 @@ from tests.test_investment_shadow_wiring_p1a import (
 
 
 class _SnapshotSource:
-    def __init__(self, snapshot, *, response_received_at=None):
+    def __init__(self, snapshot, *, response_received_at=None, transport_elapsed_ms=None):
         self.snapshot = snapshot
         self.last_response_received_at = response_received_at
+        self.last_transport_elapsed_ms = transport_elapsed_ms
         self.calls = 0
 
     def capture_snapshot(self):
         self.calls += 1
-        if isinstance(self.snapshot, Exception):
-            raise self.snapshot
-        return self.snapshot
+        snapshot = (
+            self.snapshot[min(self.calls - 1, len(self.snapshot) - 1)]
+            if isinstance(self.snapshot, list)
+            else self.snapshot
+        )
+        if isinstance(snapshot, Exception):
+            raise snapshot
+        return snapshot
 
 
 class _PolicySource:
@@ -114,6 +120,7 @@ def _service(
     enabled=True,
     snapshot=None,
     response_received_at=None,
+    transport_elapsed_ms=None,
     runner=None,
     store=None,
     clock=None,
@@ -121,6 +128,7 @@ def _service(
     snapshot_source = _SnapshotSource(
         snapshot or _snapshot(),
         response_received_at=response_received_at,
+        transport_elapsed_ms=transport_elapsed_ms,
     )
     policy_source = _PolicySource(_policy())
     runner = runner or _AnalysisRunner()
@@ -270,6 +278,26 @@ def test_bounded_cross_host_snapshot_clock_skew_is_accepted(
     assert len(runner.calls) == 1
 
 
+def test_230ms_snapshot_skew_is_accepted_and_persisted_as_sanitized_evidence(m2_db):
+    clock_values = iter((NOW, NOW + timedelta(seconds=1)))
+    service, _snapshots, _policies, runner, _store = _service(
+        m2_db,
+        snapshot=_snapshot(as_of=NOW + timedelta(milliseconds=230)),
+        response_received_at=NOW,
+        transport_elapsed_ms=23.5,
+        clock=lambda: next(clock_values),
+    )
+
+    result = service.run_cycle(scheduled_for=NOW)
+    evidence = M2OperationalRepository(m2_db).readiness()["snapshot_clock_diagnostics"]
+
+    assert result.status == "COMPLETED"
+    assert len(runner.calls) == 1
+    assert [item["future_offset_ms"] for item in evidence] == ["230", "230"]
+    assert [item["transport_elapsed_ms"] for item in evidence] == ["23.5", "23.5"]
+    assert [item["validation_result"] for item in evidence] == ["accepted", "accepted"]
+
+
 def test_snapshot_beyond_cross_host_clock_skew_budget_fails_closed(m2_db):
     service, _snapshots, _policies, runner, _store = _service(
         m2_db,
@@ -283,6 +311,81 @@ def test_snapshot_beyond_cross_host_clock_skew_budget_fails_closed(m2_db):
     assert result.status == "FAILED_CLOSED"
     assert "future-dated" in " ".join(result.blocked_reasons)
     assert runner.calls == []
+
+
+def test_future_dated_snapshot_persists_exact_sanitized_clock_evidence(m2_db):
+    offset = timedelta(seconds=1, microseconds=1)
+    service, _snapshots, _policies, runner, _store = _service(
+        m2_db,
+        snapshot=_snapshot(as_of=NOW + offset),
+        response_received_at=NOW,
+        clock=lambda: NOW,
+    )
+
+    result = service.run_cycle(scheduled_for=NOW)
+    evidence = M2OperationalRepository(m2_db).readiness()["snapshot_clock_diagnostics"]
+
+    assert result.status == "FAILED_CLOSED"
+    assert runner.calls == []
+    assert len(evidence) == 1
+    assert evidence[0] == {
+        "cycle_id": result.cycle_id,
+        "stage": "initial",
+        "snapshot_revision": 1,
+        "as_of": "2026-08-08T02:00:01.000001Z",
+        "created_at": "2026-08-08T02:00:01.000001Z",
+        "last_response_received_at": "2026-08-08T02:00:00Z",
+        "future_offset_ms": "1000.001",
+        "transport_elapsed_ms": None,
+        "validation_result": "future-dated",
+    }
+
+
+def test_post_research_final_refresh_persists_future_dated_evidence(m2_db):
+    initial = _snapshot(as_of=NOW)
+    final = _snapshot(as_of=NOW + timedelta(seconds=1, microseconds=1))
+    service, _snapshots, _policies, runner, _store = _service(
+        m2_db,
+        snapshot=[initial, final],
+        response_received_at=NOW,
+        clock=lambda: NOW,
+    )
+
+    result = service.run_cycle(scheduled_for=NOW)
+    evidence = M2OperationalRepository(m2_db).readiness()["snapshot_clock_diagnostics"]
+
+    assert result.status == "FAILED_CLOSED"
+    assert len(runner.calls) == 1
+    assert [item["stage"] for item in evidence] == [
+        "initial",
+        "post-research-final-refresh",
+    ]
+    assert [item["validation_result"] for item in evidence] == [
+        "accepted",
+        "future-dated",
+    ]
+    assert evidence[-1]["future_offset_ms"] == "1000.001"
+
+
+def test_clock_diagnostic_write_failure_cannot_change_fail_closed_behavior(m2_db, monkeypatch):
+    service, _snapshots, _policies, runner, _store = _service(
+        m2_db,
+        snapshot=_snapshot(as_of=NOW + timedelta(seconds=1, microseconds=1)),
+        response_received_at=NOW,
+        clock=lambda: NOW,
+    )
+    monkeypatch.setattr(
+        service._repository,
+        "record_snapshot_clock_diagnostic",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("audit store unavailable")),
+    )
+
+    result = service.run_cycle(scheduled_for=NOW)
+
+    assert result.status == "FAILED_CLOSED"
+    assert "future-dated" in " ".join(result.blocked_reasons)
+    assert runner.calls == []
+    assert M2OperationalRepository(m2_db).readiness()["snapshot_clock_diagnostics"] == ()
 
 
 def test_timezone_naive_authoritative_snapshot_is_rejected_by_contract():
