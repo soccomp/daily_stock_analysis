@@ -1195,6 +1195,29 @@ class SingleBrainM2SymbolRecord(Base):
     )
 
 
+class SingleBrainM2SnapshotClockDiagnosticRecord(Base):
+    """Sanitized, immutable observation timing for M2 authority validation."""
+
+    __tablename__ = "single_brain_m2_snapshot_clock_diagnostics"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    cycle_id = Column(
+        String(160),
+        ForeignKey("single_brain_m2_cycles.cycle_id"),
+        nullable=False,
+        index=True,
+    )
+    stage = Column(String(40), nullable=False)
+    snapshot_revision = Column(Integer, nullable=False)
+    snapshot_as_of = Column(DateTime, nullable=False)
+    snapshot_created_at = Column(DateTime, nullable=False)
+    response_received_at = Column(DateTime, nullable=False)
+    future_offset_ms = Column(String(32), nullable=False)
+    transport_elapsed_ms = Column(String(32))
+    validation_result = Column(String(20), nullable=False)
+    recorded_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+
+
 class SingleBrainM3ExecutionRecord(Base):
     """Durable no-retry checkpoint for one Brain-owned executable decision."""
 
