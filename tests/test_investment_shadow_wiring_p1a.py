@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 from src.analyzer import AnalysisResult
 from src.config import Config
@@ -18,6 +19,7 @@ from src.core.pipeline import StockAnalysisPipeline
 from src.enums import ReportType
 from src.investment.contracts.portfolio_snapshot import PortfolioSnapshot, Position
 from src.investment.contracts.risk_policy import RiskPolicy
+from src.investment.execution_projection.mandate import ExecutionMandateProjector
 from src.investment.shadow_wiring import (
     InvestmentShadowWiringService,
     ShadowWiringRejected,
@@ -320,6 +322,107 @@ def test_shadow_wiring_rejects_authoritative_snapshot_beyond_clock_skew_budget()
             ),
             risk_policy=_policy(),
         )
+
+
+def test_structured_watch_reaches_brain_as_hold_without_a_price_plan_or_mandate() -> None:
+    result = _analysis_result()
+    # The structured action is authoritative research evidence.  The conflicting
+    # display advice proves this path is not a prose heuristic.
+    result.action = "watch"
+    result.operation_advice = "加仓"
+    result.dashboard["battle_plan"]["sniper_points"].update(
+        {
+            "ideal_buy": "76.97",
+            "secondary_buy": None,
+            "stop_loss": "78.82",
+            "take_profit": "82.52",
+        }
+    )
+
+    artifacts = InvestmentShadowWiringService(clock=lambda: NOW).build_from_analysis(
+        result=result,
+        context_snapshot={"data_quality": {"level": "good"}},
+        source_report_id=42,
+        trace_id="cycle:research-watch",
+        trigger_source="single_brain_m3_simulation_execution",
+        portfolio_snapshot=_snapshot(),
+        risk_policy=_policy(),
+    )
+
+    decision = artifacts.investment_decision
+    assert decision.action == "HOLD"
+    assert decision.current_quantity == decision.target_quantity == 300
+    assert decision.delta_quantity == 0
+    assert decision.entry_plan is decision.stop_plan is decision.take_profit_plan is None
+    assert decision.expected_return == decision.expected_risk == Decimal("0")
+    assert artifacts.research_bundle.expected_return_range.minimum == Decimal("0")
+    assert artifacts.shadow_mandate is None
+    assert artifacts.execution_permitted is False
+    assert "entry_low" not in artifacts.decision_signal
+    assert "stop_loss" not in artifacts.decision_signal
+    assert "target_price" not in artifacts.decision_signal
+    with pytest.raises(ValueError, match="only actionable BUY/ADD"):
+        ExecutionMandateProjector.project(decision)
+
+
+@pytest.mark.parametrize(
+    "sniper_points, reason",
+    (
+        (
+            {"ideal_buy": 95, "secondary_buy": 100, "stop_loss": 100, "take_profit": 130},
+            "stop is not below",
+        ),
+        (
+            {"ideal_buy": 95, "secondary_buy": 100, "stop_loss": 80, "take_profit": None},
+            "lacks an entry, stop, or target",
+        ),
+        (
+            {"ideal_buy": 95, "secondary_buy": 100, "stop_loss": 80, "take_profit": 100},
+            "target is not above",
+        ),
+    ),
+)
+def test_actionable_research_with_invalid_price_plan_fails_closed(
+    sniper_points,
+    reason,
+) -> None:
+    result = _analysis_result()
+    result.action = "add"
+    result.dashboard["battle_plan"]["sniper_points"] = sniper_points
+
+    with pytest.raises(ShadowWiringRejected, match=reason):
+        InvestmentShadowWiringService(clock=lambda: NOW).build_from_analysis(
+            result=result,
+            context_snapshot={"data_quality": {"level": "good"}},
+            source_report_id=42,
+            trace_id="cycle:invalid-actionable-plan",
+            trigger_source="single_brain_m3_simulation_execution",
+            portfolio_snapshot=_snapshot(),
+            risk_policy=_policy(),
+        )
+
+
+def test_non_actionable_hold_contract_is_deterministic_and_immutable() -> None:
+    def build():
+        result = _analysis_result()
+        result.action = "watch"
+        result.dashboard["battle_plan"]["sniper_points"]["stop_loss"] = 110
+        return InvestmentShadowWiringService(clock=lambda: NOW).build_from_analysis(
+            result=result,
+            context_snapshot={"data_quality": {"level": "good"}},
+            source_report_id=42,
+            trace_id="cycle:deterministic-watch",
+            trigger_source="single_brain_m3_simulation_execution",
+            portfolio_snapshot=_snapshot(),
+            risk_policy=_policy(),
+        ).investment_decision
+
+    first = build()
+    second = build()
+    assert first.canonical_json() == second.canonical_json()
+    assert first.content_hash == second.content_hash
+    with pytest.raises(ValidationError):
+        first.delta_quantity = 100
 
 
 def test_shadow_module_has_no_execution_transport_persistence_or_retry_surface() -> None:

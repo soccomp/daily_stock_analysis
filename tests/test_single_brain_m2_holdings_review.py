@@ -56,6 +56,8 @@ class _ChangingHoldingResearch:
         self.calls.append(kwargs)
         result = _analysis_result()
         if len(self.calls) == 2:
+            result.action = "watch"
+            result.operation_advice = "观望"
             result.dashboard["battle_plan"]["sniper_points"]["take_profit"] = 90
             result.company_highlights = "品牌仍有长期价值，但短期催化剂已经消退。"
             result.risk_warning = "渠道库存恶化，需求转弱使原有论点失效。"

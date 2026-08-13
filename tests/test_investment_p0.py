@@ -537,6 +537,23 @@ def test_brain_keeps_negative_expected_return_research_at_hold() -> None:
     assert decision.delta_quantity == 0
 
 
+def test_historical_hold_with_legacy_entry_plan_remains_readable() -> None:
+    legacy_hold = _decision(
+        research=_research(
+            expected_return_range=ExpectedReturnRange(
+                minimum=Decimal("-0.200000"),
+                maximum=Decimal("-0.100000"),
+            )
+        )
+    )
+
+    restored = InvestmentDecision.model_validate_json(legacy_hold.canonical_json())
+
+    assert legacy_hold.action == restored.action == "HOLD"
+    assert restored.entry_plan is not None
+    assert restored.content_hash == legacy_hold.content_hash
+
+
 def test_brain_rejects_non_simulation_portfolio() -> None:
     snapshot = PortfolioSnapshot.build(
         **_build_values(_snapshot(), account_mode="PAPER")

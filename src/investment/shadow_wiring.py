@@ -30,6 +30,7 @@ from src.investment.snapshot_timing import (
     MAX_PORTFOLIO_SNAPSHOT_CLOCK_SKEW,
     portfolio_snapshot_is_future_dated,
 )
+from src.schemas.decision_action import normalize_decision_action
 from src.services.decision_signal_data_quality import normalize_decision_signal_data_quality
 from src.utils.sniper_points import extract_sniper_points
 
@@ -113,13 +114,18 @@ class InvestmentShadowWiringService:
         if market != "CN":
             raise ShadowWiringRejected("P1A shadow wiring is limited to CN equities")
 
-        entry_floor, entry_limit, stop_price, target_price = self._price_plan(result)
-        expected_return = ((target_price - entry_limit) / entry_limit).quantize(
-            _RETURN_QUANTUM,
-            rounding=ROUND_DOWN,
-        )
-        if expected_return <= 0 and not allow_nonpositive_return:
-            raise ShadowWiringRejected("completed analysis has no positive target return")
+        research_actionability = self._research_actionability(result)
+        if research_actionability == "ACTIONABLE_LONG":
+            entry_floor, entry_limit, stop_price, target_price = self._price_plan(result)
+            expected_return = ((target_price - entry_limit) / entry_limit).quantize(
+                _RETURN_QUANTUM,
+                rounding=ROUND_DOWN,
+            )
+            if expected_return <= 0 and not allow_nonpositive_return:
+                raise ShadowWiringRejected("completed analysis has no positive target return")
+        else:
+            entry_floor = entry_limit = stop_price = target_price = None
+            expected_return = Decimal("0")
 
         effective_trace_id = str(trace_id or "").strip()
         if not effective_trace_id:
@@ -219,7 +225,11 @@ class InvestmentShadowWiringService:
                 *self._risk_alerts(result),
             ),
             invalidation_conditions=(
-                f"Observed price falls below the DSA stop plan {decimal_to_json(stop_price)}.",
+                (
+                    f"Observed price falls below the DSA stop plan {decimal_to_json(stop_price)}."
+                    if stop_price is not None
+                    else "Research is non-actionable; require a new completed analysis before entry."
+                ),
             ),
             evidence_refs=(
                 f"dsa-analysis-history:{source_report_id}",
@@ -258,31 +268,39 @@ class InvestmentShadowWiringService:
                 created_at=now,
                 valid_from=now,
                 valid_until=valid_until,
-                proposed_target_weight=risk_budget_target_weight(
-                    entry_limit=entry_limit,
-                    stop_price=stop_price,
-                    risk_budget_per_trade=risk_policy.risk_budget_per_trade,
-                    max_single_position_weight=risk_policy.max_single_position_weight,
-                ),
-                lot_size=100,
-                entry_plan=EntryPlan(
-                    limit_price=entry_limit,
-                    price_floor=entry_floor,
-                    price_ceiling=entry_limit,
-                ),
-                stop_plan=StopPlan(stop_price=stop_price),
-                take_profit_plan=(
-                    TakeProfitPlan(target_price=target_price)
-                    if expected_return > 0
+                proposed_target_weight=(
+                    risk_budget_target_weight(
+                        entry_limit=entry_limit,
+                        stop_price=stop_price,
+                        risk_budget_per_trade=risk_policy.risk_budget_per_trade,
+                        max_single_position_weight=risk_policy.max_single_position_weight,
+                    )
+                    if research_actionability == "ACTIONABLE_LONG"
                     else None
                 ),
+                lot_size=100,
+                entry_plan=(
+                    EntryPlan(
+                        limit_price=entry_limit,
+                        price_floor=entry_floor,
+                        price_ceiling=entry_limit,
+                    )
+                    if entry_limit is not None and entry_floor is not None
+                    else None
+                ),
+                stop_plan=StopPlan(stop_price=stop_price) if stop_price is not None else None,
+                take_profit_plan=(TakeProfitPlan(target_price=target_price) if target_price is not None else None),
                 rationale=(
                     research.base_case
-                    if expected_return > 0
-                    else f"HOLD: non-positive expected return; weakening evidence: {research.bear_case}"
+                    if research_actionability == "ACTIONABLE_LONG" and expected_return > 0
+                    else (
+                        f"HOLD: structured research is non-actionable; "
+                        f"weakening evidence: {research.bear_case}"
+                    )
                 ),
                 horizon=research.horizon,
                 producer="DSA_INVESTMENT_SHADOW_DECISION_ENGINE",
+                research_actionability=research_actionability,
             ),
         )
         decision_signal = DecisionSignalProjector.project(decision)
@@ -371,7 +389,21 @@ class InvestmentShadowWiringService:
         entry_limit = max(entries)
         if stop_price >= entry_limit:
             raise ShadowWiringRejected("completed analysis stop is not below the entry limit")
+        if target_price <= entry_limit:
+            raise ShadowWiringRejected("completed analysis target is not above the entry limit")
         return entry_floor, entry_limit, stop_price, target_price
+
+    @staticmethod
+    def _research_actionability(
+        result: AnalysisResult,
+    ) -> Literal["ACTIONABLE_LONG", "NON_ACTIONABLE"]:
+        """Use only the completed analysis' structured action field as research evidence."""
+
+        return (
+            "NON_ACTIONABLE"
+            if normalize_decision_action(getattr(result, "action", None)) == "watch"
+            else "ACTIONABLE_LONG"
+        )
 
     @staticmethod
     def _decimal(value: Any) -> Decimal | None:
