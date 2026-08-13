@@ -44,6 +44,7 @@ class InvestmentDecision(CanonicalContract):
 
     BUILD_DEFAULTS: ClassVar[Mapping[str, object]] = {
         "schema_version": "1.0",
+        "entry_plan": None,
         "stop_plan": None,
         "take_profit_plan": None,
         "invalidation_conditions": (),
@@ -70,7 +71,9 @@ class InvestmentDecision(CanonicalContract):
     target_weight: CanonicalDecimal = Field(ge=0, le=1)
     delta_quantity: StrictInt = Field(ge=0)
 
-    entry_plan: EntryPlan
+    # HOLD is an account-level no-change decision and has no executable entry.
+    # Existing stored decisions with a legacy entry plan remain valid/readable.
+    entry_plan: EntryPlan | None
     stop_plan: StopPlan | None
     take_profit_plan: TakeProfitPlan | None
     horizon: StrictStr = Field(min_length=1, max_length=64)
@@ -100,13 +103,23 @@ class InvestmentDecision(CanonicalContract):
             self.current_quantity > 0 and self.delta_quantity > 0
         ):
             raise ValueError("ADD requires an existing position and positive delta_quantity")
+        if self.action in {"BUY", "ADD"} and self.entry_plan is None:
+            raise ValueError("BUY/ADD requires an entry plan")
+        if self.entry_plan is None and (
+            self.stop_plan is not None or self.take_profit_plan is not None
+        ):
+            raise ValueError("stop and take-profit plans require an entry plan")
         if self.action == "HOLD" and not (
             self.delta_quantity == 0 and self.target_quantity == self.current_quantity
         ):
             raise ValueError("HOLD cannot change quantity")
-        if self.stop_plan is not None and self.stop_plan.stop_price >= self.entry_plan.limit_price:
+        if (
+            self.entry_plan is not None
+            and self.stop_plan is not None
+            and self.stop_plan.stop_price >= self.entry_plan.limit_price
+        ):
             raise ValueError("P0 BUY/ADD stop price must be below entry limit price")
-        if self.take_profit_plan is not None:
+        if self.entry_plan is not None and self.take_profit_plan is not None:
             if self.take_profit_plan.target_price <= self.entry_plan.limit_price:
                 raise ValueError("P0 take-profit target must be above entry limit price")
         if len(self.research_ids) != len(set(self.research_ids)):

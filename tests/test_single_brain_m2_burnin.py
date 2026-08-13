@@ -103,6 +103,8 @@ class _BurninAnalysisRunner:
         result.analysis_summary = f"Cycle evidence revision {sequence} for {symbol}."
         result.company_highlights = f"Observed catalyst revision {sequence}."
         if symbol == "000002":
+            result.action = "watch"
+            result.operation_advice = "观望"
             result.dashboard["battle_plan"]["sniper_points"]["take_profit"] = 90
             result.risk_warning = (
                 f"Holding thesis weakening at evidence revision {sequence}; do not add."

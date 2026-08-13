@@ -13,8 +13,16 @@ class DecisionSignalProjector:
 
     @staticmethod
     def project(decision: InvestmentDecision) -> dict[str, Any]:
-        entry_low = decision.entry_plan.price_floor or decision.entry_plan.limit_price
-        entry_high = decision.entry_plan.price_ceiling or decision.entry_plan.limit_price
+        entry_low = (
+            decision.entry_plan.price_floor or decision.entry_plan.limit_price
+            if decision.entry_plan is not None
+            else None
+        )
+        entry_high = (
+            decision.entry_plan.price_ceiling or decision.entry_plan.limit_price
+            if decision.entry_plan is not None
+            else None
+        )
         payload: dict[str, Any] = {
             "stock_code": decision.symbol,
             "market": decision.market.lower(),
@@ -25,8 +33,8 @@ class DecisionSignalProjector:
             "action": decision.action.lower(),
             "confidence": decimal_to_json(decision.confidence),
             "horizon": decision.horizon,
-            "entry_low": decimal_to_json(entry_low),
-            "entry_high": decimal_to_json(entry_high),
+            "entry_low": None if entry_low is None else decimal_to_json(entry_low),
+            "entry_high": None if entry_high is None else decimal_to_json(entry_high),
             "stop_loss": (
                 decimal_to_json(decision.stop_plan.stop_price)
                 if decision.stop_plan is not None

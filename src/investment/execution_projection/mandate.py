@@ -16,6 +16,8 @@ class ExecutionMandateProjector:
     def project(decision: InvestmentDecision) -> ExecutionMandate:
         if decision.action not in {"BUY", "ADD"} or decision.delta_quantity <= 0:
             raise ValueError("only actionable BUY/ADD decisions can produce a P0 mandate")
+        if decision.entry_plan is None:
+            raise ValueError("actionable BUY/ADD decisions require an entry plan")
         idempotency_key = hashlib.sha256(
             canonical_json_bytes(
                 {

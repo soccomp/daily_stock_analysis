@@ -67,6 +67,8 @@ class _AnalysisRunner:
         self.calls.append(kwargs)
         result = _analysis_result()
         if self.weakening:
+            result.action = "watch"
+            result.operation_advice = "观望"
             result.dashboard["battle_plan"]["sniper_points"]["take_profit"] = 90
             result.risk_warning = "渠道库存恶化，既有研究论点正在失效。"
             result.analysis_summary = "研究证据转弱，当前不增加资本暴露。"

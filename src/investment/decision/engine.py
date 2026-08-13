@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, ROUND_DOWN
+from typing import Literal
 
 from src.investment.contracts.base import decimal_to_json
 from src.investment.contracts.investment_decision import (
@@ -47,9 +48,9 @@ class DecisionSizingInput:
     created_at: datetime
     valid_from: datetime
     valid_until: datetime
-    proposed_target_weight: Decimal
+    proposed_target_weight: Decimal | None
     lot_size: int
-    entry_plan: EntryPlan
+    entry_plan: EntryPlan | None
     stop_plan: StopPlan | None
     take_profit_plan: TakeProfitPlan | None
     rationale: str
@@ -57,11 +58,22 @@ class DecisionSizingInput:
     instrument: str = "EQUITY"
     producer: str = "DSA_INVESTMENT_DECISION_ENGINE"
     supersedes_decision_id: str | None = None
+    research_actionability: Literal["ACTIONABLE_LONG", "NON_ACTIONABLE"] = "ACTIONABLE_LONG"
 
     def __post_init__(self) -> None:
-        target = _require_exact_decimal(self.proposed_target_weight, "proposed_target_weight")
-        if target <= 0 or target > 1:
-            raise ValueError("proposed_target_weight must be in (0, 1]")
+        if self.research_actionability == "ACTIONABLE_LONG":
+            target = _require_exact_decimal(self.proposed_target_weight, "proposed_target_weight")
+            if target <= 0 or target > 1:
+                raise ValueError("proposed_target_weight must be in (0, 1]")
+            if self.entry_plan is None:
+                raise ValueError("actionable research requires an entry plan")
+        elif self.research_actionability == "NON_ACTIONABLE":
+            if self.proposed_target_weight is not None:
+                raise ValueError("non-actionable research cannot propose a target weight")
+            if any(item is not None for item in (self.entry_plan, self.stop_plan, self.take_profit_plan)):
+                raise ValueError("non-actionable research cannot provide an execution price plan")
+        else:
+            raise ValueError("research_actionability is invalid")
         if not isinstance(self.lot_size, int) or isinstance(self.lot_size, bool) or self.lot_size <= 0:
             raise ValueError("lot_size must be a positive integer")
         for field_name in ("created_at", "valid_from", "valid_until"):
@@ -107,6 +119,18 @@ class InvestmentDecisionEngine:
         current_quantity = position.quantity if position is not None else 0
         current_value = position.market_value if position is not None else Decimal("0")
         current_weight = _weight(current_value, equity)
+        if sizing.research_actionability == "NON_ACTIONABLE":
+            return self._non_actionable_hold(
+                research=research,
+                portfolio=portfolio,
+                risk_policy=risk_policy,
+                sizing=sizing,
+                current_quantity=current_quantity,
+                current_weight=current_weight,
+            )
+
+        assert sizing.entry_plan is not None
+        assert sizing.proposed_target_weight is not None
         entry_price = sizing.entry_plan.limit_price
 
         total_exposure = sum(
@@ -260,8 +284,71 @@ class InvestmentDecisionEngine:
             raise ValueError("decision created_at cannot be after valid_from")
         if sizing.valid_until <= sizing.valid_from:
             raise ValueError("decision validity window is invalid")
-        if risk_policy.stop_required and sizing.stop_plan is None:
+        if (
+            risk_policy.stop_required
+            and sizing.research_actionability == "ACTIONABLE_LONG"
+            and sizing.stop_plan is None
+        ):
             raise ValueError("risk policy requires a stop plan")
+
+    def _non_actionable_hold(
+        self,
+        *,
+        research: ResearchBundle,
+        portfolio: PortfolioSnapshot,
+        risk_policy: RiskPolicy,
+        sizing: DecisionSizingInput,
+        current_quantity: int,
+        current_weight: Decimal,
+    ) -> InvestmentDecision:
+        """Turn structured research non-actionability into the Brain's HOLD."""
+
+        return InvestmentDecision.build(
+            decision_id=sizing.decision_id,
+            decision_cycle_id=sizing.decision_cycle_id,
+            trace_id=research.trace_id,
+            created_at=sizing.created_at,
+            producer=sizing.producer,
+            supersedes_id=sizing.supersedes_decision_id,
+            supersedes_decision_id=sizing.supersedes_decision_id,
+            account_id=portfolio.account_id,
+            symbol=research.symbol,
+            market=research.market,
+            action="HOLD",
+            research_ids=(research.research_id,),
+            portfolio_snapshot_id=portfolio.snapshot_id,
+            portfolio_snapshot_hash=portfolio.content_hash,
+            risk_policy_id=risk_policy.policy_id,
+            risk_policy_version=risk_policy.policy_version,
+            current_quantity=current_quantity,
+            current_weight=current_weight,
+            target_quantity=current_quantity,
+            target_weight=current_weight,
+            delta_quantity=0,
+            entry_plan=None,
+            stop_plan=None,
+            take_profit_plan=None,
+            horizon=sizing.horizon,
+            valid_from=sizing.valid_from,
+            valid_until=sizing.valid_until,
+            expected_return=Decimal("0"),
+            expected_risk=Decimal("0"),
+            confidence=research.confidence,
+            rationale=sizing.rationale,
+            risk_reasoning=(
+                "DSA Brain accepted structured non-actionable research evidence; "
+                "no capital allocation or execution is authorized."
+            ),
+            invalidation_conditions=research.invalidation_conditions,
+            model_provenance=(
+                ModelProvenance(
+                    model_name="deterministic-investment-decision-engine",
+                    model_version=self.ENGINE_VERSION,
+                    provider="DSA",
+                    prompt_hash=None,
+                ),
+            ),
+        )
 
     @staticmethod
     def _risk_capped_delta(
