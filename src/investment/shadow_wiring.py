@@ -26,6 +26,10 @@ from src.investment.decision.engine import DecisionSizingInput, InvestmentDecisi
 from src.investment.decision.sizing import risk_budget_target_weight
 from src.investment.execution_projection.decision_signal import DecisionSignalProjector
 from src.investment.research.adapter import ResearchBundleAdapter
+from src.investment.snapshot_timing import (
+    MAX_PORTFOLIO_SNAPSHOT_CLOCK_SKEW,
+    portfolio_snapshot_is_future_dated,
+)
 from src.services.decision_signal_data_quality import normalize_decision_signal_data_quality
 from src.utils.sniper_points import extract_sniper_points
 
@@ -72,6 +76,8 @@ class InvestmentShadowWiringService:
     """Pure DSA wiring from a completed analysis to internal shadow artifacts."""
 
     MAX_SNAPSHOT_AGE = timedelta(minutes=5)
+    # Compatibility alias; the shared authority timing module owns this budget.
+    MAX_SNAPSHOT_CLOCK_SKEW = MAX_PORTFOLIO_SNAPSHOT_CLOCK_SKEW
     DECISION_VALIDITY = timedelta(minutes=5)
 
     def __init__(self, *, clock: Callable[[], datetime] | None = None) -> None:
@@ -328,7 +334,10 @@ class InvestmentShadowWiringService:
             raise ShadowWiringRejected("an injected canonical PortfolioSnapshot is required")
         if not isinstance(risk_policy, RiskPolicy):
             raise ShadowWiringRejected("an injected canonical RiskPolicy is required")
-        if portfolio_snapshot.as_of > now:
+        if portfolio_snapshot_is_future_dated(
+            as_of=portfolio_snapshot.as_of,
+            reference_time=now,
+        ):
             raise ShadowWiringRejected("authoritative portfolio snapshot is from the future")
         if now - portfolio_snapshot.as_of > self.MAX_SNAPSHOT_AGE:
             raise ShadowWiringRejected("authoritative portfolio snapshot is stale")

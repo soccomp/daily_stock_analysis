@@ -31,6 +31,10 @@ from src.investment.m2.identity import (
 from src.investment.m2.policy import CanonicalRiskPolicyLoader
 from src.investment.m2.repository import M2InputConflictError, M2OperationalRepository
 from src.investment.m2.runtime_diagnostics import analysis_failure_marker
+from src.investment.snapshot_timing import (
+    MAX_PORTFOLIO_SNAPSHOT_CLOCK_SKEW,
+    portfolio_snapshot_is_future_dated,
+)
 from src.investment.shadow_wiring import InvestmentShadowWiringService, ShadowWiringRejected
 from src.services.decision_scorecard_service import DecisionScorecardNotFoundError
 from src.services.history_service import HistoryService
@@ -174,8 +178,8 @@ class M2ShadowLoopService:
     """One bounded scheduler attempt; every unsafe state fails closed."""
 
     MAX_SNAPSHOT_AGE = timedelta(minutes=5)
-    # Infrastructure safety budget, intentionally independent of RiskPolicy.
-    MAX_SNAPSHOT_CLOCK_SKEW = timedelta(seconds=1)
+    # Compatibility alias; the shared authority timing module owns this budget.
+    MAX_SNAPSHOT_CLOCK_SKEW = MAX_PORTFOLIO_SNAPSHOT_CLOCK_SKEW
 
     def __init__(
         self,
@@ -648,8 +652,10 @@ class M2ShadowLoopService:
             or snapshot.created_at.utcoffset() != timedelta(0)
         ):
             raise M2ShadowBlocked("PortfolioSnapshot timestamps must be timezone-aware UTC")
-        future_offset = snapshot.as_of - now
-        if future_offset > self.MAX_SNAPSHOT_CLOCK_SKEW:
+        if portfolio_snapshot_is_future_dated(
+            as_of=snapshot.as_of,
+            reference_time=now,
+        ):
             raise M2ShadowBlocked("authoritative PortfolioSnapshot is future-dated")
         freshness_age = max(timedelta(0), now - snapshot.as_of)
         if freshness_age > self.MAX_SNAPSHOT_AGE:

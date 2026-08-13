@@ -10,13 +10,18 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from src.analyzer import AnalysisResult
 from src.config import Config
 from src.core.pipeline import StockAnalysisPipeline
 from src.enums import ReportType
 from src.investment.contracts.portfolio_snapshot import PortfolioSnapshot, Position
 from src.investment.contracts.risk_policy import RiskPolicy
-from src.investment.shadow_wiring import InvestmentShadowWiringService
+from src.investment.shadow_wiring import (
+    InvestmentShadowWiringService,
+    ShadowWiringRejected,
+)
 from tests.test_pipeline_market_phase_context import _make_pipeline, _phase_payload
 
 
@@ -274,6 +279,47 @@ def test_stale_snapshot_and_expired_policy_fail_closed_without_a_decision() -> N
 
     assert stale_result._investment_shadow_artifacts is None
     assert expired_result._investment_shadow_artifacts is None
+
+
+@pytest.mark.parametrize(
+    "producer_offset",
+    (timedelta(milliseconds=93), timedelta(seconds=1)),
+)
+def test_shadow_wiring_accepts_authoritative_snapshot_within_clock_skew_budget(
+    producer_offset: timedelta,
+) -> None:
+    snapshot = _snapshot(as_of=NOW + producer_offset)
+    canonical_json = snapshot.canonical_json()
+    content_hash = snapshot.content_hash
+
+    artifacts = InvestmentShadowWiringService(clock=lambda: NOW).build_from_analysis(
+        result=_analysis_result(),
+        context_snapshot={"data_quality": {"level": "good"}},
+        source_report_id=42,
+        trace_id="cycle:bounded-skew",
+        trigger_source="single_brain_m2_shadow",
+        portfolio_snapshot=snapshot,
+        risk_policy=_policy(),
+    )
+
+    assert artifacts.investment_decision.portfolio_snapshot_hash == content_hash
+    assert snapshot.canonical_json() == canonical_json
+    assert snapshot.content_hash == content_hash
+
+
+def test_shadow_wiring_rejects_authoritative_snapshot_beyond_clock_skew_budget() -> None:
+    with pytest.raises(ShadowWiringRejected, match="snapshot is from the future"):
+        InvestmentShadowWiringService(clock=lambda: NOW).build_from_analysis(
+            result=_analysis_result(),
+            context_snapshot={"data_quality": {"level": "good"}},
+            source_report_id=42,
+            trace_id="cycle:future-skew",
+            trigger_source="single_brain_m2_shadow",
+            portfolio_snapshot=_snapshot(
+                as_of=NOW + timedelta(seconds=1, microseconds=1)
+            ),
+            risk_policy=_policy(),
+        )
 
 
 def test_shadow_module_has_no_execution_transport_persistence_or_retry_surface() -> None:
