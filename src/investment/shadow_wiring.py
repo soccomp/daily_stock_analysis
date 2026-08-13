@@ -52,6 +52,9 @@ _QUALITY = {
     "poor": "UNKNOWN",
     "unknown": "UNKNOWN",
 }
+_ACTIONABLE_LONG_ACTIONS = frozenset({"buy", "add"})
+_NON_ACTIONABLE_ACTIONS = frozenset({"watch", "hold", "avoid", "alert"})
+_UNSUPPORTED_DIRECTION_ACTIONS = frozenset({"reduce", "sell"})
 
 
 class ShadowWiringRejected(ValueError):
@@ -397,12 +400,19 @@ class InvestmentShadowWiringService:
     def _research_actionability(
         result: AnalysisResult,
     ) -> Literal["ACTIONABLE_LONG", "NON_ACTIONABLE"]:
-        """Use only the completed analysis' structured action field as research evidence."""
+        """Map only explicit canonical research states; unknown states fail closed."""
 
-        return (
-            "NON_ACTIONABLE"
-            if normalize_decision_action(getattr(result, "action", None)) == "watch"
-            else "ACTIONABLE_LONG"
+        action = normalize_decision_action(getattr(result, "action", None))
+        if action in _ACTIONABLE_LONG_ACTIONS:
+            return "ACTIONABLE_LONG"
+        if action in _NON_ACTIONABLE_ACTIONS:
+            return "NON_ACTIONABLE"
+        if action in _UNSUPPORTED_DIRECTION_ACTIONS:
+            raise ShadowWiringRejected(
+                f"structured research action {action} is outside BUY/ADD/HOLD capability"
+            )
+        raise ShadowWiringRejected(
+            "completed analysis action is missing, ambiguous, or unrecognized"
         )
 
     @staticmethod

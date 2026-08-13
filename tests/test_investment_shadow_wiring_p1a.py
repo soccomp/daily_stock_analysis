@@ -324,11 +324,14 @@ def test_shadow_wiring_rejects_authoritative_snapshot_beyond_clock_skew_budget()
         )
 
 
-def test_structured_watch_reaches_brain_as_hold_without_a_price_plan_or_mandate() -> None:
+@pytest.mark.parametrize("action", ("watch", "hold", "avoid", "alert"))
+def test_structured_non_actionable_actions_reach_brain_as_hold_without_price_plan_or_mandate(
+    action: str,
+) -> None:
     result = _analysis_result()
     # The structured action is authoritative research evidence.  The conflicting
     # display advice proves this path is not a prose heuristic.
-    result.action = "watch"
+    result.action = action
     result.operation_advice = "加仓"
     result.dashboard["battle_plan"]["sniper_points"].update(
         {
@@ -343,7 +346,7 @@ def test_structured_watch_reaches_brain_as_hold_without_a_price_plan_or_mandate(
         result=result,
         context_snapshot={"data_quality": {"level": "good"}},
         source_report_id=42,
-        trace_id="cycle:research-watch",
+        trace_id=f"cycle:research-{action}",
         trigger_source="single_brain_m3_simulation_execution",
         portfolio_snapshot=_snapshot(),
         risk_policy=_policy(),
@@ -363,6 +366,63 @@ def test_structured_watch_reaches_brain_as_hold_without_a_price_plan_or_mandate(
     assert "target_price" not in artifacts.decision_signal
     with pytest.raises(ValueError, match="only actionable BUY/ADD"):
         ExecutionMandateProjector.project(decision)
+
+
+@pytest.mark.parametrize("action", ("buy", "add"))
+def test_structured_actionable_long_actions_preserve_exact_sizing(action: str) -> None:
+    result = _analysis_result()
+    result.action = action
+
+    artifacts = InvestmentShadowWiringService(clock=lambda: NOW).build_from_analysis(
+        result=result,
+        context_snapshot={"data_quality": {"level": "good"}},
+        source_report_id=42,
+        trace_id=f"cycle:research-{action}",
+        trigger_source="single_brain_m3_simulation_execution",
+        portfolio_snapshot=_snapshot(),
+        risk_policy=_policy(),
+    )
+
+    decision = artifacts.investment_decision
+    assert decision.action == "ADD"
+    assert decision.delta_quantity == 200
+    assert decision.entry_plan is not None
+    mandate = ExecutionMandateProjector.project(decision)
+    assert mandate.quantity == decision.delta_quantity == 200
+
+
+@pytest.mark.parametrize("action", ("reduce", "sell"))
+def test_structured_unsupported_direction_actions_fail_closed(action: str) -> None:
+    result = _analysis_result()
+    result.action = action
+
+    with pytest.raises(ShadowWiringRejected, match="outside BUY/ADD/HOLD capability"):
+        InvestmentShadowWiringService(clock=lambda: NOW).build_from_analysis(
+            result=result,
+            context_snapshot={"data_quality": {"level": "good"}},
+            source_report_id=42,
+            trace_id=f"cycle:research-{action}",
+            trigger_source="single_brain_m3_simulation_execution",
+            portfolio_snapshot=_snapshot(),
+            risk_policy=_policy(),
+        )
+
+
+@pytest.mark.parametrize("action", (None, "buy sell", "unrecognized-action"))
+def test_missing_or_ambiguous_structured_action_fails_closed(action: str | None) -> None:
+    result = _analysis_result()
+    result.action = action
+
+    with pytest.raises(ShadowWiringRejected, match="missing, ambiguous, or unrecognized"):
+        InvestmentShadowWiringService(clock=lambda: NOW).build_from_analysis(
+            result=result,
+            context_snapshot={"data_quality": {"level": "good"}},
+            source_report_id=42,
+            trace_id="cycle:research-ambiguous",
+            trigger_source="single_brain_m3_simulation_execution",
+            portfolio_snapshot=_snapshot(),
+            risk_policy=_policy(),
+        )
 
 
 @pytest.mark.parametrize(
