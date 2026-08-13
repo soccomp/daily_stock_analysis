@@ -14,6 +14,10 @@ from src.investment.integration.runtime_snapshot_ingress import (
     PortfolioSnapshotSource,
     SnapshotIngressError,
 )
+from src.investment.snapshot_timing import (
+    MAX_PORTFOLIO_SNAPSHOT_CLOCK_SKEW,
+    portfolio_snapshot_is_future_dated,
+)
 
 
 class ConnectedPortfolioSnapshotUnavailable(RuntimeError):
@@ -24,8 +28,8 @@ class ConnectedPortfolioSnapshotService:
     """Capture one canonical Snapshot without touching either portfolio ledger."""
 
     MAX_SNAPSHOT_AGE = timedelta(minutes=5)
-    # Accepted cross-host infrastructure budget; never part of RiskPolicy.
-    MAX_SNAPSHOT_CLOCK_SKEW = timedelta(seconds=1)
+    # Compatibility alias; the shared authority timing module owns this budget.
+    MAX_SNAPSHOT_CLOCK_SKEW = MAX_PORTFOLIO_SNAPSHOT_CLOCK_SKEW
 
     def __init__(
         self,
@@ -136,7 +140,10 @@ class ConnectedPortfolioSnapshotService:
                 "connected account receipt clock must be timezone-aware"
             )
         received_at = received_at.astimezone(timezone.utc)
-        if snapshot.as_of - received_at > self.MAX_SNAPSHOT_CLOCK_SKEW:
+        if portfolio_snapshot_is_future_dated(
+            as_of=snapshot.as_of,
+            reference_time=received_at,
+        ):
             raise ConnectedPortfolioSnapshotUnavailable(
                 "connected account snapshot is future-dated"
             )

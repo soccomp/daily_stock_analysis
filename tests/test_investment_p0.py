@@ -550,6 +550,47 @@ def test_brain_rejects_portfolio_below_policy_data_quality() -> None:
         _decision(snapshot=_snapshot(data_quality="LOW"))
 
 
+@pytest.mark.parametrize(
+    "producer_offset",
+    (timedelta(milliseconds=93), timedelta(seconds=1)),
+)
+def test_brain_accepts_authoritative_snapshot_within_clock_skew_budget(
+    producer_offset: timedelta,
+) -> None:
+    snapshot = _snapshot(
+        as_of=NOW + producer_offset,
+        created_at=NOW + producer_offset,
+    )
+    canonical_json = snapshot.canonical_json()
+    content_hash = snapshot.content_hash
+
+    decision = _decision(snapshot=snapshot)
+
+    assert decision.portfolio_snapshot_hash == content_hash
+    assert snapshot.canonical_json() == canonical_json
+    assert snapshot.content_hash == content_hash
+
+
+def test_brain_rejects_authoritative_snapshot_beyond_clock_skew_budget() -> None:
+    with pytest.raises(ValueError, match="portfolio input cannot be from the future"):
+        _decision(
+            snapshot=_snapshot(
+                as_of=NOW + timedelta(seconds=1, microseconds=1),
+                created_at=NOW + timedelta(seconds=1, microseconds=1),
+            )
+        )
+
+
+def test_brain_keeps_research_future_time_validation_at_zero_tolerance() -> None:
+    with pytest.raises(ValueError, match="decision inputs cannot be from the future"):
+        _decision(research=_research(as_of=NOW + timedelta(microseconds=1)))
+
+
+def test_brain_keeps_risk_policy_effective_time_validation_unchanged() -> None:
+    with pytest.raises(ValueError, match="risk policy is not effective"):
+        _decision(policy=_policy(effective_from=NOW + timedelta(microseconds=1)))
+
+
 def test_brain_rejects_decision_window_that_outlives_risk_policy() -> None:
     with pytest.raises(ValueError, match="cannot outlive the risk policy"):
         _decision(

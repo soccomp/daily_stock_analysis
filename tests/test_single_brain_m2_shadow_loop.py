@@ -264,18 +264,40 @@ def test_bounded_cross_host_snapshot_clock_skew_is_accepted(
     m2_db,
     producer_offset,
 ):
-    clock_values = iter((NOW, NOW + timedelta(seconds=1)))
     service, _snapshots, _policies, runner, _store = _service(
         m2_db,
         snapshot=_snapshot(as_of=NOW + producer_offset),
         response_received_at=NOW,
-        clock=lambda: next(clock_values),
+        clock=lambda: NOW,
     )
 
     result = service.run_cycle(scheduled_for=NOW)
 
     assert result.status == "COMPLETED"
     assert len(runner.calls) == 1
+
+
+def test_ingress_accepted_final_snapshot_skew_reaches_one_deterministic_decision(m2_db):
+    initial = _snapshot(as_of=NOW)
+    final = _snapshot(as_of=NOW + timedelta(milliseconds=93))
+    canonical_json = final.canonical_json()
+    content_hash = final.content_hash
+    service, _snapshots, _policies, runner, scorecards = _service(
+        m2_db,
+        snapshot=[initial, final],
+        response_received_at=NOW,
+        clock=lambda: NOW,
+    )
+
+    result = service.run_cycle(scheduled_for=NOW)
+
+    assert result.status == "COMPLETED"
+    assert len(runner.calls) == len(result.persisted_decision_ids) == 1
+    item = scorecards.get(result.persisted_decision_ids[0])["item"]
+    assert item["portfolio_snapshot_a"]["content_hash"] == content_hash
+    assert item["execution_mandate"] is None
+    assert final.canonical_json() == canonical_json
+    assert final.content_hash == content_hash
 
 
 def test_230ms_snapshot_skew_is_accepted_and_persisted_as_sanitized_evidence(m2_db):

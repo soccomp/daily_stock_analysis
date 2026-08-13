@@ -16,6 +16,7 @@ from src.investment.contracts.investment_decision import (
 from src.investment.contracts.portfolio_snapshot import PortfolioSnapshot
 from src.investment.contracts.research_bundle import ModelProvenance, ResearchBundle
 from src.investment.contracts.risk_policy import RiskPolicy
+from src.investment.snapshot_timing import portfolio_snapshot_is_future_dated
 
 
 _WEIGHT_QUANTUM = Decimal("0.000001")
@@ -248,8 +249,13 @@ class InvestmentDecisionEngine:
             raise ValueError("research data quality is below risk policy minimum")
         if _DATA_QUALITY_RANK[portfolio.data_quality] < _DATA_QUALITY_RANK[risk_policy.min_data_quality]:
             raise ValueError("portfolio data quality is below risk policy minimum")
-        if research.as_of > sizing.valid_from or portfolio.as_of > sizing.valid_from:
+        if research.as_of > sizing.valid_from:
             raise ValueError("decision inputs cannot be from the future")
+        if portfolio_snapshot_is_future_dated(
+            as_of=portfolio.as_of,
+            reference_time=sizing.valid_from,
+        ):
+            raise ValueError("portfolio input cannot be from the future")
         if sizing.created_at > sizing.valid_from:
             raise ValueError("decision created_at cannot be after valid_from")
         if sizing.valid_until <= sizing.valid_from:
