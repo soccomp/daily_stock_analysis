@@ -168,9 +168,10 @@ exact, while completion decoding remains a material part of observed latency.
   proof. A 10–15% total reduction is a P1 design target, not a current result.
 - **方案 1 能不能单独解决慢：** 只能部分改善。It may reduce prefill and
   memory pressure, but cannot remove output decoding time.
-- **继续方案 2 lightweight A/B：** 否。First obtain a semantic-preservation
-  design/review for P1/P2; no paid/cloud A/B is warranted by this attribution
-  alone.
+- **继续方案 2 lightweight A/B：** 是。方案 1 只能部分降低 prefill/context
+  压力，不能解决主要的 completion decode / model-speed 瓶颈；下一步应继续
+  进行轻量的本地模型 A/B。P1/P2 仍须先完成各自的语义保真设计与评审，且本结论
+  不授权付费云模型 A/B。
 
 ## Non-changes and review boundary
 
