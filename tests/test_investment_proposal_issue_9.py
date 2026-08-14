@@ -10,6 +10,7 @@ from src.investment.contracts.investment_proposal import InvestmentProposal
 from src.investment.proposal.builder import InvestmentProposalBuilder
 from src.investment.m2.orchestration import AnalysisCompletion
 from src.investment.proposal.orchestration import ProposalHandoffLoopService
+from tests.test_investment_shadow_wiring_p1a import _snapshot
 
 
 NOW = datetime(2026, 8, 14, 2, 0, tzinfo=timezone.utc)
@@ -62,8 +63,14 @@ def test_hold_proposal_has_no_price_plan_and_tampering_breaks_hash():
 
 def test_normal_recurring_path_stops_at_deterministic_proposal_handoff():
     class Runner:
-        def complete(self, **_kwargs):
-            return AnalysisCompletion(_result("hold"), {}, 11, False, NOW)
+        def complete(self, **kwargs):
+            result = _result("hold")
+            result.code = kwargs["symbol"]
+            return AnalysisCompletion(result, {}, 11, False, NOW)
+
+    class SnapshotSource:
+        def capture_snapshot(self):
+            return _snapshot()
 
     class Publisher:
         def __init__(self):
@@ -78,13 +85,20 @@ def test_normal_recurring_path_stops_at_deterministic_proposal_handoff():
         config=SimpleNamespace(
             single_brain_m2_enabled=True,
             single_brain_m2_interval_minutes=60,
-            single_brain_proposal_symbols=("600519",),
+            single_brain_m2_symbols=("000001", "600519", "000001"),
+            single_brain_m2_max_symbols=2,
+            single_brain_m2_holdings_limit=1,
         ),
-        analysis_runner=Runner(), publisher=publisher, clock=lambda: NOW,
+        analysis_runner=Runner(), publisher=publisher,
+        snapshot_source=SnapshotSource(), clock=lambda: NOW,
     )
     first = service.run_cycle(scheduled_for=NOW)
     second = service.run_cycle(scheduled_for=NOW)
     assert first.status == second.status == "COMPLETED"
     assert first.proposal_ids == second.proposal_ids
-    assert publisher.proposals[0].canonical_json() == publisher.proposals[1].canonical_json()
-    assert publisher.proposals[0].execution_permitted is False
+    assert first.researched_symbols == second.researched_symbols == (
+        "600519:BOTH", "000001:ALLOWLIST",
+    )
+    assert publisher.proposals[0].canonical_json() == publisher.proposals[2].canonical_json()
+    assert publisher.proposals[1].canonical_json() == publisher.proposals[3].canonical_json()
+    assert all(item.execution_permitted is False for item in publisher.proposals)

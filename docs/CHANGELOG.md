@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] Athena Issue #9 独立审计跟进：proposal handoff 复用既有 M2“权威 Athena 持仓优先 + M2 allowlist + 去重/上限”研究对象 selector，记录 `HOLDING`/`ALLOWLIST`/`BOTH` 来源，并移除会形成第二静态 universe 的 `DSA_SINGLE_BRAIN_PROPOSAL_SYMBOLS`。
 - [改进] 按 Athena Issue #9 统一投资权限：DSA 新增 canonical `InvestmentProposal` 并让正常 recurring 路径在 proposal handoff 终止；旧 M3 final-sizing/mandate 装配被明确退役，DSA execution authorization 固定关闭，Athena 独占 portfolio、allocation、risk、mandate 与 simulation execution 权限。
 - [改进] 今日总览将 Single Brain `FAILED_CLOSED` 作为一等运行结果，在 scheduler 继续健康运行时以 warning 解释经持久化事实证明的安全失败原因、研究/决策/mandate/submission 结果，并保留较早研究决策与独立的 execution UNKNOWN；readiness 仅追加脱敏只读诊断投影，不新增控制面或运行真相。
 - [新功能] DSA 首页新增默认“今日总览”模式，以现有只读 API 分区展示 authoritative connected account、精确 `(market, symbol)` 持仓、今日研究、Single Brain 投资决策、执行状态、运行 readiness 与注意事项；原研究工作台完整保留，持仓页新增 URL 驱动的 connected/manual 账户选择且不混合账户事实。

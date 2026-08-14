@@ -1198,7 +1198,6 @@ class Config:
     # Issue #9 authority path: DSA publishes advice; Athena owns allocation onward.
     single_brain_proposal_url: Optional[str] = None
     single_brain_proposal_timeout_seconds: float = 5.0
-    single_brain_proposal_symbols: List[str] = field(default_factory=list)
 
     # === 回测配置 ===
     backtest_enabled: bool = True
@@ -2259,14 +2258,6 @@ class Config:
                 minimum=0.1,
                 maximum=30.0,
             ),
-            single_brain_proposal_symbols=[
-                symbol.strip()
-                for symbol in os.getenv(
-                    'DSA_SINGLE_BRAIN_PROPOSAL_SYMBOLS',
-                    '',
-                ).split(',')
-                if symbol.strip()
-            ],
             backtest_enabled=os.getenv('BACKTEST_ENABLED', 'true').lower() == 'true',
             backtest_eval_window_days=parse_env_int(os.getenv('BACKTEST_EVAL_WINDOW_DAYS'), 10, field_name='BACKTEST_EVAL_WINDOW_DAYS', minimum=1),
             backtest_min_age_days=parse_env_int(os.getenv('BACKTEST_MIN_AGE_DAYS'), 14, field_name='BACKTEST_MIN_AGE_DAYS', minimum=1),

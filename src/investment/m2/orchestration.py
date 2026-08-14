@@ -9,11 +9,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Protocol
 
-from data_provider.base import canonical_stock_code, normalize_stock_code
-
 from src.analyzer import AnalysisResult
 from src.config import Config
-from src.core.trading_calendar import get_market_for_stock
 from src.enums import ReportType
 from src.investment.contracts.portfolio_snapshot import PortfolioSnapshot
 from src.investment.contracts.risk_policy import RiskPolicy
@@ -31,6 +28,7 @@ from src.investment.m2.identity import (
 from src.investment.m2.policy import CanonicalRiskPolicyLoader
 from src.investment.m2.repository import M2InputConflictError, M2OperationalRepository
 from src.investment.m2.runtime_diagnostics import analysis_failure_marker
+from src.investment.m2.selection import select_m2_research_objects
 from src.investment.snapshot_timing import (
     MAX_PORTFOLIO_SNAPSHOT_CLOCK_SKEW,
     portfolio_snapshot_is_future_dated,
@@ -763,51 +761,7 @@ class M2ShadowLoopService:
         return Decimal(microseconds) / Decimal(1000)
 
     def _select_symbols(self, snapshot: PortfolioSnapshot) -> list[dict[str, str]]:
-        max_symbols = min(50, max(1, int(getattr(self._config, "single_brain_m2_max_symbols", 10))))
-        holdings_limit = min(50, max(0, int(getattr(self._config, "single_brain_m2_holdings_limit", 10))))
-        holding_symbols: list[str] = []
-        for position in snapshot.positions:
-            if position.quantity <= 0 or str(position.market).upper() != "CN":
-                continue
-            normalized = self._cn_symbol(position.symbol)
-            if normalized and normalized not in holding_symbols:
-                holding_symbols.append(normalized)
-            if len(holding_symbols) >= holdings_limit:
-                break
-        allowlist: list[str] = []
-        for raw in getattr(self._config, "single_brain_m2_symbols", ()) or ():
-            normalized = self._cn_symbol(raw)
-            if normalized and normalized not in allowlist:
-                allowlist.append(normalized)
-        ordered = (holding_symbols + [item for item in allowlist if item not in holding_symbols])[:max_symbols]
-        holding_set = set(holding_symbols)
-        allowlist_set = set(allowlist)
-        return [
-            {
-                "symbol": symbol,
-                "source": (
-                    "BOTH"
-                    if symbol in holding_set and symbol in allowlist_set
-                    else "HOLDING"
-                    if symbol in holding_set
-                    else "ALLOWLIST"
-                ),
-            }
-            for symbol in ordered
-        ]
-
-    @staticmethod
-    def _cn_symbol(value: Any) -> str | None:
-        raw = str(value or "").strip()
-        if not raw:
-            return None
-        try:
-            normalized = canonical_stock_code(normalize_stock_code(raw))
-        except Exception:
-            return None
-        if str(get_market_for_stock(normalized) or "").upper() != "CN":
-            return None
-        return normalized
+        return select_m2_research_objects(config=self._config, snapshot=snapshot)
 
     def _aware_now(self) -> datetime:
         now = self._clock()

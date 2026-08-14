@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
@@ -9,9 +10,17 @@ from typing import Callable
 from src.config import Config
 from src.investment.m2.identity import analysis_query_id, cycle_id as build_cycle_id, cycle_slot
 from src.investment.m2.orchestration import DSAAnalysisCompletionRunner
+from src.investment.m2.selection import select_m2_research_objects
+from src.investment.integration.runtime_snapshot_ingress import (
+    CanonicalHttpPortfolioSnapshotSource,
+    PortfolioSnapshotSource,
+)
 from src.investment.proposal.builder import InvestmentProposalBuilder
 from src.investment.proposal.transport import CanonicalHttpInvestmentProposalPublisher
 from src.storage import DatabaseManager
+
+
+logger = logging.getLogger(__name__)
 
 
 class ProposalHandoffBlocked(RuntimeError):
@@ -24,6 +33,7 @@ class ProposalHandoffRunResult:
     status: str
     proposal_ids: tuple[str, ...] = ()
     blocked_reasons: tuple[str, ...] = ()
+    researched_symbols: tuple[str, ...] = ()
 
 
 class ProposalHandoffLoopService:
@@ -35,11 +45,13 @@ class ProposalHandoffLoopService:
         config: Config,
         analysis_runner: DSAAnalysisCompletionRunner,
         publisher: CanonicalHttpInvestmentProposalPublisher,
+        snapshot_source: PortfolioSnapshotSource,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._config = config
         self._analysis_runner = analysis_runner
         self._publisher = publisher
+        self._snapshot_source = snapshot_source
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     @classmethod
@@ -50,9 +62,11 @@ class ProposalHandoffLoopService:
         if bool(getattr(config, "single_brain_simulation_execution_authorized", False)):
             raise ProposalHandoffBlocked("DSA execution authorization must remain OFF")
         url = str(getattr(config, "single_brain_proposal_url", "") or "").strip()
-        symbols = cls._symbols(config)
-        if not url or not symbols:
-            raise ProposalHandoffBlocked("proposal endpoint and DSA symbol scope are required")
+        snapshot_url = str(getattr(config, "single_brain_m2_snapshot_url", "") or "").strip()
+        if not url or not snapshot_url:
+            raise ProposalHandoffBlocked(
+                "proposal endpoint and authoritative Athena snapshot endpoint are required"
+            )
         db = DatabaseManager.get_instance()
         return cls(
             config=config,
@@ -64,6 +78,12 @@ class ProposalHandoffLoopService:
             publisher=CanonicalHttpInvestmentProposalPublisher(
                 url=url,
                 timeout_seconds=float(getattr(config, "single_brain_proposal_timeout_seconds", 5.0)),
+            ),
+            snapshot_source=CanonicalHttpPortfolioSnapshotSource(
+                url=snapshot_url,
+                timeout_seconds=float(
+                    getattr(config, "single_brain_m2_snapshot_timeout_seconds", 5.0)
+                ),
             ),
         )
 
@@ -78,7 +98,31 @@ class ProposalHandoffLoopService:
         cycle = build_cycle_id(account_id="dsa-proposal-authority", scheduled_for=slot)
         proposal_ids: list[str] = []
         blocked: list[str] = []
-        for symbol in self._symbols(self._config):
+        try:
+            scopes = select_m2_research_objects(
+                config=self._config,
+                snapshot=self._snapshot_source.capture_snapshot(),
+            )
+        except Exception as exc:
+            return ProposalHandoffRunResult(
+                cycle,
+                "FAILED_CLOSED",
+                blocked_reasons=(f"authoritative research selection failed: {exc}",),
+            )
+        researched = tuple(f"{scope['symbol']}:{scope['source']}" for scope in scopes)
+        if not scopes:
+            return ProposalHandoffRunResult(
+                cycle,
+                "FAILED_CLOSED",
+                blocked_reasons=("M2 research-object selector returned an empty scope",),
+            )
+        for scope in scopes:
+            symbol = scope["symbol"]
+            logger.info(
+                "Issue #9 research object selected: symbol=%s source=%s",
+                symbol,
+                scope["source"],
+            )
             query_id = analysis_query_id(cycle=cycle, symbol=symbol)
             try:
                 completion = self._analysis_runner.complete(
@@ -104,12 +148,10 @@ class ProposalHandoffLoopService:
             except Exception as exc:
                 blocked.append(f"{symbol}: {type(exc).__name__}: {exc}")
         status = "COMPLETED" if proposal_ids and not blocked else "PARTIAL" if proposal_ids else "FAILED_CLOSED"
-        return ProposalHandoffRunResult(cycle, status, tuple(proposal_ids), tuple(blocked))
-
-    @staticmethod
-    def _symbols(config: Config) -> tuple[str, ...]:
-        values = getattr(config, "single_brain_proposal_symbols", ()) or ()
-        result = tuple(dict.fromkeys(str(value).strip() for value in values if str(value).strip()))
-        if any(len(symbol) != 6 or not symbol.isdigit() for symbol in result):
-            raise ProposalHandoffBlocked("DSA proposal symbols must be six digits")
-        return result
+        return ProposalHandoffRunResult(
+            cycle,
+            status,
+            tuple(proposal_ids),
+            tuple(blocked),
+            researched,
+        )
