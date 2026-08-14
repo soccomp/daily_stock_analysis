@@ -41,6 +41,7 @@ class SingleBrainM2ReadinessService:
             if task.get("name") in {
                 "single_brain_m2_shadow",
                 "single_brain_m3_simulation_execution",
+                "single_brain_proposal_handoff",
             }
         ]
         task = tasks[0] if len(tasks) == 1 else None
@@ -86,7 +87,9 @@ class SingleBrainM2ReadinessService:
             }
         return {
             "mission": (
-                "SINGLE_BRAIN_M3"
+                "ISSUE_9_PROPOSAL_HANDOFF"
+                if execution_mode == "PROPOSAL_HANDOFF"
+                else "SINGLE_BRAIN_M3"
                 if execution_mode == "SIMULATION_EXECUTION"
                 else "SINGLE_BRAIN_M2"
             ),
@@ -94,9 +97,16 @@ class SingleBrainM2ReadinessService:
             "execution_mode": execution_mode,
             "execution_authorization": "ON" if execution_authorized else "OFF",
             "portfolio_authority": "ATHENA_RUNTIME",
+            "allocation_authority": "ATHENA_RUNTIME",
+            "mandate_authority": "ATHENA_RUNTIME",
+            "dsa_authority_boundary": "RESEARCH_AND_PROPOSAL_ONLY",
             "recurring_scheduler": self._recurring_scheduler(),
             "latest_authoritative_snapshot": snapshot,
-            "simulation_execution": self._m3_repository.readiness(),
+            "simulation_execution": {
+                **self._m3_repository.readiness(),
+                "authoritative": execution_mode != "PROPOSAL_HANDOFF",
+                "legacy_runtime_disabled": execution_mode == "PROPOSAL_HANDOFF",
+            },
             "latest_cycle_diagnostics": latest_cycle_diagnostics,
             **operational,
         }

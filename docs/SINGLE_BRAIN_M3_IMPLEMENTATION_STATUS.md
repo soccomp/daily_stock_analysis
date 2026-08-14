@@ -1,5 +1,10 @@
 # Single Brain M3 Implementation Status
 
+> **Deprecated authority statement (Issue #9):** This document records the
+> historical M3 implementation. It is non-authoritative for current runtime.
+> See `docs/ISSUE_9_AUTHORITY_BOUNDARY.md`; DSA no longer constructs final
+> allocation quantities or execution mandates.
+
 **Status date:** 2026-08-09
 **State:** M3 AUTONOMOUS SIMULATION TRADING V1 PASS
 **Mission authority:** `docs/SINGLE_BRAIN_M3_AUTONOMOUS_SIMULATION_TRADING_V1_MISSION.md`

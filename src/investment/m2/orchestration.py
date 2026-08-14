@@ -71,6 +71,7 @@ class AnalysisCompletion:
     context_snapshot: Mapping[str, Any]
     source_report_id: int
     recovered: bool
+    completed_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -165,7 +166,17 @@ class DSAAnalysisCompletionRunner:
             context_snapshot=context,
             source_report_id=int(record.id),
             recovered=recovered,
+            completed_at=self._record_timestamp(record),
         )
+
+    @staticmethod
+    def _record_timestamp(record: Any) -> datetime:
+        value = getattr(record, "created_at", None)
+        if not isinstance(value, datetime):
+            raise M2ShadowBlocked("persisted DSA analysis completion time is invalid")
+        if value.tzinfo is None or value.utcoffset() is None:
+            value = value.replace(tzinfo=datetime.now().astimezone().tzinfo)
+        return value.astimezone(timezone.utc)
 
     @staticmethod
     def _default_pipeline_factory(**kwargs: Any) -> Any:
@@ -214,10 +225,14 @@ class M2ShadowLoopService:
         execution_mode = str(
             getattr(config, "single_brain_execution_mode", "SHADOW") or "SHADOW"
         ).strip().upper()
+        if execution_mode == "SIMULATION_EXECUTION":
+            raise M2ShadowBlocked(
+                "Issue #9 retired DSA M3 mandate construction; use PROPOSAL_HANDOFF"
+            )
         execution_authorized = bool(
             getattr(config, "single_brain_simulation_execution_authorized", False)
         )
-        if execution_mode not in {"SHADOW", "SIMULATION_EXECUTION"}:
+        if execution_mode not in {"SHADOW"}:
             raise M2ShadowBlocked("Single Brain execution mode is invalid")
         if execution_mode == "SHADOW" and execution_authorized:
             raise M2ShadowBlocked("shadow mode contradicts execution authorization")

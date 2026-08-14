@@ -1195,6 +1195,10 @@ class Config:
     single_brain_m3_execution_url: Optional[str] = None
     single_brain_m3_execution_timeout_seconds: float = 5.0
     single_brain_m3_execution_symbols: List[str] = field(default_factory=list)
+    # Issue #9 authority path: DSA publishes advice; Athena owns allocation onward.
+    single_brain_proposal_url: Optional[str] = None
+    single_brain_proposal_timeout_seconds: float = 5.0
+    single_brain_proposal_symbols: List[str] = field(default_factory=list)
 
     # === 回测配置 ===
     backtest_enabled: bool = True
@@ -2241,6 +2245,24 @@ class Config:
                 symbol.strip()
                 for symbol in os.getenv(
                     'DSA_SINGLE_BRAIN_M3_EXECUTION_SYMBOLS',
+                    '',
+                ).split(',')
+                if symbol.strip()
+            ],
+            single_brain_proposal_url=(
+                os.getenv('DSA_SINGLE_BRAIN_PROPOSAL_URL') or ''
+            ).strip() or None,
+            single_brain_proposal_timeout_seconds=parse_env_float(
+                os.getenv('DSA_SINGLE_BRAIN_PROPOSAL_TIMEOUT_SECONDS'),
+                5.0,
+                field_name='DSA_SINGLE_BRAIN_PROPOSAL_TIMEOUT_SECONDS',
+                minimum=0.1,
+                maximum=30.0,
+            ),
+            single_brain_proposal_symbols=[
+                symbol.strip()
+                for symbol in os.getenv(
+                    'DSA_SINGLE_BRAIN_PROPOSAL_SYMBOLS',
                     '',
                 ).split(',')
                 if symbol.strip()

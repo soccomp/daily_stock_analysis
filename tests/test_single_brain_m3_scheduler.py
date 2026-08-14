@@ -7,7 +7,7 @@ from src.config import Config
 from src.investment.m2.orchestration import M2ShadowBlocked, M2ShadowLoopService
 from src.services.runtime_scheduler import (
     RuntimeSchedulerService,
-    SCHEDULER_MODE_M3_SIMULATION_EXECUTION_ONLY,
+    SCHEDULER_MODE_PROPOSAL_HANDOFF_ONLY,
     build_single_brain_m2_background_tasks,
 )
 from src.services.single_brain_m2_readiness_service import (
@@ -28,11 +28,11 @@ def _config():
         single_brain_m2_enabled=True,
         single_brain_m2_interval_minutes=60,
         single_brain_m2_run_immediately=False,
-        single_brain_execution_mode="SIMULATION_EXECUTION",
+        single_brain_execution_mode="PROPOSAL_HANDOFF",
     )
 
 
-def test_m3_uses_exactly_one_restricted_scheduler_authority_at_m2_cadence():
+def test_issue_9_uses_exactly_one_proposal_handoff_scheduler_at_m2_cadence():
     _BackgroundOnlyScheduler.instances = []
     config = _config()
     ordinary_runner = MagicMock()
@@ -54,11 +54,11 @@ def test_m3_uses_exactly_one_restricted_scheduler_authority_at_m2_cadence():
     assert service._scheduler is first_scheduler
     assert first_scheduler.daily_task_calls == []
     assert [item["name"] for item in first_scheduler._background_tasks] == [
-        "single_brain_m3_simulation_execution"
+        "single_brain_proposal_handoff"
     ]
     assert first_scheduler._background_tasks[0]["interval_seconds"] == 3600
     assert ordinary_runner.call_count == 0
-    assert service.status()["mode"] == SCHEDULER_MODE_M3_SIMULATION_EXECUTION_ONLY
+    assert service.status()["mode"] == SCHEDULER_MODE_PROPOSAL_HANDOFF_ONLY
 
 
 def test_registered_scheduler_mode_change_fails_closed_until_reconciled():
@@ -94,9 +94,9 @@ def test_m3_configuration_contradictions_fail_closed(mode, authorized):
         M2ShadowLoopService.from_config(config)
 
 
-def test_readiness_reports_m3_authority_and_explicit_execution_authorization(monkeypatch):
+def test_readiness_reports_issue_9_proposal_authority_and_execution_off(monkeypatch):
     config = _config()
-    config.single_brain_simulation_execution_authorized = True
+    config.single_brain_simulation_execution_authorized = False
 
     class _Repository:
         def readiness(self):
@@ -116,9 +116,9 @@ def test_readiness_reports_m3_authority_and_explicit_execution_authorization(mon
         def status(self):
             return {
                 "enabled": True,
-                "mode": SCHEDULER_MODE_M3_SIMULATION_EXECUTION_ONLY,
+                "mode": SCHEDULER_MODE_PROPOSAL_HANDOFF_ONLY,
                 "background_tasks": [{
-                    "name": "single_brain_m3_simulation_execution",
+                    "name": "single_brain_proposal_handoff",
                     "interval_seconds": 3600,
                     "next_run_at": "2026-08-10T03:30:00",
                 }],
@@ -134,10 +134,14 @@ def test_readiness_reports_m3_authority_and_explicit_execution_authorization(mon
         m3_repository=_M3Repository(),
     ).get()
 
-    assert readiness["mission"] == "SINGLE_BRAIN_M3"
-    assert readiness["execution_mode"] == "SIMULATION_EXECUTION"
-    assert readiness["execution_authorization"] == "ON"
+    assert readiness["mission"] == "ISSUE_9_PROPOSAL_HANDOFF"
+    assert readiness["execution_mode"] == "PROPOSAL_HANDOFF"
+    assert readiness["execution_authorization"] == "OFF"
+    assert readiness["dsa_authority_boundary"] == "RESEARCH_AND_PROPOSAL_ONLY"
+    assert readiness["allocation_authority"] == "ATHENA_RUNTIME"
+    assert readiness["mandate_authority"] == "ATHENA_RUNTIME"
+    assert readiness["simulation_execution"]["legacy_runtime_disabled"] is True
     assert readiness["recurring_scheduler"]["authority_count"] == 1
     assert readiness["recurring_scheduler"]["mode"] == (
-        SCHEDULER_MODE_M3_SIMULATION_EXECUTION_ONLY
+        SCHEDULER_MODE_PROPOSAL_HANDOFF_ONLY
     )

@@ -25,6 +25,7 @@ SCHEDULER_MODE_OFF = "OFF"
 SCHEDULER_MODE_FULL = "FULL"
 SCHEDULER_MODE_M2_SHADOW_ONLY = "M2_SHADOW_ONLY"
 SCHEDULER_MODE_M3_SIMULATION_EXECUTION_ONLY = "M3_SIMULATION_EXECUTION_ONLY"
+SCHEDULER_MODE_PROPOSAL_HANDOFF_ONLY = "PROPOSAL_HANDOFF_ONLY"
 _RUNTIME_ANALYSIS_LOCK = threading.Lock()
 SCHEDULE_ARGS_OVERRIDE_KEYS = {
     "no_notify",
@@ -115,8 +116,8 @@ def build_single_brain_m2_background_tasks(
     ).strip().upper()
     if execution_mode == "SHADOW":
         task_name = "single_brain_m2_shadow"
-    elif execution_mode == "SIMULATION_EXECUTION":
-        task_name = "single_brain_m3_simulation_execution"
+    elif execution_mode == "PROPOSAL_HANDOFF":
+        task_name = "single_brain_proposal_handoff"
     else:
         logger.error("Single Brain scheduler blocked: invalid execution mode %r", execution_mode)
         return []
@@ -148,15 +149,22 @@ def build_single_brain_m2_background_tasks(
             _args: Any,
             _stock_codes: Optional[List[str]],
         ) -> None:
-            from src.investment.m2.orchestration import M2ShadowLoopService
+            if execution_mode == "PROPOSAL_HANDOFF":
+                from src.investment.proposal.orchestration import ProposalHandoffLoopService
 
-            result = M2ShadowLoopService.from_config(loaded_config).run_cycle()
+                result = ProposalHandoffLoopService.from_config(loaded_config).run_cycle()
+                persisted_count = len(result.proposal_ids)
+            else:
+                from src.investment.m2.orchestration import M2ShadowLoopService
+
+                result = M2ShadowLoopService.from_config(loaded_config).run_cycle()
+                persisted_count = len(result.persisted_decision_ids)
             logger.info(
                 "Single Brain %s cycle finished: cycle=%s status=%s persisted=%d",
                 execution_mode,
                 result.cycle_id,
                 result.status,
-                len(result.persisted_decision_ids),
+                persisted_count,
             )
 
         acquired = run_with_global_analysis_lock(
@@ -186,6 +194,8 @@ def _restricted_single_brain_scheduler_mode(
         return SCHEDULER_MODE_M2_SHADOW_ONLY
     if names == ["single_brain_m3_simulation_execution"]:
         return SCHEDULER_MODE_M3_SIMULATION_EXECUTION_ONLY
+    if names == ["single_brain_proposal_handoff"]:
+        return SCHEDULER_MODE_PROPOSAL_HANDOFF_ONLY
     return SCHEDULER_MODE_OFF
 
 
