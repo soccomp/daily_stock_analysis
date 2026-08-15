@@ -16,7 +16,10 @@ from src.investment.integration.runtime_snapshot_ingress import (
     PortfolioSnapshotSource,
 )
 from src.investment.proposal.builder import InvestmentProposalBuilder
-from src.investment.proposal.transport import CanonicalHttpInvestmentProposalPublisher
+from src.investment.proposal.transport import (
+    AthenaProposalAcknowledgement,
+    CanonicalHttpInvestmentProposalPublisher,
+)
 from src.storage import DatabaseManager
 
 
@@ -32,6 +35,7 @@ class ProposalHandoffRunResult:
     cycle_id: str | None
     status: str
     proposal_ids: tuple[str, ...] = ()
+    acknowledgements: tuple[AthenaProposalAcknowledgement, ...] = ()
     blocked_reasons: tuple[str, ...] = ()
     researched_symbols: tuple[str, ...] = ()
 
@@ -97,6 +101,7 @@ class ProposalHandoffLoopService:
         slot = cycle_slot(scheduled_for or now, interval_minutes=interval)
         cycle = build_cycle_id(account_id="dsa-proposal-authority", scheduled_for=slot)
         proposal_ids: list[str] = []
+        acknowledgements: list[AthenaProposalAcknowledgement] = []
         blocked: list[str] = []
         try:
             scopes = select_m2_research_objects(
@@ -142,16 +147,25 @@ class ProposalHandoffLoopService:
                     trigger_source="single_brain_proposal_handoff",
                 )
                 acknowledgement = self._publisher.publish(artifacts.proposal)
-                if acknowledgement.get("status") not in {"NO_ACTION", "ALLOCATED", "BLOCKED"}:
-                    raise ProposalHandoffBlocked("Athena proposal state is invalid")
                 proposal_ids.append(artifacts.proposal.proposal_id)
+                acknowledgements.append(acknowledgement)
+                logger.info(
+                    "Issue #9 proposal accepted: proposal_id=%s acknowledgement_id=%s "
+                    "acknowledgement_state=%s lifecycle_state=%s deduplicated=%s",
+                    acknowledgement.proposal_id,
+                    acknowledgement.acknowledgement_id,
+                    acknowledgement.acknowledgement_state,
+                    acknowledgement.lifecycle_state,
+                    acknowledgement.deduplicated,
+                )
             except Exception as exc:
                 blocked.append(f"{symbol}: {type(exc).__name__}: {exc}")
         status = "COMPLETED" if proposal_ids and not blocked else "PARTIAL" if proposal_ids else "FAILED_CLOSED"
         return ProposalHandoffRunResult(
-            cycle,
-            status,
-            tuple(proposal_ids),
-            tuple(blocked),
-            researched,
+            cycle_id=cycle,
+            status=status,
+            proposal_ids=tuple(proposal_ids),
+            acknowledgements=tuple(acknowledgements),
+            blocked_reasons=tuple(blocked),
+            researched_symbols=researched,
         )

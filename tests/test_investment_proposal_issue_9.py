@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -10,10 +11,25 @@ from src.investment.contracts.investment_proposal import InvestmentProposal
 from src.investment.proposal.builder import InvestmentProposalBuilder
 from src.investment.m2.orchestration import AnalysisCompletion
 from src.investment.proposal.orchestration import ProposalHandoffLoopService
+from src.investment.proposal.transport import (
+    AthenaProposalAcknowledgement,
+    CanonicalHttpInvestmentProposalPublisher,
+)
 from tests.test_investment_shadow_wiring_p1a import _snapshot
 
 
 NOW = datetime(2026, 8, 14, 2, 0, tzinfo=timezone.utc)
+
+
+def _ack(proposal, lifecycle_state, *, deduplicated=False):
+    return AthenaProposalAcknowledgement(
+        proposal_id=proposal.proposal_id,
+        proposal_hash=proposal.content_hash,
+        acknowledgement_id=f"athena-ack-{proposal.content_hash[:32]}",
+        acknowledgement_state="ACCEPTED",
+        lifecycle_state=lifecycle_state,
+        deduplicated=deduplicated,
+    )
 
 
 def _result(action="buy"):
@@ -78,7 +94,7 @@ def test_normal_recurring_path_stops_at_deterministic_proposal_handoff():
 
         def publish(self, proposal):
             self.proposals.append(proposal)
-            return {"status": "NO_ACTION", "proposal_id": proposal.proposal_id}
+            return _ack(proposal, "NO_ACTION", deduplicated=len(self.proposals) > 2)
 
     publisher = Publisher()
     service = ProposalHandoffLoopService(
@@ -96,9 +112,115 @@ def test_normal_recurring_path_stops_at_deterministic_proposal_handoff():
     second = service.run_cycle(scheduled_for=NOW)
     assert first.status == second.status == "COMPLETED"
     assert first.proposal_ids == second.proposal_ids
+    assert all(item.acknowledgement_state == "ACCEPTED" for item in first.acknowledgements)
+    assert all(item.lifecycle_state == "NO_ACTION" for item in first.acknowledgements)
     assert first.researched_symbols == second.researched_symbols == (
         "600519:BOTH", "000001:ALLOWLIST",
     )
     assert publisher.proposals[0].canonical_json() == publisher.proposals[2].canonical_json()
     assert publisher.proposals[1].canonical_json() == publisher.proposals[3].canonical_json()
     assert all(item.execution_permitted is False for item in publisher.proposals)
+
+
+@pytest.mark.parametrize(
+    "lifecycle_state",
+    (
+        "ACCEPTED",
+        "NO_ACTION",
+        "ALLOCATED",
+        "BLOCKED",
+        "BLOCKED_PRE_SUBMISSION",
+        "PENDING_RECONCILIATION",
+        "REJECTED",
+        "FILLED",
+    ),
+)
+def test_all_athena_lifecycle_states_are_successful_handoffs(lifecycle_state):
+    class Runner:
+        def complete(self, **kwargs):
+            result = _result("hold")
+            result.code = kwargs["symbol"]
+            return AnalysisCompletion(result, {}, 12, False, NOW)
+
+    class SnapshotSource:
+        def capture_snapshot(self):
+            return _snapshot()
+
+    class Publisher:
+        def publish(self, proposal):
+            return _ack(proposal, lifecycle_state)
+
+    result = ProposalHandoffLoopService(
+        config=SimpleNamespace(
+            single_brain_m2_enabled=True,
+            single_brain_m2_interval_minutes=60,
+            single_brain_m2_symbols=("600519",),
+            single_brain_m2_max_symbols=1,
+            single_brain_m2_holdings_limit=1,
+        ),
+        analysis_runner=Runner(),
+        publisher=Publisher(),
+        snapshot_source=SnapshotSource(),
+        clock=lambda: NOW,
+    ).run_cycle(scheduled_for=NOW)
+
+    assert result.status == "COMPLETED"
+    assert len(result.proposal_ids) == 1
+    assert result.acknowledgements[0].acknowledgement_state == "ACCEPTED"
+    assert result.acknowledgements[0].lifecycle_state == lifecycle_state
+    assert result.blocked_reasons == ()
+
+
+def test_post_timeout_recovers_durable_ack_by_read_only_lookup_without_repost():
+    proposal = InvestmentProposalBuilder(clock=lambda: NOW).build(
+        result=_result("hold"),
+        context_snapshot={},
+        source_report_id=13,
+        cycle_id="cycle-timeout",
+        trigger_source="test",
+    ).proposal
+    calls = []
+
+    class Response:
+        status = 200
+
+        def __init__(self, url, payload):
+            self._url = url
+            self._payload = json.dumps(payload).encode()
+
+        def geturl(self):
+            return self._url
+
+        def read(self, _size):
+            return self._payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    def opener(request, timeout):
+        calls.append((request.get_method(), request.full_url, timeout))
+        if request.get_method() == "POST":
+            raise TimeoutError("client did not receive the durable ACK")
+        return Response(
+            request.full_url,
+            {
+                "status": "ACCEPTED",
+                "acknowledgement_id": f"athena-ack-{proposal.content_hash[:32]}",
+                "acknowledgement_state": "ACCEPTED",
+                "proposal_id": proposal.proposal_id,
+                "proposal_hash": proposal.content_hash,
+                "lifecycle_state": "PENDING_RECONCILIATION",
+                "deduplicated": True,
+            },
+        )
+
+    acknowledgement = CanonicalHttpInvestmentProposalPublisher(
+        url="http://127.0.0.1:8088/api/investment-proposals",
+        opener=opener,
+    ).publish(proposal)
+
+    assert acknowledgement.lifecycle_state == "PENDING_RECONCILIATION"
+    assert [method for method, _, _ in calls] == ["POST", "GET"]

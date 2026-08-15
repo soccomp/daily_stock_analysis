@@ -52,3 +52,41 @@
 - Rollback is the single follow-up commit for this audit. Reintroducing a
   proposal-only symbol universe is intentionally not a supported rollback
   because it recreates the audited authority/selection regression.
+
+## Fix Implementation — 2026-08-15 final runtime closure
+
+### Changes
+
+- Replaced the mixed handoff/execution status check with an explicit durable
+  Athena acknowledgement contract. DSA now records proposal ID, proposal hash,
+  acknowledgement ID/state, lifecycle state and deduplication state.
+- All legal Athena lifecycle states (`ACCEPTED`, `NO_ACTION`, `ALLOCATED`,
+  `BLOCKED`, `BLOCKED_PRE_SUBMISSION`, `PENDING_RECONCILIATION`, `REJECTED`,
+  `FILLED`) are valid after `acknowledgement_state=ACCEPTED` and do not convert a
+  successful proposal delivery into `FAILED_CLOSED`.
+- A missing POST response triggers one read-only acknowledgement lookup by
+  proposal ID. The publisher never repeats the POST, preserving Athena
+  idempotency when the server persisted the proposal before the client timeout.
+- DSA remains research/proposal-only. No final allocation, quantity, mandate,
+  execution permission or Worker credential was added.
+
+### Validation
+
+- Focused contract tests cover every legal lifecycle state and POST-timeout ACK
+  lookup with exactly one POST. The complete Issue-related DSA matrix passed
+  `167 passed, 1 skipped`; the skip and five warnings are pre-existing optional
+  dependency/test-collection conditions.
+- The 2026-08-15 recurring runtime selected `000977:BOTH`, produced report 132
+  with a HOLD/55 result, received durable ACK
+  `athena-ack-5cadf095d2c990cfb5a51735c9c9da43`, and ended
+  `COMPLETED persisted=1`. Athena independently advanced proposal
+  `proposal-241fbd89aaa01130ce6f325f44533018` to `NO_ACTION`; no Worker submit
+  occurred.
+
+### Risks and rollback
+
+- Athena versions that do not expose the durable ACK contract now fail closed;
+  silently accepting the former ambiguous status response would recreate the
+  audited split-brain acknowledgement bug.
+- Roll back this follow-up commit in both repositories together. Rolling back
+  only DSA would make current Athena acknowledgements appear invalid again.

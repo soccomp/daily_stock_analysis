@@ -28,7 +28,15 @@ compatibility, but `M2ShadowLoopService.from_config()` refuses to construct the
 old DSA-sizing/M3-mandate path. The restricted scheduler uses
 `PROPOSAL_HANDOFF_ONLY`; `DSA_SINGLE_BRAIN_SIMULATION_EXECUTION_AUTHORIZED`
 must be false. DSA publishes once to the exact loopback Athena endpoint and
-does not blindly retry an uncertain acknowledgement.
+does not blindly retry an uncertain acknowledgement. Athena first returns a
+durable handoff ACK containing `proposal_id`, `proposal_hash`,
+`acknowledgement_id` and `acknowledgement_state=ACCEPTED`; DSA records that as a
+successful handoff independently of Athena's later execution result. The legal
+Athena lifecycle states are `ACCEPTED`, `NO_ACTION`, `ALLOCATED`, `BLOCKED`,
+`BLOCKED_PRE_SUBMISSION`, `PENDING_RECONCILIATION`, `REJECTED` and `FILLED`.
+None is reinterpreted as an invalid DSA proposal state. If the POST response is
+uncertain, DSA performs one read-only ACK lookup by proposal ID and never
+repeats the POST.
 
 Athena owns PortfolioSnapshot, RiskPolicy, AllocationDecision, RiskDecision,
 ExecutionMandate, readiness, simulation worker submission, reconciliation,
