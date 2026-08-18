@@ -1,4 +1,11 @@
-"""Brain-owned M3 decision dispatch with durable no-retry recovery."""
+"""Brain-owned M3 decision dispatch with durable no-retry recovery.
+
+NON_CANONICAL / LEGACY / EXPERIMENTAL: this is the former DSA-direct-execution
+bypass (DSA -> trading spine).  The canonical investment path is DSA proposal ->
+Athena Investment Authority -> Athena execution.  Issue #9 retired M3 as a
+production path; it is retained for audit/history only.  Do NOT treat it as the
+production main line (see ``src.investment.m3.PATH_CLASSIFICATION``).
+"""
 
 from __future__ import annotations
 

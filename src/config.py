@@ -1195,7 +1195,8 @@ class Config:
     single_brain_m2_screening_max_age_hours: int = 72
 
     # Single Brain M3: explicit, independently authorized simulation execution.
-    # SHADOW + false authorization is the fail-closed default.
+    # NON_CANONICAL / LEGACY / EXPERIMENTAL: Issue #9 retired DSA-direct-execution;
+    # the canonical path is PROPOSAL_HANDOFF. Keep SHADOW + false authorization.
     single_brain_execution_mode: str = "SHADOW"
     single_brain_simulation_execution_authorized: bool = False
     single_brain_m3_execution_url: Optional[str] = None
