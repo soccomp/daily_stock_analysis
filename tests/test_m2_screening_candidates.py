@@ -37,6 +37,50 @@ def _screening_candidates(*symbols):
     ]
 
 
+def _snapshot_many(*symbols):
+    """Build a portfolio snapshot holding one CN position per given symbol."""
+    as_of = datetime.now(timezone.utc) - timedelta(minutes=1)
+    positions = tuple(
+        Position(
+            symbol=sym,
+            market="CN",
+            quantity=100,
+            available_quantity=100,
+            avg_cost=Decimal("10.00"),
+            last_price=Decimal("12.00"),
+            market_value=Decimal("1200.00"),
+            unrealized_pnl=Decimal("200.00"),
+            price_as_of=as_of,
+            price_source="ATHENA_DECIMAL_SIM",
+        )
+        for sym in symbols
+    )
+    return PortfolioSnapshot.build(
+        snapshot_id="snapshot-many",
+        trace_id="athena-snapshot-trace-many",
+        created_at=as_of,
+        producer="ATHENA_SIMULATION_RECONCILIATION",
+        account_id="simulation-account-1",
+        broker="ATHENA_DECIMAL_SIM",
+        account_mode="SIMULATION",
+        as_of=as_of,
+        revision=1,
+        currency="CNY",
+        equity=Decimal("1000000.00"),
+        cash=Decimal("400000.00"),
+        available_cash=Decimal("400000.00"),
+        reserved_cash=Decimal("0.00"),
+        positions=positions,
+        active_orders=(),
+        realized_pnl=Decimal("0.00"),
+        unrealized_pnl=Decimal("2400.00"),
+        reconciliation_status="RECONCILED",
+        data_quality="HIGH",
+        limitations=(),
+        broker_snapshot_ref="athena-sim:snapshot-many",
+    )
+
+
 # --- selection ordering / source lineage ----------------------------------
 
 def test_screening_candidates_are_injected_with_source_lineage():
@@ -93,6 +137,44 @@ def test_max_symbols_caps_total_scope():
         screening_candidates=_screening_candidates("300274", "600362", "600111"),
     )
     assert len(scope) == 2
+
+
+def test_holdings_limit_3_plus_screening_3_with_max_symbols_6():
+    """Phase 2B production scenario: 14 holdings, holdings_limit=3,
+    3 screening candidates, max_symbols=6 -> exactly 3 holdings + 3 screening."""
+    holdings = (
+        "600519", "600036", "601318", "000858", "000651", "600030", "601166",
+        "600887", "601988", "601288", "000001", "600000", "601398", "600028",
+    )
+    assert len(holdings) == 14
+    snapshot = _snapshot_many(*holdings)
+    config = _config(symbols=(), max_symbols=6, holdings_limit=3)
+    scope = select_m2_research_objects(
+        config=config,
+        snapshot=snapshot,
+        screening_candidates=_screening_candidates("300274", "600362", "600111"),
+    )
+
+    # 总数为 6，且不截断
+    assert len(scope) == 6
+
+    holdings_part = [item for item in scope if item["source"] == "HOLDING"]
+    screening_part = [item for item in scope if item["source"] == "SCREENING"]
+
+    # 恰好 3 持仓 + 3 选股候选
+    assert len(holdings_part) == 3
+    assert len(screening_part) == 3
+
+    # 持仓取前 3 只（14 只里按顺序取，被 holdings_limit=3 截断）
+    assert [item["symbol"] for item in holdings_part] == ["600519", "600036", "601318"]
+    # 选股候选按序注入
+    assert [item["symbol"] for item in screening_part] == ["300274", "600362", "600111"]
+
+    # 顺序：持仓在前，选股候选在后
+    assert scope[0]["source"] == "HOLDING"
+    assert scope[2]["source"] == "HOLDING"
+    assert scope[3]["source"] == "SCREENING"
+    assert scope[5]["source"] == "SCREENING"
 
 
 # --- database candidate source --------------------------------------------
