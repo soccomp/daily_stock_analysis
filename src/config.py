@@ -1187,6 +1187,12 @@ class Config:
     single_brain_m2_snapshot_url: Optional[str] = None
     single_brain_m2_snapshot_timeout_seconds: float = 5.0
     single_brain_m2_risk_policy_path: Optional[str] = None
+    # Screening candidate adapter: feed the latest screening run into the M2
+    # research scope as the production default source. The static
+    # single_brain_m2_symbols allowlist remains available as a manual override.
+    single_brain_m2_screening_enabled: bool = False
+    single_brain_m2_screening_max_candidates: int = 3
+    single_brain_m2_screening_max_age_hours: int = 72
 
     # Single Brain M3: explicit, independently authorized simulation execution.
     # SHADOW + false authorization is the fail-closed default.
@@ -2223,6 +2229,24 @@ class Config:
             single_brain_m2_risk_policy_path=(
                 os.getenv('DSA_SINGLE_BRAIN_M2_RISK_POLICY_PATH') or ''
             ).strip() or None,
+            single_brain_m2_screening_enabled=parse_env_bool(
+                os.getenv('DSA_SINGLE_BRAIN_M2_SCREENING_ENABLED'),
+                default=False,
+            ),
+            single_brain_m2_screening_max_candidates=parse_env_int(
+                os.getenv('DSA_SINGLE_BRAIN_M2_SCREENING_MAX_CANDIDATES'),
+                3,
+                field_name='DSA_SINGLE_BRAIN_M2_SCREENING_MAX_CANDIDATES',
+                minimum=1,
+                maximum=50,
+            ),
+            single_brain_m2_screening_max_age_hours=parse_env_int(
+                os.getenv('DSA_SINGLE_BRAIN_M2_SCREENING_MAX_AGE_HOURS'),
+                72,
+                field_name='DSA_SINGLE_BRAIN_M2_SCREENING_MAX_AGE_HOURS',
+                minimum=1,
+                maximum=24 * 30,
+            ),
             single_brain_execution_mode=(
                 os.getenv('DSA_SINGLE_BRAIN_EXECUTION_MODE') or 'SHADOW'
             ).strip().upper(),

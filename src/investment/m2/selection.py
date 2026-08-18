@@ -1,4 +1,10 @@
-"""Shared M2 research-object selection from Athena's portfolio snapshot."""
+"""Shared M2 research-object selection from Athena's portfolio snapshot.
+
+The M2 scope is holdings-first, then screening candidates (the production
+default research source), then a manual allowlist override.  This keeps the
+upstream screening engine untouched: candidates are projected in by the caller
+via the thin ``screening_candidates`` adapter.
+"""
 
 from __future__ import annotations
 
@@ -10,8 +16,19 @@ from src.core.trading_calendar import get_market_for_stock
 from src.investment.contracts.portfolio_snapshot import PortfolioSnapshot
 
 
-def select_m2_research_objects(*, config: Any, snapshot: PortfolioSnapshot) -> list[dict[str, str]]:
-    """Return the established holdings-first M2 scope with source lineage."""
+def select_m2_research_objects(
+    *,
+    config: Any,
+    snapshot: PortfolioSnapshot,
+    screening_candidates: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Return the holdings-first M2 scope with source lineage.
+
+    Ordering: holdings, then screening candidates, then the manual allowlist
+    (override).  ``screening_candidates`` items must already be projected to the
+    research-object shape (``{"symbol", "source", ...lineage}``); the caller is
+    responsible for freshness/dedup via the screening-candidate adapter.
+    """
 
     max_symbols = min(50, max(1, int(getattr(config, "single_brain_m2_max_symbols", 10))))
     holdings_limit = min(
@@ -34,25 +51,37 @@ def select_m2_research_objects(*, config: Any, snapshot: PortfolioSnapshot) -> l
         if normalized and normalized not in allowlist:
             allowlist.append(normalized)
 
-    ordered = (
-        holding_symbols
-        + [item for item in allowlist if item not in holding_symbols]
-    )[:max_symbols]
+    screening: list[dict[str, Any]] = []
+    for item in screening_candidates or ():
+        if not isinstance(item, dict):
+            continue
+        symbol = _cn_symbol(item.get("symbol"))
+        if not symbol or symbol in holding_symbols:
+            continue
+        scope = {**item, "symbol": symbol, "source": "SCREENING"}
+        screening.append(scope)
+
     holding_set = set(holding_symbols)
     allowlist_set = set(allowlist)
-    return [
+    ordered_holdings: list[dict[str, Any]] = [
         {
             "symbol": symbol,
             "source": (
                 "BOTH"
                 if symbol in holding_set and symbol in allowlist_set
                 else "HOLDING"
-                if symbol in holding_set
-                else "ALLOWLIST"
             ),
         }
-        for symbol in ordered
+        for symbol in holding_symbols
     ]
+    ordered_allowlist: list[dict[str, Any]] = [
+        {"symbol": symbol, "source": "ALLOWLIST"}
+        for symbol in allowlist
+        if symbol not in holding_set
+        and all(scope["symbol"] != symbol for scope in screening)
+    ]
+
+    return (ordered_holdings + screening + ordered_allowlist)[:max_symbols]
 
 
 def _cn_symbol(value: Any) -> str | None:

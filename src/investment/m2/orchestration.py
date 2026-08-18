@@ -28,6 +28,10 @@ from src.investment.m2.identity import (
 from src.investment.m2.policy import CanonicalRiskPolicyLoader
 from src.investment.m2.repository import M2InputConflictError, M2OperationalRepository
 from src.investment.m2.runtime_diagnostics import analysis_failure_marker
+from src.investment.m2.screening_candidates import (
+    DatabaseScreeningCandidateSource,
+    ScreeningCandidateSource,
+)
 from src.investment.m2.selection import select_m2_research_objects
 from src.investment.snapshot_timing import (
     MAX_PORTFOLIO_SNAPSHOT_CLOCK_SKEW,
@@ -200,6 +204,7 @@ class M2ShadowLoopService:
         lineage_store: ShadowLineageStore,
         repository: M2OperationalRepository,
         execution_coordinator: M3ExecutionCoordinator | None = None,
+        screening_candidate_source: ScreeningCandidateSource | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._config = config
@@ -209,6 +214,7 @@ class M2ShadowLoopService:
         self._lineage_store = lineage_store
         self._repository = repository
         self._execution_coordinator = execution_coordinator
+        self._screening_candidate_source = screening_candidate_source
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     @classmethod
@@ -299,6 +305,11 @@ class M2ShadowLoopService:
             lineage_store=DecisionScorecardService(db_manager=db),
             repository=M2OperationalRepository(db),
             execution_coordinator=execution_coordinator,
+            screening_candidate_source=(
+                DatabaseScreeningCandidateSource(db)
+                if bool(getattr(config, "single_brain_m2_screening_enabled", False))
+                else None
+            ),
         )
 
     def run_cycle(self, *, scheduled_for: datetime | None = None) -> M2ShadowRunResult:
@@ -760,8 +771,37 @@ class M2ShadowLoopService:
         )
         return Decimal(microseconds) / Decimal(1000)
 
-    def _select_symbols(self, snapshot: PortfolioSnapshot) -> list[dict[str, str]]:
-        return select_m2_research_objects(config=self._config, snapshot=snapshot)
+    def _select_symbols(self, snapshot: PortfolioSnapshot) -> list[dict[str, Any]]:
+        screening_candidates = self._load_screening_candidates()
+        return select_m2_research_objects(
+            config=self._config,
+            snapshot=snapshot,
+            screening_candidates=screening_candidates,
+        )
+
+    def _load_screening_candidates(self) -> list[dict[str, Any]]:
+        if self._screening_candidate_source is None:
+            return []
+        max_candidates = min(
+            50,
+            max(1, int(getattr(self._config, "single_brain_m2_screening_max_candidates", 3))),
+        )
+        max_age_hours = max(
+            1,
+            int(getattr(self._config, "single_brain_m2_screening_max_age_hours", 72)),
+        )
+        try:
+            candidates = self._screening_candidate_source.latest(
+                max_candidates=max_candidates,
+                max_age=timedelta(hours=max_age_hours),
+            )
+        except Exception as exc:  # screening scope is best-effort; never fail the loop
+            logger.warning(
+                "M2 screening candidate source failed; falling back to holdings/allowlist: %s",
+                exc,
+            )
+            return []
+        return [item.as_scope() for item in candidates]
 
     def _aware_now(self) -> datetime:
         now = self._clock()
