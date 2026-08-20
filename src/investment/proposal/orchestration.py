@@ -118,9 +118,10 @@ class ProposalHandoffLoopService:
         blocked: list[str] = []
         try:
             screening_candidates = self._load_screening_candidates()
+            authoritative_snapshot = self._snapshot_source.capture_snapshot()
             scopes = select_m2_research_objects(
                 config=self._config,
-                snapshot=self._snapshot_source.capture_snapshot(),
+                snapshot=authoritative_snapshot,
                 screening_candidates=screening_candidates,
             )
         except Exception as exc:
@@ -161,6 +162,7 @@ class ProposalHandoffLoopService:
                     source_report_id=completion.source_report_id,
                     cycle_id=cycle,
                     trigger_source="single_brain_proposal_handoff",
+                    authoritative_snapshot=authoritative_snapshot,
                     candidate_provenance=candidate_provenance,
                 )
                 acknowledgement = self._publisher.publish(artifacts.proposal)

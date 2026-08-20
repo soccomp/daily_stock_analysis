@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -14,6 +15,7 @@ from src.core.trading_calendar import get_market_for_stock
 from src.investment.contracts.base import canonical_json_bytes, decimal_to_json
 from src.investment.contracts.candidate_provenance import CandidateProvenance
 from src.investment.contracts.investment_proposal import InvestmentProposal
+from src.investment.contracts.portfolio_snapshot import PortfolioSnapshot
 from src.investment.contracts.research_bundle import ModelProvenance, ResearchBundle
 from src.investment.research.adapter import ResearchBundleAdapter
 from src.investment.shadow_wiring import InvestmentShadowWiringService, ShadowWiringRejected
@@ -22,6 +24,48 @@ from src.schemas.decision_action import normalize_decision_action
 
 class ProposalBuildRejected(ValueError):
     """Raised when a completed report cannot safely become a canonical proposal."""
+
+
+_PERCENT_TARGET = re.compile(r"(?<![0-9])([0-9]+(?:\.[0-9]+)?)\s*%")
+_TEN_TARGET = re.compile(r"(?<![0-9])([0-9]+(?:\.[0-9]+)?)\s*(?:成|成仓)")
+_DECIMAL_TARGET = re.compile(r"(?<![0-9.])(0?\.[0-9]+)(?![0-9])")
+
+
+def _structured_position_target(result: AnalysisResult) -> Decimal | None:
+    """Read only an explicit numeric target from the existing DSA position strategy."""
+    dashboard = getattr(result, "dashboard", None)
+    if not isinstance(dashboard, Mapping):
+        return None
+    roots: list[Mapping[str, Any]] = [dashboard]
+    nested_dashboard = dashboard.get("dashboard")
+    if isinstance(nested_dashboard, Mapping):
+        roots.append(nested_dashboard)
+    raw_value: object | None = None
+    for root in roots:
+        battle_plan = root.get("battle_plan")
+        if not isinstance(battle_plan, Mapping):
+            continue
+        position_strategy = battle_plan.get("position_strategy")
+        if isinstance(position_strategy, Mapping) and "suggested_position" in position_strategy:
+            raw_value = position_strategy.get("suggested_position")
+            break
+    if not isinstance(raw_value, str):
+        return None
+    text = raw_value.strip()
+    matches: list[Decimal] = []
+    for pattern, divisor in ((_PERCENT_TARGET, Decimal("100")), (_TEN_TARGET, Decimal("10"))):
+        values = pattern.findall(text)
+        if values:
+            if len(values) != 1:
+                return None
+            matches.append(Decimal(values[0]) / divisor)
+    if not matches:
+        values = _DECIMAL_TARGET.findall(text)
+        if len(values) == 1:
+            matches.append(Decimal(values[0]))
+    if len(matches) != 1 or not Decimal("0") < matches[0] <= Decimal("1"):
+        return None
+    return matches[0].quantize(Decimal("0.000001"), rounding=ROUND_DOWN)
 
 
 @dataclass(frozen=True)
@@ -47,6 +91,7 @@ class InvestmentProposalBuilder:
         cycle_id: str,
         trigger_source: str,
         suggested_target_weight: Decimal | None = None,
+        authoritative_snapshot: PortfolioSnapshot | None = None,
         candidate_provenance: CandidateProvenance | None = None,
     ) -> InvestmentProposalArtifacts:
         now = self._clock()
@@ -77,6 +122,14 @@ class InvestmentProposalBuilder:
             action = "HOLD"
         else:
             raise ProposalBuildRejected("completed analysis action is unsupported or ambiguous")
+
+        if action == "REDUCE":
+            suggested_target_weight = self._reduce_target_weight(
+                result=result,
+                symbol=symbol,
+                suggested_target_weight=suggested_target_weight,
+                authoritative_snapshot=authoritative_snapshot,
+            )
 
         entry_floor = entry_limit = stop_price = target_price = None
         expected_return = Decimal("0")
@@ -210,3 +263,49 @@ class InvestmentProposalBuilder:
             model_provenance=research.model_provenance,
         )
         return InvestmentProposalArtifacts(research, proposal)
+
+    @staticmethod
+    def _reduce_target_weight(
+        *,
+        result: AnalysisResult,
+        symbol: str,
+        suggested_target_weight: Decimal | None,
+        authoritative_snapshot: PortfolioSnapshot | None,
+    ) -> Decimal:
+        """Resolve a REDUCE advisory target without giving DSA sizing authority."""
+        target = suggested_target_weight
+        if target is None:
+            if authoritative_snapshot is None:
+                raise ProposalBuildRejected(
+                    "REDUCE advisory target requires an authoritative PortfolioSnapshot"
+                )
+            target = _structured_position_target(result)
+            if target is None:
+                raise ProposalBuildRejected(
+                    "REDUCE advisory target is not deterministic in position_strategy"
+                )
+        try:
+            target = Decimal(str(target))
+        except (ArithmeticError, ValueError) as exc:
+            raise ProposalBuildRejected("REDUCE advisory target is invalid") from exc
+        if not Decimal("0") < target <= Decimal("1"):
+            raise ProposalBuildRejected("REDUCE advisory target must be in (0, 1]")
+        if authoritative_snapshot is None:
+            return target
+        if (
+            authoritative_snapshot.authoritative is not True
+            or authoritative_snapshot.read_only is not True
+            or authoritative_snapshot.simulation_only is not True
+            or authoritative_snapshot.reconciliation_status != "RECONCILED"
+            or authoritative_snapshot.equity <= 0
+        ):
+            raise ProposalBuildRejected("authoritative PortfolioSnapshot is not usable")
+        position = authoritative_snapshot.position_for(symbol=symbol, market="CN")
+        if position is None or position.quantity <= 0:
+            raise ProposalBuildRejected("REDUCE advisory requires an existing authoritative position")
+        current_weight = position.market_value / authoritative_snapshot.equity
+        if current_weight <= 0 or target >= current_weight:
+            raise ProposalBuildRejected(
+                "REDUCE advisory target must be lower than current authoritative weight"
+            )
+        return target
