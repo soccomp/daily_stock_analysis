@@ -116,7 +116,9 @@ class DailyScreeningScheduler:
                     market=self._market,
                     max_results=self._max_results,
                 )
-                run_id = str(result.get("run_id") or "")
+                run_id = str(result.get("run_id") or "").strip()
+                if not run_id:
+                    raise ValueError("screening service returned an empty run_id")
                 return {
                     "status": "COMPLETED",
                     "run_id": run_id,

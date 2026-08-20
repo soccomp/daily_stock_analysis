@@ -100,6 +100,23 @@ def test_retry_after_first_failure_then_success(tmp_path, monkeypatch):
     assert len(calls) == 2
 
 
+def test_empty_run_id_is_not_reported_as_completed(tmp_path, monkeypatch):
+    monkeypatch.setattr(sched_mod, "is_market_open", lambda m, d: True)
+    calls = []
+
+    def run_screen(**kwargs):
+        calls.append(kwargs)
+        return {"run_id": "   ", "candidate_count": 3}
+
+    s = _scheduler(tmp_path, run_screen=run_screen, now=TRADING_DAY)
+    result = s.tick()
+
+    assert result["status"] == "FAILED"
+    assert result["attempts"] == len(sched_mod.RETRY_DELAYS_SECONDS)
+    assert len(calls) == len(sched_mod.RETRY_DELAYS_SECONDS)
+    assert "empty run_id" in result["last_error"]
+
+
 def test_all_retries_exhausted_fails_soft(tmp_path, monkeypatch):
     monkeypatch.setattr(sched_mod, "is_market_open", lambda m, d: True)
     calls = []
