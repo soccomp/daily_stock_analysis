@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
+from src.investment.contracts.candidate_provenance import CandidateProvenance
 from src.investment.contracts.research_bundle import (
     ExpectedReturnRange,
     ModelProvenance,
@@ -47,6 +48,7 @@ class ResearchBundleAdapter:
         confidence: Decimal,
         model_provenance: tuple[ModelProvenance, ...],
         strategy_refs: tuple[str, ...] = (),
+        candidate_provenance: CandidateProvenance | None = None,
         supersedes_id: str | None = None,
     ) -> ResearchBundle:
         return ResearchBundle.build(
@@ -60,6 +62,7 @@ class ResearchBundleAdapter:
             as_of=as_of,
             horizon=horizon,
             trigger_source=trigger_source,
+            candidate_provenance=candidate_provenance,
             market_regime=market_regime,
             industry_view=industry_view,
             fundamental_view=fundamental_view,

@@ -8,6 +8,7 @@ from pydantic import AwareDatetime, Field, StrictStr, model_validator
 from typing_extensions import Self
 
 from .base import CanonicalContract, CanonicalDecimal, DataQuality, FrozenValue
+from .candidate_provenance import CandidateProvenance
 
 
 class ExpectedReturnRange(FrozenValue):
@@ -46,6 +47,7 @@ class ResearchBundle(CanonicalContract):
     as_of: AwareDatetime
     horizon: StrictStr = Field(min_length=1, max_length=64)
     trigger_source: StrictStr = Field(min_length=1, max_length=128)
+    candidate_provenance: CandidateProvenance | None = None
 
     market_regime: StrictStr = Field(min_length=1)
     industry_view: StrictStr = Field(min_length=1)

@@ -12,6 +12,7 @@ from typing import Any, Callable
 from src.analyzer import AnalysisResult
 from src.core.trading_calendar import get_market_for_stock
 from src.investment.contracts.base import canonical_json_bytes, decimal_to_json
+from src.investment.contracts.candidate_provenance import CandidateProvenance
 from src.investment.contracts.investment_proposal import InvestmentProposal
 from src.investment.contracts.research_bundle import ModelProvenance, ResearchBundle
 from src.investment.research.adapter import ResearchBundleAdapter
@@ -46,6 +47,7 @@ class InvestmentProposalBuilder:
         cycle_id: str,
         trigger_source: str,
         suggested_target_weight: Decimal | None = None,
+        candidate_provenance: CandidateProvenance | None = None,
     ) -> InvestmentProposalArtifacts:
         now = self._clock()
         if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
@@ -100,6 +102,7 @@ class InvestmentProposalBuilder:
             as_of=now,
             horizon="swing",
             trigger_source=str(trigger_source or "proposal_handoff").strip(),
+            candidate_provenance=candidate_provenance,
             market_regime=InvestmentShadowWiringService._text(
                 getattr(result, "trend_prediction", None), "No separate market-regime view."
             ),
@@ -187,6 +190,7 @@ class InvestmentProposalBuilder:
             symbol=symbol,
             market="CN",
             action=action,
+            candidate_provenance=candidate_provenance,
             confidence=research.confidence,
             expected_return=expected_return,
             suggested_target_weight=suggested_target_weight,

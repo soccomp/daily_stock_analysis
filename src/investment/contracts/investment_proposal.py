@@ -8,6 +8,7 @@ from pydantic import AwareDatetime, Field, StrictInt, StrictStr, model_validator
 from typing_extensions import Self
 
 from .base import CanonicalContract, CanonicalDecimal, StrictTrue
+from .candidate_provenance import CandidateProvenance
 from .research_bundle import ModelProvenance
 
 
@@ -36,6 +37,7 @@ class InvestmentProposal(CanonicalContract):
     symbol: StrictStr = Field(pattern=r"^[0-9]{6}$")
     market: Literal["CN"]
     action: Literal["BUY", "HOLD", "AVOID"]
+    candidate_provenance: CandidateProvenance | None = None
     confidence: CanonicalDecimal = Field(ge=0, le=1)
     expected_return: CanonicalDecimal
     suggested_target_weight: CanonicalDecimal | None = Field(default=None, gt=0, le=1)

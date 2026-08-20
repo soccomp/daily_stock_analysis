@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Callable
 
 from src.config import Config
 from src.investment.m2.identity import analysis_query_id, cycle_id as build_cycle_id, cycle_slot
 from src.investment.m2.orchestration import DSAAnalysisCompletionRunner
+from src.investment.m2.screening_candidates import (
+    DatabaseScreeningCandidateSource,
+    ScreeningCandidateSource,
+)
 from src.investment.m2.selection import select_m2_research_objects
+from src.investment.contracts.candidate_provenance import CandidateProvenance
 from src.investment.integration.runtime_snapshot_ingress import (
     CanonicalHttpPortfolioSnapshotSource,
     PortfolioSnapshotSource,
@@ -50,12 +56,14 @@ class ProposalHandoffLoopService:
         analysis_runner: DSAAnalysisCompletionRunner,
         publisher: CanonicalHttpInvestmentProposalPublisher,
         snapshot_source: PortfolioSnapshotSource,
+        screening_candidate_source: ScreeningCandidateSource | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._config = config
         self._analysis_runner = analysis_runner
         self._publisher = publisher
         self._snapshot_source = snapshot_source
+        self._screening_candidate_source = screening_candidate_source
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     @classmethod
@@ -89,6 +97,11 @@ class ProposalHandoffLoopService:
                     getattr(config, "single_brain_m2_snapshot_timeout_seconds", 5.0)
                 ),
             ),
+            screening_candidate_source=(
+                DatabaseScreeningCandidateSource(db)
+                if bool(getattr(config, "single_brain_m2_screening_enabled", False))
+                else None
+            ),
         )
 
     def run_cycle(self, *, scheduled_for: datetime | None = None) -> ProposalHandoffRunResult:
@@ -104,9 +117,11 @@ class ProposalHandoffLoopService:
         acknowledgements: list[AthenaProposalAcknowledgement] = []
         blocked: list[str] = []
         try:
+            screening_candidates = self._load_screening_candidates()
             scopes = select_m2_research_objects(
                 config=self._config,
                 snapshot=self._snapshot_source.capture_snapshot(),
+                screening_candidates=screening_candidates,
             )
         except Exception as exc:
             return ProposalHandoffRunResult(
@@ -139,12 +154,14 @@ class ProposalHandoffLoopService:
                 # The durable report completion time keeps recovery canonical
                 # without making a long-running analysis expire at handoff.
                 proposal_time = completion.completed_at or now
+                candidate_provenance = _candidate_provenance(scope)
                 artifacts = InvestmentProposalBuilder(clock=lambda: proposal_time).build(
                     result=completion.result,
                     context_snapshot=completion.context_snapshot,
                     source_report_id=completion.source_report_id,
                     cycle_id=cycle,
                     trigger_source="single_brain_proposal_handoff",
+                    candidate_provenance=candidate_provenance,
                 )
                 acknowledgement = self._publisher.publish(artifacts.proposal)
                 proposal_ids.append(artifacts.proposal.proposal_id)
@@ -169,3 +186,53 @@ class ProposalHandoffLoopService:
             blocked_reasons=tuple(blocked),
             researched_symbols=researched,
         )
+
+    def _load_screening_candidates(self) -> list[dict[str, object]]:
+        if self._screening_candidate_source is None:
+            return []
+        max_candidates = min(
+            50,
+            max(1, int(getattr(self._config, "single_brain_m2_screening_max_candidates", 3))),
+        )
+        max_age_hours = max(
+            1,
+            int(getattr(self._config, "single_brain_m2_screening_max_age_hours", 72)),
+        )
+        try:
+            candidates = self._screening_candidate_source.latest(
+                max_candidates=max_candidates,
+                max_age=timedelta(hours=max_age_hours),
+            )
+        except Exception as exc:  # screening is best-effort; holdings still run
+            logger.warning(
+                "Proposal handoff screening candidate source failed; "
+                "falling back to holdings/allowlist: %s",
+                exc,
+            )
+            return []
+        return [candidate.as_scope() for candidate in candidates]
+
+
+def _candidate_provenance(scope: dict[str, object]) -> CandidateProvenance:
+    source = str(scope.get("source") or "").strip().upper()
+    if source == "SCREENING":
+        selected_at = datetime.fromisoformat(str(scope["selected_at"]))
+        if selected_at.tzinfo is None or selected_at.utcoffset() is None:
+            raise ProposalHandoffBlocked("screening candidate selected_at must be timezone-aware")
+        return CandidateProvenance(
+            candidate_source="SCREENING",
+            screening_run_id=str(scope.get("screening_run_id") or ""),
+            screening_strategy=str(scope.get("strategy") or ""),
+            screening_rank=scope.get("rank"),
+            screening_score=(
+                None
+                if scope.get("screening_score") is None
+                else Decimal(str(scope["screening_score"]))
+            ),
+            screening_selected_at=selected_at,
+        )
+    if source in {"HOLDING", "BOTH"}:
+        return CandidateProvenance(candidate_source="HOLDING")
+    if source in {"ALLOWLIST", "MANUAL_SYMBOL_OVERRIDE"}:
+        return CandidateProvenance(candidate_source="MANUAL_SYMBOL_OVERRIDE")
+    raise ProposalHandoffBlocked(f"unsupported research candidate source: {source or 'missing'}")
