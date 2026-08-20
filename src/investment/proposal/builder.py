@@ -69,6 +69,10 @@ class InvestmentProposalBuilder:
             action = "BUY"
         elif normalized == "avoid":
             action = "AVOID"
+        elif normalized == "reduce":
+            action = "REDUCE"
+        elif normalized == "sell":
+            action = "SELL"
         elif normalized in {"watch", "hold", "alert"}:
             action = "HOLD"
         else:

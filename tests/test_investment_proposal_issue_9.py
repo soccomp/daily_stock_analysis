@@ -77,6 +77,25 @@ def test_hold_proposal_has_no_price_plan_and_tampering_breaks_hash():
         InvestmentProposal.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    ("analysis_action", "proposal_action"),
+    (("reduce", "REDUCE"), ("sell", "SELL")),
+)
+def test_existing_position_actions_are_canonical_advisory_proposals(
+    analysis_action, proposal_action,
+):
+    proposal = InvestmentProposalBuilder(clock=lambda: NOW).build(
+        result=_result(analysis_action), context_snapshot={}, source_report_id=11,
+        cycle_id=f"cycle-{analysis_action}", trigger_source="test",
+        suggested_target_weight=Decimal("0.040000") if analysis_action == "reduce" else None,
+    ).proposal
+
+    assert proposal.action == proposal_action
+    assert proposal.ideal_entry is None
+    assert proposal.secondary_entry is None
+    assert InvestmentProposal.model_validate_json(proposal.canonical_json()) == proposal
+
+
 def test_normal_recurring_path_stops_at_deterministic_proposal_handoff():
     class Runner:
         def complete(self, **kwargs):

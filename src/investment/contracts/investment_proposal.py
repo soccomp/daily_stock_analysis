@@ -36,7 +36,7 @@ class InvestmentProposal(CanonicalContract):
     source_report_ref: StrictStr = Field(min_length=1, max_length=256)
     symbol: StrictStr = Field(pattern=r"^[0-9]{6}$")
     market: Literal["CN"]
-    action: Literal["BUY", "HOLD", "AVOID"]
+    action: Literal["BUY", "HOLD", "AVOID", "REDUCE", "SELL"]
     candidate_provenance: CandidateProvenance | None = None
     confidence: CanonicalDecimal = Field(ge=0, le=1)
     expected_return: CanonicalDecimal
@@ -74,5 +74,5 @@ class InvestmentProposal(CanonicalContract):
             if self.expected_return <= 0:
                 raise ValueError("BUY proposal expected return must be positive")
         elif any(value is not None for value in price_fields):
-            raise ValueError("HOLD/AVOID proposal cannot carry an entry price plan")
+            raise ValueError("non-BUY proposal cannot carry an entry price plan")
         return self
