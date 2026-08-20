@@ -2,24 +2,25 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from src.investment.m2.orchestration import AnalysisCompletion
-from src.investment.m2.screening_candidates import ScreeningCandidate
+from src.investment.m2.screening_candidates import DatabaseScreeningCandidateSource
 from src.investment.proposal.orchestration import ProposalHandoffLoopService
 from tests.test_investment_proposal_issue_9 import NOW, _ack, _result
 from tests.test_m2_screening_candidates import _snapshot_many
 
 
-class _ScreeningSource:
-    def __init__(self, candidates):
-        self._candidates = candidates
-        self.calls = []
+class _PersistedScreeningDB:
+    def __init__(self, run):
+        self._run = run
 
-    def latest(self, *, max_candidates, max_age):
-        self.calls.append((max_candidates, max_age))
-        return self._candidates[:max_candidates]
+    def list_screening_runs(self, *, limit=1, strategy=None, market=None):
+        return [self._run]
+
+    def get_screening_run(self, run_id):
+        return self._run
 
 
 class _Runner:
@@ -55,19 +56,25 @@ def test_canonical_proposal_handoff_preserves_screening_lineage():
         "600519", "600036", "601318", "000858", "000651", "600030", "601166",
         "600887", "601988", "601288", "000001", "600000", "601398", "600028",
     )
-    screening_candidates = [
-        ScreeningCandidate(
-            symbol=symbol,
-            name=f"candidate-{index}",
-            screening_run_id="screening-run-1",
-            strategy="capital_heat",
-            rank=index,
-            screen_score=80.0 - index,
-            score=81.0 - index,
-            selected_at=NOW.isoformat(),
-        )
-        for index, symbol in enumerate(("300274", "600362", "600111"), start=1)
-    ]
+    screening_selected_at = datetime.now(timezone.utc) - timedelta(hours=1)
+    screening_run = {
+        "run_id": "screening-run-1",
+        "strategy": "capital_heat",
+        "market": "cn",
+        "created_at": screening_selected_at.isoformat(),
+        "result": {
+            "candidates": [
+                {
+                    "code": symbol,
+                    "name": f"candidate-{index}",
+                    "rank": index,
+                    "screen_score": 80.0 - index,
+                    "score": 81.0 - index,
+                }
+                for index, symbol in enumerate(("300274", "600362", "600111"), start=1)
+            ],
+        },
+    }
     config = SimpleNamespace(
         single_brain_m2_enabled=True,
         single_brain_m2_interval_minutes=60,
@@ -79,7 +86,7 @@ def test_canonical_proposal_handoff_preserves_screening_lineage():
         single_brain_m2_screening_max_age_hours=72,
     )
     runner = _Runner()
-    screening_source = _ScreeningSource(screening_candidates)
+    screening_source = DatabaseScreeningCandidateSource(_PersistedScreeningDB(screening_run))
     publisher = _Publisher()
     service = ProposalHandoffLoopService(
         config=config,
@@ -99,7 +106,6 @@ def test_canonical_proposal_handoff_preserves_screening_lineage():
     assert len(runner.calls) == len(publisher.proposals) == 6
     assert all(item.acknowledgement_state == "ACCEPTED" for item in result.acknowledgements)
     assert all(item.lifecycle_state == "NO_ACTION" for item in result.acknowledgements)
-    assert screening_source.calls == [(3, timedelta(hours=72))]
 
     screening_proposals = [
         item for item in publisher.proposals
@@ -114,4 +120,4 @@ def test_canonical_proposal_handoff_preserves_screening_lineage():
         assert provenance.screening_strategy == "capital_heat"
         assert provenance.screening_rank in {1, 2, 3}
         assert provenance.screening_score is not None
-        assert provenance.screening_selected_at == NOW
+        assert provenance.screening_selected_at == screening_selected_at
