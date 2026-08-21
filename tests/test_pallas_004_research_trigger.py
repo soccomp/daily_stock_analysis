@@ -131,7 +131,16 @@ def test_priority_places_defensive_then_material_then_holding(trigger_db):
     scopes = coordinator.plan(
         config=_config(max_symbols=3),
         snapshot=_snapshot_many("600519"),
-        screening_candidates=[],
+        screening_candidates=[{
+            "symbol": "300274",
+            "source": "SCREENING",
+            "screening_run_id": "run-priority",
+            "strategy": "capital_heat",
+            "rank": 1,
+            "screening_score": 80.0,
+            "score": 81.0,
+            "selected_at": NOW.isoformat(),
+        }],
         cycle_id="cycle-priority",
         now=NOW,
     )
@@ -223,6 +232,82 @@ def test_aged_screening_trigger_breaks_holding_capacity_starvation(trigger_db):
     )
     assert retry[0]["research_trigger"]["trigger_type"] == "SCHEDULED_SCREENING"
     assert retry[0]["research_trigger"]["screening_run_id"] == "run-starvation"
+    retry_types = [item["research_trigger"]["trigger_type"] for item in retry]
+    assert retry_types.count("SCHEDULED_SCREENING") == 1
+    assert retry_types.count("SCHEDULED_HOLDING_REVIEW") == 2
+
+
+def test_multiple_overdue_screenings_reserve_holdings_and_progress_across_cycles(trigger_db):
+    coordinator = ResearchTriggerCoordinator(trigger_db)
+    snapshot = _snapshot_many("600519", "600036", "000001")
+    candidates = [
+        {
+            "symbol": symbol,
+            "source": "SCREENING",
+            "screening_run_id": f"run-fairness-{index}",
+            "strategy": "capital_heat",
+            "rank": index + 1,
+            "screening_score": 80.0 - index,
+            "score": 81.0 - index,
+            "selected_at": NOW.isoformat(),
+        }
+        for index, symbol in enumerate(
+            (
+                "300274", "600362", "600111", "002241", "000426",
+                "600988", "600570", "600588", "601138", "603986",
+            )
+        )
+    ]
+
+    initial = coordinator.plan(
+        config=_config(max_symbols=13, holdings_limit=3),
+        snapshot=snapshot,
+        screening_candidates=candidates,
+        cycle_id="cycle-fairness-initial",
+        now=NOW,
+    )
+    assert len(initial) == 13
+
+    retry = coordinator.plan(
+        config=_config(max_symbols=3, holdings_limit=3),
+        snapshot=snapshot,
+        screening_candidates=candidates,
+        cycle_id="cycle-fairness-retry",
+        now=NOW + timedelta(minutes=61),
+    )
+    retry_types = [item["research_trigger"]["trigger_type"] for item in retry]
+    assert retry_types.count("SCHEDULED_SCREENING") == 1
+    assert retry_types.count("SCHEDULED_HOLDING_REVIEW") == 2
+    first_screen = next(
+        item for item in retry
+        if item["research_trigger"]["trigger_type"] == "SCHEDULED_SCREENING"
+    )
+    coordinator.mark_success(
+        trigger=first_screen["research_trigger"],
+        research_id="research-screen-1",
+        proposal_id="proposal-screen-1",
+        reviewed_at=NOW + timedelta(minutes=61),
+        interval_minutes=60,
+    )
+
+    next_retry = coordinator.plan(
+        config=_config(max_symbols=3, holdings_limit=3),
+        snapshot=snapshot,
+        screening_candidates=[
+            candidate for candidate in candidates
+            if candidate["symbol"] != first_screen["symbol"]
+        ],
+        cycle_id="cycle-fairness-next",
+        now=NOW + timedelta(minutes=122),
+    )
+    next_screen = next(
+        item for item in next_retry
+        if item["research_trigger"]["trigger_type"] == "SCHEDULED_SCREENING"
+    )
+    assert next_screen["symbol"] != first_screen["symbol"]
+    assert [item["research_trigger"]["trigger_type"] for item in next_retry].count(
+        "SCHEDULED_HOLDING_REVIEW"
+    ) == 2
 
 
 def test_runtime_signals_report_pending_screening_age(trigger_db):

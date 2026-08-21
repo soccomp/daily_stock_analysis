@@ -625,14 +625,12 @@ class ResearchTriggerCoordinator:
                 "_fairness": (3, "", symbol),
             })
         max_symbols = min(50, max(1, int(getattr(config, "single_brain_m2_max_symbols", 10))))
-        scopes.sort(
-            key=lambda item: self._scope_sort_key(
-                item=item,
-                now=now,
-                interval_minutes=interval,
-            )
+        selected = self._select_scopes(
+            scopes=scopes,
+            max_symbols=max_symbols,
+            now=now,
+            interval_minutes=interval,
         )
-        selected = scopes[:max_symbols]
         selected_holding_symbols = {
             item["symbol"]
             for item in selected
@@ -807,6 +805,86 @@ class ResearchTriggerCoordinator:
             priority = min(priority, 3)
             overdue_group = 0
         return (priority, overdue_group, item["_fairness"], item["symbol"])
+
+    @classmethod
+    def _select_scopes(
+        cls,
+        *,
+        scopes: list[dict[str, Any]],
+        max_symbols: int,
+        now: datetime,
+        interval_minutes: int,
+    ) -> list[dict[str, Any]]:
+        """Select work without allowing aged screening to starve holdings.
+
+        Material-event and defensive-risk work remains ahead of the bounded
+        screening/holding fairness rule.  When both due holdings and overdue
+        screening exist and at least two slots remain, reserve one slot for
+        each cohort and let the oldest overdue screening advance first.
+        """
+
+        ordered = sorted(
+            scopes,
+            key=lambda item: cls._scope_sort_key(
+                item=item,
+                now=now,
+                interval_minutes=interval_minutes,
+            ),
+        )
+        if max_symbols <= 0:
+            return []
+
+        safety_types = {"MATERIAL_EVENT_REVIEW", "DEFENSIVE_RISK_REVIEW"}
+        safety_items = [
+            item
+            for item in ordered
+            if item["research_trigger"].get("trigger_type") in safety_types
+        ][:max_symbols]
+        selected_ids = {id(item) for item in safety_items}
+        if len(safety_items) == max_symbols:
+            return safety_items
+
+        remaining_items = [item for item in ordered if id(item) not in selected_ids]
+        remaining_capacity = max_symbols - len(selected_ids)
+
+        holdings = [
+            item
+            for item in remaining_items
+            if item["research_trigger"].get("trigger_type") == "SCHEDULED_HOLDING_REVIEW"
+        ]
+        overdue_screenings = sorted(
+            (
+                item
+                for item in remaining_items
+                if cls._screening_trigger_is_overdue(
+                    item["research_trigger"],
+                    now=now,
+                    interval_minutes=interval_minutes,
+                )
+            ),
+            key=lambda item: (
+                str(item["research_trigger"].get("scheduled_for") or ""),
+                str(item["research_trigger"].get("created_at") or ""),
+                str(item["symbol"]),
+            ),
+        )
+
+        if holdings and overdue_screenings:
+            if remaining_capacity >= 2:
+                selected_ids.add(id(overdue_screenings[0]))
+                selected_ids.update(id(item) for item in holdings[: remaining_capacity - 1])
+            else:
+                selected_ids.add(id(overdue_screenings[0]))
+        else:
+            selected_ids.update(id(item) for item in remaining_items[:remaining_capacity])
+
+        if len(selected_ids) < max_symbols:
+            for item in remaining_items:
+                if len(selected_ids) >= max_symbols:
+                    break
+                selected_ids.add(id(item))
+
+        return [item for item in ordered if id(item) in selected_ids][:max_symbols]
 
     @staticmethod
     def _screening_trigger_is_overdue(
