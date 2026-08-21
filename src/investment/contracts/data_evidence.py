@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
@@ -115,6 +116,11 @@ def analysis_context_evidence(*, context_snapshot: Any, source_report_id: int, n
         "poor": "UNAVAILABLE",
         "unknown": "UNKNOWN",
     }[quality]
+    availability, quality_flags = _analysis_availability(
+        context_snapshot=context_snapshot,
+        default_availability=availability,
+        quality=quality,
+    )
     return DataEvidence.build(
         data_evidence_id=f"data-evidence-analysis-{source_report_id}",
         data_class="RESEARCH_INPUT",
@@ -127,8 +133,77 @@ def analysis_context_evidence(*, context_snapshot: Any, source_report_id: int, n
         freshness_policy_id="analysis-context-explicit-quality-v1",
         freshness_status="UNKNOWN",
         availability_status=availability,
-        quality_flags=(f"EXPLICIT_{quality.upper()}",),
+        quality_flags=quality_flags,
     )
+
+
+def _analysis_availability(
+    *,
+    context_snapshot: Any,
+    default_availability: str,
+    quality: str,
+) -> tuple[str, tuple[str, ...]]:
+    """Keep block-level degradation visible in the immutable evidence contract."""
+
+    flags = [f"EXPLICIT_{quality.upper()}"]
+    if not isinstance(context_snapshot, Mapping):
+        return default_availability, tuple(flags)
+    overview = context_snapshot.get("analysis_context_pack_overview")
+    if not isinstance(overview, Mapping):
+        return default_availability, tuple(flags)
+    blocks = overview.get("blocks")
+    if not isinstance(blocks, list):
+        return default_availability, tuple(flags)
+
+    statuses: list[str] = []
+    for block in blocks:
+        if not isinstance(block, Mapping):
+            continue
+        status = str(block.get("status") or "").strip().lower()
+        key = str(block.get("key") or "unknown").strip() or "unknown"
+        if not status:
+            continue
+        statuses.append(status)
+        if status in {
+            "partial",
+            "missing",
+            "fetch_failed",
+            "stale",
+            "fallback",
+            "estimated",
+            "not_supported",
+            "unavailable",
+        }:
+            flags.append(f"BLOCK_{status.upper()}:{key}")
+
+    data_quality = overview.get("data_quality")
+    if isinstance(data_quality, Mapping):
+        for limitation in data_quality.get("limitations", ()):
+            text = str(limitation).strip()
+            if text:
+                flags.append(f"LIMITATION:{text}")
+    for warning in overview.get("warnings", ()):
+        text = str(warning).strip()
+        if text:
+            flags.append(f"WARNING:{text}")
+
+    degraded = {
+        "partial",
+        "missing",
+        "fetch_failed",
+        "stale",
+        "fallback",
+        "estimated",
+        "not_supported",
+    }
+    unavailable = {"missing", "fetch_failed", "unavailable", "not_supported"}
+    if statuses and all(status in unavailable for status in statuses):
+        availability = "UNAVAILABLE"
+    elif any(status in degraded for status in statuses):
+        availability = "DEGRADED"
+    else:
+        availability = default_availability
+    return availability, tuple(dict.fromkeys(flags))
 
 
 def _portfolio_freshness(*, as_of: Any, observed_at: Any) -> str:
