@@ -216,6 +216,28 @@ def test_source_projects_fresh_candidates():
     assert out[0].as_scope()["strategy"] == "capital_heat"
 
 
+def test_source_recovers_candidate_by_persisted_run_and_symbol():
+    db = _StubDB(_run(
+        datetime.now(timezone.utc) - timedelta(hours=1),
+        [{"code": "300274", "name": "阳光电源", "rank": 1, "screen_score": 74.4, "score": 81.2}],
+    ))
+    candidate = DatabaseScreeningCandidateSource(db).by_run(
+        screening_run_id="run-1",
+        symbol="300274",
+    )
+    assert candidate is not None
+    assert candidate.as_scope() == {
+        "symbol": "300274",
+        "source": "SCREENING",
+        "screening_run_id": "run-1",
+        "strategy": "capital_heat",
+        "rank": 1,
+        "screening_score": 74.4,
+        "score": 81.2,
+        "selected_at": candidate.selected_at,
+    }
+
+
 def test_source_skips_stale_run():
     db = _StubDB(_run(
         datetime.now(timezone.utc) - timedelta(days=30),

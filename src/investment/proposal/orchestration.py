@@ -82,6 +82,11 @@ class ProposalHandoffLoopService:
                 "proposal endpoint and authoritative Athena snapshot endpoint are required"
             )
         db = DatabaseManager.get_instance()
+        screening_candidate_source = (
+            DatabaseScreeningCandidateSource(db)
+            if bool(getattr(config, "single_brain_m2_screening_enabled", False))
+            else None
+        )
         return cls(
             config=config,
             analysis_runner=DSAAnalysisCompletionRunner(
@@ -99,12 +104,11 @@ class ProposalHandoffLoopService:
                     getattr(config, "single_brain_m2_snapshot_timeout_seconds", 5.0)
                 ),
             ),
-            screening_candidate_source=(
-                DatabaseScreeningCandidateSource(db)
-                if bool(getattr(config, "single_brain_m2_screening_enabled", False))
-                else None
+            screening_candidate_source=screening_candidate_source,
+            trigger_coordinator=ResearchTriggerCoordinator(
+                db,
+                screening_candidate_source=screening_candidate_source,
             ),
-            trigger_coordinator=ResearchTriggerCoordinator(db),
         )
 
     def run_cycle(self, *, scheduled_for: datetime | None = None) -> ProposalHandoffRunResult:

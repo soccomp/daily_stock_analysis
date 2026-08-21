@@ -12,6 +12,12 @@ from src.investment.contracts.data_evidence import DataEvidence
 from src.storage import ResearchTriggerLedgerRecord
 
 
+def _utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def build_research_runtime_signals(
     *,
     coordinator: Any,
@@ -41,6 +47,26 @@ def build_research_runtime_signals(
         max(0, int((now_utc - datetime.fromisoformat(item["next_review_due_at"].replace("Z", "+00:00")).astimezone(timezone.utc)).total_seconds()))
         for item in due
     ]
+    pending_screening = [
+        row for row in rows
+        if row.trigger_type == "SCHEDULED_SCREENING"
+        and row.status == "FIRED"
+        and row.processed_at is None
+        and row.scheduled_for is not None
+        and _utc_datetime(row.scheduled_for) <= now_utc
+    ]
+    screening_wait_ages = [
+        max(
+            0,
+            int(
+                (
+                    now_utc
+                    - _utc_datetime(row.scheduled_for)
+                ).total_seconds()
+            ),
+        )
+        for row in pending_screening
+    ]
     evidence = tuple(data_evidence)
     return {
         "schema_version": "pallas-004-research-signals-v1",
@@ -53,6 +79,8 @@ def build_research_runtime_signals(
         "capacity_deferrals": sum(
             1 for item in coverage if item["review_status"] == "DEFERRED_CAPACITY"
         ),
+        "pending_screening_triggers": len(pending_screening),
+        "oldest_pending_screening_age_seconds": max(screening_wait_ages, default=0),
         "never_reviewed_holdings": sum(
             1 for item in coverage if item["last_successful_review_at"] is None
         ),

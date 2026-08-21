@@ -19,7 +19,10 @@ from src.investment.m2.orchestration import M2ShadowLoopService
 from src.investment.m2.repository import M2OperationalRepository
 from src.investment.m2.research_trigger import ResearchTriggerCoordinator
 from src.investment.m2.telemetry import build_research_runtime_signals
-from src.investment.m2.screening_candidates import ScreeningCandidate
+from src.investment.m2.screening_candidates import (
+    DatabaseScreeningCandidateSource,
+    ScreeningCandidate,
+)
 from src.investment.proposal.orchestration import ProposalHandoffLoopService
 from src.storage import DatabaseManager, ResearchTriggerLedgerRecord
 from src.services.decision_scorecard_service import DecisionScorecardService
@@ -182,6 +185,179 @@ def test_capacity_deferral_is_explicit_and_durable(trigger_db):
     assert projection["600036"]["review_status"] == "IN_PROGRESS"
     assert projection["600519"]["review_status"] == "DEFERRED_CAPACITY"
     assert projection["600519"]["deferred_count"] == 1
+
+
+def test_aged_screening_trigger_breaks_holding_capacity_starvation(trigger_db):
+    coordinator = ResearchTriggerCoordinator(trigger_db)
+    config = _config(max_symbols=3, holdings_limit=3)
+    snapshot = _snapshot_many("600519", "600036", "000001")
+    screening_candidate = {
+        "symbol": "300274",
+        "source": "SCREENING",
+        "screening_run_id": "run-starvation",
+        "strategy": "capital_heat",
+        "rank": 1,
+        "screening_score": 80.0,
+        "score": 81.0,
+        "selected_at": NOW.isoformat(),
+    }
+
+    initial = coordinator.plan(
+        config=_config(max_symbols=4, holdings_limit=3),
+        snapshot=snapshot,
+        screening_candidates=[screening_candidate],
+        cycle_id="cycle-starvation-initial",
+        now=NOW,
+    )
+    assert {item["research_trigger"]["trigger_type"] for item in initial} == {
+        "SCHEDULED_HOLDING_REVIEW",
+        "SCHEDULED_SCREENING",
+    }
+
+    retry = coordinator.plan(
+        config=config,
+        snapshot=snapshot,
+        screening_candidates=[screening_candidate],
+        cycle_id="cycle-starvation-retry",
+        now=NOW + timedelta(minutes=61),
+    )
+    assert retry[0]["research_trigger"]["trigger_type"] == "SCHEDULED_SCREENING"
+    assert retry[0]["research_trigger"]["screening_run_id"] == "run-starvation"
+
+
+def test_runtime_signals_report_pending_screening_age(trigger_db):
+    coordinator = ResearchTriggerCoordinator(trigger_db)
+    coordinator.plan(
+        config=_config(max_symbols=2, holdings_limit=1),
+        snapshot=_snapshot_many("600519"),
+        screening_candidates=[{
+            "symbol": "300274",
+            "source": "SCREENING",
+            "screening_run_id": "run-telemetry",
+            "strategy": "capital_heat",
+            "rank": 1,
+            "screening_score": 80.0,
+            "score": 81.0,
+            "selected_at": NOW.isoformat(),
+        }],
+        cycle_id="cycle-telemetry",
+        now=NOW,
+    )
+    signals = build_research_runtime_signals(
+        coordinator=coordinator,
+        now=NOW + timedelta(minutes=61),
+    )
+    assert signals["pending_screening_triggers"] == 1
+    assert signals["oldest_pending_screening_age_seconds"] == 3660
+
+
+def test_pending_screening_recovers_provenance_from_original_persisted_run(trigger_db):
+    first_run_at = NOW - timedelta(minutes=1)
+    second_run_at = NOW + timedelta(minutes=1)
+    assert trigger_db.save_screening_run({
+        "run_id": "run-persisted-original",
+        "strategy": "capital_heat",
+        "market": "cn",
+        "candidate_count": 1,
+        "created_at": first_run_at.isoformat(),
+        "candidates": [{
+            "code": "300274", "name": "阳光电源", "rank": 1,
+            "screen_score": 88.5, "score": 92.1,
+        }],
+    }) == 1
+    assert trigger_db.save_screening_run({
+        "run_id": "run-persisted-newer",
+        "strategy": "capital_heat",
+        "market": "cn",
+        "candidate_count": 1,
+        "created_at": second_run_at.isoformat(),
+        "candidates": [{
+            "code": "600362", "name": "江西铜业", "rank": 1,
+            "screen_score": 77.5, "score": 79.1,
+        }],
+    }) == 1
+    original = {
+        "symbol": "300274", "source": "SCREENING",
+        "screening_run_id": "run-persisted-original",
+        "strategy": "capital_heat", "rank": 1,
+        "screening_score": 88.5, "score": 92.1,
+        "selected_at": first_run_at.isoformat(),
+    }
+    newer = {
+        "symbol": "600362", "source": "SCREENING",
+        "screening_run_id": "run-persisted-newer",
+        "strategy": "capital_heat", "rank": 1,
+        "screening_score": 77.5, "score": 79.1,
+        "selected_at": second_run_at.isoformat(),
+    }
+    source = DatabaseScreeningCandidateSource(trigger_db)
+    coordinator = ResearchTriggerCoordinator(
+        trigger_db,
+        screening_candidate_source=source,
+    )
+    coordinator.plan(
+        config=_config(max_symbols=1, holdings_limit=0),
+        snapshot=_snapshot_many(),
+        screening_candidates=[original],
+        cycle_id="cycle-persisted-original",
+        now=NOW,
+    )
+    recovered = coordinator.plan(
+        config=_config(max_symbols=1, holdings_limit=0),
+        snapshot=_snapshot_many(),
+        screening_candidates=[newer],
+        cycle_id="cycle-persisted-newer",
+        now=NOW + timedelta(minutes=61),
+    )[0]
+    assert recovered["symbol"] == "300274"
+    assert recovered["screening_run_id"] == "run-persisted-original"
+    assert recovered["strategy"] == "capital_heat"
+    assert recovered["rank"] == 1
+    assert recovered["screening_score"] == 88.5
+    assert recovered["score"] == 92.1
+
+
+def test_pending_screening_without_persisted_source_is_blocked(trigger_db):
+    missing = {
+        "symbol": "300274", "source": "SCREENING",
+        "screening_run_id": "run-not-persisted",
+        "strategy": "capital_heat", "rank": 1,
+        "screening_score": 80.0, "score": 81.0,
+        "selected_at": NOW.isoformat(),
+    }
+    replacement = {
+        **missing,
+        "symbol": "600362",
+        "screening_run_id": "run-replacement",
+    }
+    source = DatabaseScreeningCandidateSource(trigger_db)
+    coordinator = ResearchTriggerCoordinator(
+        trigger_db,
+        screening_candidate_source=source,
+    )
+    first = coordinator.plan(
+        config=_config(max_symbols=1, holdings_limit=0),
+        snapshot=_snapshot_many(),
+        screening_candidates=[missing],
+        cycle_id="cycle-missing-source",
+        now=NOW,
+    )
+    second = coordinator.plan(
+        config=_config(max_symbols=1, holdings_limit=0),
+        snapshot=_snapshot_many(),
+        screening_candidates=[replacement],
+        cycle_id="cycle-missing-source-retry",
+        now=NOW + timedelta(minutes=61),
+    )
+    assert first[0]["symbol"] == "300274"
+    assert second[0]["symbol"] == "600362"
+    with trigger_db.get_session() as session:
+        row = session.get(
+            ResearchTriggerLedgerRecord,
+            first[0]["research_trigger"]["research_trigger_id"],
+        )
+    assert row is not None
+    assert row.status == "BLOCKED"
 
 
 def test_holdings_exceed_configured_limit_are_covered_across_repeated_cycles(trigger_db):

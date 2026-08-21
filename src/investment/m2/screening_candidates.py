@@ -104,27 +104,72 @@ class DatabaseScreeningCandidateSource:
         projected: list[ScreeningCandidate] = []
         seen: set[str] = set()
         for item in candidates:
-            if not isinstance(item, dict):
-                continue
-            symbol = _cn_symbol(item.get("code"))
-            if not symbol or symbol in seen:
-                continue
-            seen.add(symbol)
-            projected.append(
-                ScreeningCandidate(
-                    symbol=symbol,
-                    name=str(item.get("name") or ""),
-                    screening_run_id=run_id,
-                    strategy=strategy,
-                    rank=_as_int(item.get("rank")),
-                    screen_score=_as_float(item.get("screen_score")),
-                    score=_as_float(item.get("score")),
-                    selected_at=selected_at.isoformat(),
-                )
+            candidate = _project_candidate(
+                run_id=run_id,
+                item=item,
+                selected_at=selected_at,
+                strategy=strategy,
             )
+            if candidate is None or candidate.symbol in seen:
+                continue
+            seen.add(candidate.symbol)
+            projected.append(candidate)
             if len(projected) >= max_candidates:
                 break
         return projected
+
+    def by_run(self, *, screening_run_id: str, symbol: str) -> ScreeningCandidate | None:
+        """Recover one candidate from the run named by a durable trigger."""
+
+        run_id = str(screening_run_id or "").strip()
+        target_symbol = _cn_symbol(symbol)
+        if not run_id or not target_symbol:
+            return None
+        detail = self._db.get_screening_run(run_id)
+        if not detail:
+            return None
+        selected_at = _selected_at(detail)
+        if selected_at is None:
+            return None
+        strategy = str(detail.get("strategy") or "")
+        result = detail.get("result") or {}
+        candidates = result.get("candidates") or []
+        if not isinstance(candidates, list):
+            return None
+        for item in candidates:
+            candidate = _project_candidate(
+                run_id=run_id,
+                item=item,
+                selected_at=selected_at,
+                strategy=strategy,
+            )
+            if candidate is not None and candidate.symbol == target_symbol:
+                return candidate
+        return None
+
+
+def _project_candidate(
+    *,
+    run_id: str,
+    item: Any,
+    selected_at: datetime,
+    strategy: str,
+) -> ScreeningCandidate | None:
+    if not isinstance(item, dict):
+        return None
+    symbol = _cn_symbol(item.get("code"))
+    if not symbol:
+        return None
+    return ScreeningCandidate(
+        symbol=symbol,
+        name=str(item.get("name") or ""),
+        screening_run_id=run_id,
+        strategy=strategy,
+        rank=_as_int(item.get("rank")),
+        screen_score=_as_float(item.get("screen_score")),
+        score=_as_float(item.get("score")),
+        selected_at=selected_at.isoformat(),
+    )
 
 
 def _cn_symbol(value: Any) -> str | None:

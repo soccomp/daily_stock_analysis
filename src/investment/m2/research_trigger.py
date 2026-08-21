@@ -487,10 +487,15 @@ class HoldingsReviewCoverageRepository:
 class ResearchTriggerCoordinator:
     """Materialize triggers and fair holding coverage for the canonical DSA path."""
 
-    def __init__(self, db_manager: DatabaseManager | None = None) -> None:
+    def __init__(
+        self,
+        db_manager: DatabaseManager | None = None,
+        screening_candidate_source: Any | None = None,
+    ) -> None:
         self.db = db_manager or DatabaseManager.get_instance()
         self.ledger = ResearchTriggerLedgerRepository(self.db)
         self.coverage = HoldingsReviewCoverageRepository(self.db)
+        self._screening_candidate_source = screening_candidate_source
 
     def plan(
         self,
@@ -532,6 +537,11 @@ class ResearchTriggerCoordinator:
                 self.ledger.mark_blocked(item.research_trigger_id)
                 continue
             matching_scope = self._matching_scope_for_pending(item, base_scopes)
+            if item.trigger_type == "SCHEDULED_SCREENING" and matching_scope is None:
+                matching_scope = self._persisted_screening_scope(item)
+                if matching_scope is None:
+                    self.ledger.mark_blocked(item.research_trigger_id)
+                    continue
             pending_keys.add(self._pending_key(item))
             scope = {
                 **(matching_scope or {"symbol": item.symbol, "source": source}),
@@ -615,7 +625,13 @@ class ResearchTriggerCoordinator:
                 "_fairness": (3, "", symbol),
             })
         max_symbols = min(50, max(1, int(getattr(config, "single_brain_m2_max_symbols", 10))))
-        scopes.sort(key=lambda item: (int(item["_priority"]), item["_fairness"], item["symbol"]))
+        scopes.sort(
+            key=lambda item: self._scope_sort_key(
+                item=item,
+                now=now,
+                interval_minutes=interval,
+            )
+        )
         selected = scopes[:max_symbols]
         selected_holding_symbols = {
             item["symbol"]
@@ -740,6 +756,17 @@ class ResearchTriggerCoordinator:
                 return scope
         return None
 
+    def _persisted_screening_scope(self, trigger: ResearchTrigger) -> dict[str, Any] | None:
+        source = self._screening_candidate_source
+        lookup = getattr(source, "by_run", None)
+        if not callable(lookup):
+            return None
+        candidate = lookup(
+            screening_run_id=str(trigger.screening_run_id or ""),
+            symbol=trigger.symbol,
+        )
+        return None if candidate is None else candidate.as_scope()
+
     @staticmethod
     def _fairness_for_pending(
         trigger: ResearchTrigger, due: dict[str, dict[str, Any]],
@@ -752,6 +779,54 @@ class ResearchTriggerCoordinator:
                 trigger.symbol,
             )
         return (0, "", trigger.symbol)
+
+    @classmethod
+    def _scope_sort_key(
+        cls,
+        *,
+        item: dict[str, Any],
+        now: datetime,
+        interval_minutes: int,
+    ) -> tuple[int, int, tuple[int, str, str], str]:
+        """Keep lower-priority screening work from starving behind holdings.
+
+        A screening trigger that has waited one normal M2 interval is promoted
+        to the holding-review priority tier.  Safety/material-event priorities
+        remain ahead of it, while the explicit overdue group makes the
+        promotion deterministic when it ties with a holding trigger.
+        """
+
+        trigger = item["research_trigger"]
+        priority = int(item["_priority"])
+        overdue_group = 1
+        if cls._screening_trigger_is_overdue(
+            trigger,
+            now=now,
+            interval_minutes=interval_minutes,
+        ):
+            priority = min(priority, 3)
+            overdue_group = 0
+        return (priority, overdue_group, item["_fairness"], item["symbol"])
+
+    @staticmethod
+    def _screening_trigger_is_overdue(
+        trigger: dict[str, Any],
+        *,
+        now: datetime,
+        interval_minutes: int,
+    ) -> bool:
+        if trigger.get("trigger_type") != "SCHEDULED_SCREENING":
+            return False
+        raw_scheduled_for = trigger.get("scheduled_for")
+        try:
+            scheduled_for = datetime.fromisoformat(str(raw_scheduled_for))
+        except (TypeError, ValueError):
+            return False
+        if scheduled_for.tzinfo is None or scheduled_for.utcoffset() is None:
+            scheduled_for = scheduled_for.replace(tzinfo=timezone.utc)
+        return now.astimezone(timezone.utc) - scheduled_for.astimezone(timezone.utc) >= timedelta(
+            minutes=max(1, int(interval_minutes))
+        )
 
     @staticmethod
     def _coerce_trigger(trigger: ResearchTrigger | dict[str, Any]) -> ResearchTrigger:
