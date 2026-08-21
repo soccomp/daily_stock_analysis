@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import asc, select
+from sqlalchemy import asc, desc, select
 
 from src.investment.contracts.portfolio_snapshot import PortfolioSnapshot
 from src.investment.contracts.research_trigger import ResearchTrigger
@@ -27,7 +27,16 @@ TRIGGER_STATUSES = frozenset(
     {"FIRED", "DEDUPLICATED", "SUPPRESSED_COOLDOWN", "SUPERSEDED", "BLOCKED"}
 )
 REVIEW_STATUSES = frozenset(
-    {"NOT_DUE", "DUE", "IN_PROGRESS", "COMPLETED", "DEFERRED_CAPACITY", "BLOCKED_DATA", "BLOCKED_RUNTIME"}
+    {
+        "NOT_DUE",
+        "DUE",
+        "IN_PROGRESS",
+        "COMPLETED",
+        "DEFERRED_CAPACITY",
+        "BLOCKED_DATA",
+        "BLOCKED_RUNTIME",
+        "CLOSED",
+    }
 )
 
 
@@ -39,6 +48,8 @@ class _UnboundedSelectionConfig:
 
     def __getattr__(self, name: str) -> Any:
         if name == "single_brain_m2_max_symbols":
+            return 50
+        if name == "single_brain_m2_holdings_limit":
             return 50
         return getattr(self._config, name)
 
@@ -188,11 +199,42 @@ class ResearchTriggerLedgerRepository:
             if row is None:
                 raise ResearchTriggerConflictError(f"unknown trigger: {trigger_id}")
             row.status = "SUPERSEDED"
-            row.supersedes_trigger_id = superseded_by
             row.processed_at = utc_naive_now()
             history = self._history(row.status_history_json)
             history.append("SUPERSEDED")
             row.status_history_json = json.dumps(history, separators=(",", ":"))
+            successor = session.get(ResearchTriggerLedgerRecord, superseded_by)
+            if successor is not None and successor.supersedes_trigger_id != trigger_id:
+                raise ResearchTriggerConflictError(
+                    "successor trigger does not point to the superseded trigger"
+                )
+
+    def latest_for_symbol(
+        self,
+        *,
+        symbol: str,
+        effective_at: datetime,
+        exclude_dedup_key: str | None = None,
+    ) -> ResearchTrigger | None:
+        """Return the prior durable episode without rewriting its history."""
+
+        predicates = [
+            ResearchTriggerLedgerRecord.symbol == symbol,
+            ResearchTriggerLedgerRecord.effective_at <= to_utc_naive_datetime(effective_at),
+        ]
+        if exclude_dedup_key is not None:
+            predicates.append(ResearchTriggerLedgerRecord.dedup_key != exclude_dedup_key)
+        with self.db.get_session() as session:
+            row = session.execute(
+                select(ResearchTriggerLedgerRecord)
+                .where(*predicates)
+                .order_by(
+                    desc(ResearchTriggerLedgerRecord.effective_at),
+                    desc(ResearchTriggerLedgerRecord.created_at),
+                )
+                .limit(1)
+            ).scalar_one_or_none()
+        return None if row is None else self._to_trigger(row)
 
     def pending(self, *, now: datetime | None = None) -> tuple[ResearchTrigger, ...]:
         reference = to_utc_naive_datetime(now or datetime.now(timezone.utc))
@@ -217,6 +259,15 @@ class ResearchTriggerLedgerRepository:
     def get(self, trigger_id: str) -> ResearchTrigger | None:
         with self.db.get_session() as session:
             row = session.get(ResearchTriggerLedgerRecord, trigger_id)
+        return None if row is None else self._to_trigger(row)
+
+    def get_by_dedup_key(self, dedup_key: str) -> ResearchTrigger | None:
+        with self.db.get_session() as session:
+            row = session.execute(
+                select(ResearchTriggerLedgerRecord).where(
+                    ResearchTriggerLedgerRecord.dedup_key == dedup_key
+                )
+            ).scalar_one_or_none()
         return None if row is None else self._to_trigger(row)
 
     @staticmethod
@@ -282,6 +333,13 @@ class HoldingsReviewCoverageRepository:
             )
         )
         with self.db.session_scope() as session:
+            existing_rows = tuple(
+                session.execute(select(HoldingsReviewCoverageRecord)).scalars()
+            )
+            for row in existing_rows:
+                if row.symbol not in holdings:
+                    row.review_status = "CLOSED"
+                    row.updated_at = now_naive
             for symbol in holdings:
                 row = session.execute(
                     select(HoldingsReviewCoverageRecord).where(
@@ -461,18 +519,34 @@ class ResearchTriggerCoordinator:
             screening_candidates=screening_candidates,
         )
         scopes: list[dict[str, Any]] = []
-        for pending in self.ledger.pending(now=now):
-            scopes.append({
-                "symbol": pending.symbol,
-                "source": "MATERIAL_EVENT" if pending.trigger_type == "MATERIAL_EVENT_REVIEW" else "DEFENSIVE_RISK",
-                "research_trigger": pending.model_dump(mode="json"),
-                "_priority": pending.priority,
-                "_fairness": (0, "", pending.symbol),
-            })
+        pending = self.ledger.pending(now=now)
+        pending_keys: set[tuple[str, str, str | None]] = set()
+        current_holdings = {
+            str(position.symbol).split(".")[-1]
+            for position in snapshot.positions
+            if position.quantity > 0 and str(position.market).upper() == "CN"
+        }
+        for item in pending:
+            source = self._source_for_trigger(item)
+            if item.trigger_type == "SCHEDULED_HOLDING_REVIEW" and item.symbol not in current_holdings:
+                self.ledger.mark_blocked(item.research_trigger_id)
+                continue
+            matching_scope = self._matching_scope_for_pending(item, base_scopes)
+            pending_keys.add(self._pending_key(item))
+            scope = {
+                **(matching_scope or {"symbol": item.symbol, "source": source}),
+                "source": source,
+                "research_trigger": item.model_dump(mode="json"),
+                "_priority": item.priority,
+                "_fairness": self._fairness_for_pending(item, due),
+            }
+            scopes.append(scope)
         for scope in base_scopes:
             symbol = str(scope["symbol"])
             source = str(scope.get("source") or "")
             if source in {"HOLDING", "BOTH"}:
+                if ("SCHEDULED_HOLDING_REVIEW", symbol, None) in pending_keys:
+                    continue
                 if symbol not in due:
                     continue
                 item = due[symbol]
@@ -500,6 +574,13 @@ class ResearchTriggerCoordinator:
                 })
                 continue
             if source == "SCREENING":
+                screening_key = (
+                    "SCHEDULED_SCREENING",
+                    symbol,
+                    str(scope.get("screening_run_id") or ""),
+                )
+                if screening_key in pending_keys:
+                    continue
                 trigger = self._screening_trigger(
                     scope=scope,
                     snapshot=snapshot,
@@ -573,27 +654,104 @@ class ResearchTriggerCoordinator:
             self.coverage.mark_blocked(symbol=value.symbol, now=now)
 
     def enqueue_material_event(
-        self, *, symbol: str, event_id: str, effective_at: datetime, evidence_refs: tuple[str, ...], snapshot_id: str | None = None
+        self, *, symbol: str, event_id: str, effective_at: datetime, evidence_refs: tuple[str, ...], snapshot_id: str | None = None,
+        supersedes_trigger_id: str | None = None,
     ) -> TriggerEnqueueResult:
-        return self.ledger.enqueue(self._external_trigger(
+        dedup_key = f"MATERIAL_EVENT_REVIEW:{event_id}:{symbol}"
+        existing = self.ledger.get_by_dedup_key(dedup_key)
+        if existing is not None:
+            return self.ledger.enqueue(existing)
+        predecessor = supersedes_trigger_id or self._predecessor_id(
+            symbol=symbol, effective_at=effective_at, dedup_key=dedup_key,
+        )
+        result = self.ledger.enqueue(self._external_trigger(
             trigger_type="MATERIAL_EVENT_REVIEW", trigger_source="external-material-event", priority=2,
             symbol=symbol, event_id=event_id, effective_at=effective_at, evidence_refs=evidence_refs,
-            snapshot_id=snapshot_id,
+            snapshot_id=snapshot_id, supersedes_trigger_id=predecessor,
         ))
+        if result.created and predecessor:
+            self.ledger.supersede(predecessor, superseded_by=result.trigger.research_trigger_id)
+        return result
 
     def enqueue_defensive_risk(
-        self, *, symbol: str, risk_event_id: str, effective_at: datetime, evidence_refs: tuple[str, ...], snapshot_id: str | None = None
+        self, *, symbol: str, risk_event_id: str, effective_at: datetime, evidence_refs: tuple[str, ...], snapshot_id: str | None = None,
+        supersedes_trigger_id: str | None = None,
     ) -> TriggerEnqueueResult:
-        return self.ledger.enqueue(self._external_trigger(
+        dedup_key = f"DEFENSIVE_RISK_REVIEW:{risk_event_id}:{symbol}"
+        existing = self.ledger.get_by_dedup_key(dedup_key)
+        if existing is not None:
+            return self.ledger.enqueue(existing)
+        predecessor = supersedes_trigger_id
+        result = self.ledger.enqueue(self._external_trigger(
             trigger_type="DEFENSIVE_RISK_REVIEW", trigger_source="external-defensive-risk", priority=1,
             symbol=symbol, event_id=risk_event_id, effective_at=effective_at, evidence_refs=evidence_refs,
-            snapshot_id=snapshot_id,
+            snapshot_id=snapshot_id, supersedes_trigger_id=predecessor,
         ))
+        if result.created and predecessor:
+            self.ledger.supersede(predecessor, superseded_by=result.trigger.research_trigger_id)
+        return result
 
     def _processed(self, trigger_id: str) -> bool:
         with self.db.get_session() as session:
             row = session.get(ResearchTriggerLedgerRecord, trigger_id)
             return bool(row is not None and row.processed_at is not None)
+
+    def _predecessor_id(
+        self, *, symbol: str, effective_at: datetime, dedup_key: str,
+    ) -> str | None:
+        predecessor = self.ledger.latest_for_symbol(
+            symbol=symbol, effective_at=effective_at, exclude_dedup_key=dedup_key,
+        )
+        return None if predecessor is None else predecessor.research_trigger_id
+
+    @staticmethod
+    def _source_for_trigger(trigger: ResearchTrigger) -> str:
+        return {
+            "SCHEDULED_SCREENING": "SCREENING",
+            "SCHEDULED_HOLDING_REVIEW": "HOLDING",
+            "MATERIAL_EVENT_REVIEW": "MATERIAL_EVENT",
+            "DEFENSIVE_RISK_REVIEW": "DEFENSIVE_RISK",
+            "MANUAL_OWNER_REVIEW": "ALLOWLIST",
+        }[trigger.trigger_type]
+
+    @staticmethod
+    def _pending_key(trigger: ResearchTrigger) -> tuple[str, str, str | None]:
+        return (
+            trigger.trigger_type,
+            trigger.symbol,
+            trigger.screening_run_id if trigger.trigger_type == "SCHEDULED_SCREENING" else None,
+        )
+
+    @staticmethod
+    def _matching_scope_for_pending(
+        trigger: ResearchTrigger, scopes: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        for scope in scopes:
+            if str(scope.get("symbol")) != trigger.symbol:
+                continue
+            source = str(scope.get("source") or "")
+            if trigger.trigger_type == "SCHEDULED_HOLDING_REVIEW" and source in {"HOLDING", "BOTH"}:
+                return scope
+            if (
+                trigger.trigger_type == "SCHEDULED_SCREENING"
+                and source == "SCREENING"
+                and str(scope.get("screening_run_id") or "") == str(trigger.screening_run_id or "")
+            ):
+                return scope
+        return None
+
+    @staticmethod
+    def _fairness_for_pending(
+        trigger: ResearchTrigger, due: dict[str, dict[str, Any]],
+    ) -> tuple[int, str, str]:
+        item = due.get(trigger.symbol)
+        if trigger.trigger_type == "SCHEDULED_HOLDING_REVIEW" and item is not None:
+            return (
+                0 if item["last_successful_review_at"] is None else 1,
+                item["last_successful_review_at"] or "",
+                trigger.symbol,
+            )
+        return (0, "", trigger.symbol)
 
     @staticmethod
     def _coerce_trigger(trigger: ResearchTrigger | dict[str, Any]) -> ResearchTrigger:
@@ -641,7 +799,7 @@ class ResearchTriggerCoordinator:
             portfolio_snapshot_id=snapshot.snapshot_id,
         )
 
-    def _external_trigger(self, *, trigger_type: str, trigger_source: str, priority: int, symbol: str, event_id: str, effective_at: datetime, evidence_refs: tuple[str, ...], snapshot_id: str | None) -> ResearchTrigger:
+    def _external_trigger(self, *, trigger_type: str, trigger_source: str, priority: int, symbol: str, event_id: str, effective_at: datetime, evidence_refs: tuple[str, ...], snapshot_id: str | None, supersedes_trigger_id: str | None = None) -> ResearchTrigger:
         dedup_key = f"{trigger_type}:{event_id}:{symbol}"
         return ResearchTrigger.build(
             research_trigger_id=self._trigger_id(dedup_key), trigger_type=trigger_type,
@@ -649,4 +807,5 @@ class ResearchTriggerCoordinator:
             created_at=effective_at, source_event_time=effective_at, effective_at=effective_at,
             scheduled_for=effective_at, dedup_key=dedup_key, policy_version=TRIGGER_POLICY_VERSION,
             evidence_refs=tuple(dict.fromkeys(evidence_refs)), portfolio_snapshot_id=snapshot_id,
+            supersedes_trigger_id=supersedes_trigger_id,
         )

@@ -172,6 +172,13 @@ class InvestmentProposalBuilder:
                         now=now,
                     ))
                 data_evidence = tuple(evidence_items)
+        trigger = (
+            research_trigger
+            if isinstance(research_trigger, ResearchTrigger)
+            else ResearchTrigger.model_validate_json(json.dumps(research_trigger))
+            if research_trigger is not None
+            else None
+        )
         research = ResearchBundleAdapter.from_dsa_views(
             research_id=f"research-{identity_hash[:32]}",
             trace_id=cycle,
@@ -183,13 +190,8 @@ class InvestmentProposalBuilder:
             horizon="swing",
             trigger_source=str(trigger_source or "proposal_handoff").strip(),
             candidate_provenance=candidate_provenance,
-            research_trigger=(
-                research_trigger
-                if isinstance(research_trigger, ResearchTrigger)
-                else ResearchTrigger.model_validate_json(json.dumps(research_trigger))
-                if research_trigger is not None
-                else None
-            ),
+            supersedes_id=trigger.supersedes_trigger_id if trigger is not None else None,
+            research_trigger=trigger,
             data_evidence=data_evidence,
             market_regime=InvestmentShadowWiringService._text(
                 getattr(result, "trend_prediction", None), "No separate market-regime view."
@@ -273,6 +275,7 @@ class InvestmentProposalBuilder:
             trace_id=cycle,
             created_at=now,
             producer="DSA_INVESTMENT_PROPOSAL_AUTHORITY",
+            supersedes_id=research.supersedes_id,
             source_report_id=source_report_id,
             source_report_ref=f"dsa-analysis-history:{source_report_id}",
             symbol=symbol,

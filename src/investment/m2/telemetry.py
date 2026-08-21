@@ -26,7 +26,10 @@ def build_research_runtime_signals(
         rows = tuple(session.execute(select(ResearchTriggerLedgerRecord)).scalars())
     counts = Counter(row.trigger_type for row in rows)
     status_counts = Counter(row.status for row in rows)
-    coverage = tuple(coordinator.coverage.projection())
+    coverage = tuple(
+        item for item in coordinator.coverage.projection()
+        if item["review_status"] != "CLOSED"
+    )
     now_utc = now.astimezone(timezone.utc)
     due = [
         item for item in coverage

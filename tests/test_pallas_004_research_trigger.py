@@ -12,6 +12,7 @@ from src.investment.contracts.research_trigger import ResearchTrigger
 from src.investment.contracts.data_evidence import (
     DataEvidence,
     analysis_context_evidence,
+    portfolio_snapshot_evidence,
 )
 from src.investment.m2.orchestration import AnalysisCompletion
 from src.investment.m2.orchestration import M2ShadowLoopService
@@ -20,7 +21,7 @@ from src.investment.m2.research_trigger import ResearchTriggerCoordinator
 from src.investment.m2.telemetry import build_research_runtime_signals
 from src.investment.m2.screening_candidates import ScreeningCandidate
 from src.investment.proposal.orchestration import ProposalHandoffLoopService
-from src.storage import DatabaseManager
+from src.storage import DatabaseManager, ResearchTriggerLedgerRecord
 from src.services.decision_scorecard_service import DecisionScorecardService
 from tests.test_investment_proposal_issue_9 import _ack, _result
 from tests.test_investment_shadow_wiring_p1a import _analysis_result, _policy, _snapshot
@@ -183,6 +184,175 @@ def test_capacity_deferral_is_explicit_and_durable(trigger_db):
     assert projection["600519"]["deferred_count"] == 1
 
 
+def test_holdings_exceed_configured_limit_are_covered_across_repeated_cycles(trigger_db):
+    coordinator = ResearchTriggerCoordinator(trigger_db)
+    config = _config(max_symbols=1, holdings_limit=2)
+    snapshot = _snapshot_many("600519", "600036", "000001", "300274", "601318")
+    reviewed = []
+    for index in range(5):
+        reviewed_at = NOW + timedelta(minutes=61 * index)
+        scopes = coordinator.plan(
+            config=config,
+            snapshot=snapshot,
+            screening_candidates=[],
+            cycle_id=f"cycle-all-holdings-{index}",
+            now=reviewed_at,
+        )
+        assert len(scopes) == 1
+        reviewed.append(scopes[0]["symbol"])
+        coordinator.mark_success(
+            trigger=scopes[0]["research_trigger"],
+            research_id=f"research-all-{index}",
+            proposal_id=f"proposal-all-{index}",
+            reviewed_at=reviewed_at,
+            interval_minutes=60,
+        )
+    assert set(reviewed) == {"600519", "600036", "000001", "300274", "601318"}
+    assert all(item["last_successful_review_id"] for item in coordinator.coverage.projection())
+
+
+def test_interrupted_holding_episode_is_reused_without_duplicate(trigger_db):
+    coordinator = ResearchTriggerCoordinator(trigger_db)
+    config = _config(max_symbols=1, holdings_limit=1)
+    first = coordinator.plan(
+        config=config, snapshot=_snapshot_many("600519"), screening_candidates=[],
+        cycle_id="cycle-restart-holding", now=NOW,
+    )
+    second = coordinator.plan(
+        config=config, snapshot=_snapshot_many("600519"), screening_candidates=[],
+        cycle_id="cycle-restart-holding-retry", now=NOW,
+    )
+    assert second[0]["research_trigger"]["research_trigger_id"] == first[0]["research_trigger"]["research_trigger_id"]
+    assert len(coordinator.ledger.pending(now=NOW)) == 1
+
+
+def test_interrupted_screening_episode_preserves_source_without_duplicate(trigger_db):
+    coordinator = ResearchTriggerCoordinator(trigger_db)
+    candidate = {
+        "symbol": "300274", "source": "SCREENING", "screening_run_id": "run-restart",
+        "strategy": "capital_heat", "rank": 1, "screening_score": 80.0,
+        "score": 81.0, "selected_at": NOW.isoformat(),
+    }
+    first = coordinator.plan(
+        config=_config(max_symbols=1), snapshot=_snapshot_many(),
+        screening_candidates=[candidate], cycle_id="cycle-restart-screening", now=NOW,
+    )
+    second = coordinator.plan(
+        config=_config(max_symbols=1), snapshot=_snapshot_many(),
+        screening_candidates=[candidate], cycle_id="cycle-restart-screening-retry", now=NOW,
+    )
+    assert second[0]["source"] == "SCREENING"
+    assert second[0]["research_trigger"]["trigger_type"] == "SCHEDULED_SCREENING"
+    assert second[0]["research_trigger"]["research_trigger_id"] == first[0]["research_trigger"]["research_trigger_id"]
+
+
+def test_interrupted_external_episode_preserves_trigger_type_without_duplicate(trigger_db):
+    coordinator = ResearchTriggerCoordinator(trigger_db)
+    first = coordinator.enqueue_material_event(
+        symbol="600519", event_id="restart-material", effective_at=NOW,
+        evidence_refs=("news:restart-material",),
+    )
+    first_plan = coordinator.plan(
+        config=_config(max_symbols=1), snapshot=_snapshot_many(),
+        screening_candidates=[], cycle_id="cycle-restart-event", now=NOW,
+    )
+    second_plan = coordinator.plan(
+        config=_config(max_symbols=1), snapshot=_snapshot_many(),
+        screening_candidates=[], cycle_id="cycle-restart-event-retry", now=NOW,
+    )
+    assert first_plan[0]["source"] == "MATERIAL_EVENT"
+    assert second_plan[0]["research_trigger"]["research_trigger_id"] == first.trigger.research_trigger_id
+    assert len(coordinator.ledger.pending(now=NOW)) == 1
+
+
+def test_later_material_event_supersedes_completed_morning_episode(trigger_db):
+    class Runner:
+        def complete(self, **kwargs):
+            result = _result("hold")
+            result.code = kwargs["symbol"]
+            return AnalysisCompletion(result, {"data_quality": {"level": "good"}}, 106, False, kwargs.get("current_time", NOW))
+
+    class Publisher:
+        def __init__(self):
+            self.proposals = []
+
+        def publish(self, proposal):
+            self.proposals.append(proposal)
+            return _ack(proposal, "NO_ACTION")
+
+    coordinator = ResearchTriggerCoordinator(trigger_db)
+    publisher = Publisher()
+    snapshot_source = type("SnapshotSource", (), {
+        "capture_snapshot": lambda self: _snapshot_many("600519"),
+    })()
+    morning = ProposalHandoffLoopService(
+        config=_config(max_symbols=1, holdings_limit=1), analysis_runner=Runner(),
+        publisher=publisher, snapshot_source=snapshot_source,
+        trigger_coordinator=coordinator, clock=lambda: NOW,
+    )
+    assert morning.run_cycle(scheduled_for=NOW).status == "COMPLETED"
+    morning_rows = coordinator.coverage.projection()
+    assert morning_rows[0]["last_successful_review_id"]
+    prior_trigger = coordinator.ledger.latest_for_symbol(
+        symbol="600519", effective_at=NOW,
+    )
+    assert prior_trigger is not None
+    event_at = NOW + timedelta(minutes=61)
+    event = coordinator.enqueue_material_event(
+        symbol="600519", event_id="later-material", effective_at=event_at,
+        evidence_refs=("news:later-material",), snapshot_id="snapshot-many",
+    )
+    assert event.trigger.supersedes_trigger_id == prior_trigger.research_trigger_id
+    assert coordinator.ledger.get(prior_trigger.research_trigger_id) is not None
+    with trigger_db.get_session() as session:
+        prior_row = session.get(ResearchTriggerLedgerRecord, prior_trigger.research_trigger_id)
+    assert prior_row.status == "SUPERSEDED"
+    later = ProposalHandoffLoopService(
+        config=_config(max_symbols=1, holdings_limit=1), analysis_runner=Runner(),
+        publisher=publisher, snapshot_source=snapshot_source,
+        trigger_coordinator=coordinator, clock=lambda: event_at,
+    )
+    assert later.run_cycle(scheduled_for=event_at).status == "COMPLETED"
+    assert publisher.proposals[-1].research_trigger.supersedes_trigger_id == prior_trigger.research_trigger_id
+    assert publisher.proposals[-1].supersedes_id == prior_trigger.research_trigger_id
+
+
+def test_closed_holdings_remain_audit_rows_but_leave_open_metrics(trigger_db):
+    coordinator = ResearchTriggerCoordinator(trigger_db)
+    coordinator.coverage.materialize(
+        snapshot=_snapshot_many("600519", "600036"), now=NOW,
+        interval_minutes=60, policy_version="test-v1",
+    )
+    coordinator.coverage.materialize(
+        snapshot=_snapshot_many("600519"), now=NOW + timedelta(minutes=1),
+        interval_minutes=60, policy_version="test-v1",
+    )
+    projection = {item["symbol"]: item for item in coordinator.coverage.projection()}
+    assert projection["600036"]["review_status"] == "CLOSED"
+    signals = build_research_runtime_signals(coordinator=coordinator, now=NOW + timedelta(minutes=1))
+    assert signals["never_reviewed_holdings"] == 1
+    assert signals["open_holdings_due"] == 1
+    assert "600036" not in signals["fairness_order"]
+
+
+def test_data_freshness_uses_time_not_quality(trigger_db):
+    fresh = portfolio_snapshot_evidence(
+        snapshot=_snapshot(as_of=NOW - timedelta(minutes=1)), now=NOW,
+    )
+    stale = portfolio_snapshot_evidence(
+        snapshot=_snapshot(as_of=NOW - timedelta(minutes=6)), now=NOW,
+    )
+    unknown_timing = analysis_context_evidence(
+        context_snapshot={"data_quality": {"level": "good"}},
+        source_report_id=107, now=NOW,
+    )
+    assert fresh.freshness_status == "FRESH"
+    assert stale.freshness_status == "STALE"
+    assert fresh.quality_flags[-1] == "HIGH"
+    assert stale.quality_flags[-1] == "HIGH"
+    assert unknown_timing.freshness_status == "UNKNOWN"
+
+
 def test_material_event_reaches_real_handoff_with_external_lineage(trigger_db):
     class Runner:
         def complete(self, **kwargs):
@@ -235,7 +405,7 @@ def test_screening_and_manual_triggers_keep_candidate_provenance_separate(trigge
 
     class SnapshotSource:
         def capture_snapshot(self):
-            return _snapshot_many("600519")
+            return _snapshot(as_of=NOW - timedelta(minutes=1))
 
     class Publisher:
         def __init__(self):
@@ -277,6 +447,8 @@ def test_screening_and_manual_triggers_keep_candidate_provenance_separate(trigge
         item.data_evidence[0].source_reference.startswith("portfolio-snapshot:")
         for item in publisher.proposals
     )
+    assert all(item.data_evidence[0].freshness_status == "FRESH" for item in publisher.proposals)
+    assert all(item.data_evidence[1].freshness_status == "UNKNOWN" for item in publisher.proposals)
     coverage = ResearchTriggerCoordinator(trigger_db).coverage.projection()
     assert coverage[0]["last_successful_review_id"].startswith("research-")
 

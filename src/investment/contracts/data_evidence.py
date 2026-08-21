@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from pydantic import AwareDatetime, Field, StrictStr, model_validator
 from typing_extensions import Self
 
 from .base import FrozenValue, canonical_json_bytes
+
+
+PORTFOLIO_SNAPSHOT_MAX_AGE = timedelta(minutes=5)
 
 
 class DataEvidence(FrozenValue):
@@ -63,7 +67,7 @@ class DataEvidence(FrozenValue):
 
 
 def portfolio_snapshot_evidence(*, snapshot: Any, now) -> DataEvidence:
-    """Represent Athena's read-only portfolio truth without inferring quality."""
+    """Represent Athena truth with freshness derived from authoritative age semantics."""
 
     reconciled = (
         getattr(snapshot, "authoritative", False) is True
@@ -72,7 +76,10 @@ def portfolio_snapshot_evidence(*, snapshot: Any, now) -> DataEvidence:
         and getattr(snapshot, "reconciliation_status", None) == "RECONCILED"
     )
     quality = str(getattr(snapshot, "data_quality", "UNKNOWN"))
-    freshness = "FRESH" if reconciled and quality in {"HIGH", "MEDIUM"} else "UNKNOWN"
+    freshness = _portfolio_freshness(
+        as_of=getattr(snapshot, "as_of", None),
+        observed_at=now,
+    )
     availability = "AVAILABLE" if reconciled else "UNAVAILABLE"
     snapshot_id = str(getattr(snapshot, "snapshot_id", "") or "")
     if not snapshot_id:
@@ -96,19 +103,18 @@ def portfolio_snapshot_evidence(*, snapshot: Any, now) -> DataEvidence:
 
 
 def analysis_context_evidence(*, context_snapshot: Any, source_report_id: int, now) -> DataEvidence:
-    """Preserve explicit DSA context quality; missing quality remains UNKNOWN."""
+    """Preserve DSA quality while leaving freshness UNKNOWN without source timing."""
 
     from src.services.decision_signal_data_quality import normalize_decision_signal_data_quality
 
     quality = normalize_decision_signal_data_quality(context_snapshot)
-    mapping = {
-        "high": ("FRESH", "AVAILABLE"),
-        "medium": ("AGING", "AVAILABLE"),
-        "low": ("STALE", "DEGRADED"),
-        "poor": ("UNKNOWN", "UNAVAILABLE"),
-        "unknown": ("UNKNOWN", "UNKNOWN"),
-    }
-    freshness, availability = mapping[quality]
+    availability = {
+        "high": "AVAILABLE",
+        "medium": "AVAILABLE",
+        "low": "DEGRADED",
+        "poor": "UNAVAILABLE",
+        "unknown": "UNKNOWN",
+    }[quality]
     return DataEvidence.build(
         data_evidence_id=f"data-evidence-analysis-{source_report_id}",
         data_class="RESEARCH_INPUT",
@@ -119,7 +125,20 @@ def analysis_context_evidence(*, context_snapshot: Any, source_report_id: int, n
         retrieved_at=now,
         observed_at=now,
         freshness_policy_id="analysis-context-explicit-quality-v1",
-        freshness_status=freshness,
+        freshness_status="UNKNOWN",
         availability_status=availability,
         quality_flags=(f"EXPLICIT_{quality.upper()}",),
     )
+
+
+def _portfolio_freshness(*, as_of: Any, observed_at: Any) -> str:
+    """Reuse the existing five-minute snapshot gate; do not infer age from quality."""
+
+    if not isinstance(as_of, datetime) or as_of.tzinfo is None or as_of.utcoffset() is None:
+        return "UNKNOWN"
+    if not isinstance(observed_at, datetime) or observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        return "UNKNOWN"
+    age = observed_at.astimezone(timezone.utc) - as_of.astimezone(timezone.utc)
+    if age.total_seconds() < 0:
+        return "UNKNOWN"
+    return "FRESH" if age <= PORTFOLIO_SNAPSHOT_MAX_AGE else "STALE"
