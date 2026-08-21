@@ -497,6 +497,15 @@ class ResearchTriggerCoordinator:
         self.coverage = HoldingsReviewCoverageRepository(self.db)
         self._screening_candidate_source = screening_candidate_source
 
+    def enqueue(self, trigger: ResearchTrigger | dict[str, Any]) -> TriggerEnqueueResult:
+        """Enqueue one externally produced trigger through the canonical ledger.
+
+        The coordinator remains the DSA authority for durable trigger identity
+        and deduplication.  External callers cannot bypass the immutable
+        ``ResearchTrigger`` contract or write the ledger directly.
+        """
+        return self.ledger.enqueue(self._coerce_trigger(trigger))
+
     def plan(
         self,
         *,
