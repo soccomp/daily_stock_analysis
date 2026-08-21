@@ -134,3 +134,22 @@ def test_analysis_evidence_marks_partial_and_missing_blocks_degraded():
     assert "BLOCK_PARTIAL:technical" in evidence.quality_flags
     assert "BLOCK_MISSING:chip" in evidence.quality_flags
     assert "WARNING:intraday_realtime_overlay" in evidence.quality_flags
+
+
+def test_analysis_evidence_marks_mixed_available_and_unavailable_degraded():
+    evidence = analysis_context_evidence(
+        context_snapshot={
+            "analysis_context_pack_overview": {
+                "blocks": [
+                    {"key": "quote", "status": "available"},
+                    {"key": "chip", "status": "unavailable"},
+                ],
+                "data_quality": {"level": "good"},
+            },
+        },
+        source_report_id=102,
+        now=datetime(2026, 8, 21, 9, 30, tzinfo=timezone.utc),
+    )
+
+    assert evidence.availability_status == "DEGRADED"
+    assert "BLOCK_UNAVAILABLE:chip" in evidence.quality_flags

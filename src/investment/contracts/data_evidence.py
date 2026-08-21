@@ -195,6 +195,7 @@ def _analysis_availability(
         "fallback",
         "estimated",
         "not_supported",
+        "unavailable",
     }
     unavailable = {"missing", "fetch_failed", "unavailable", "not_supported"}
     if statuses and all(status in unavailable for status in statuses):
