@@ -13,7 +13,9 @@ from .base import CanonicalDecimal, FrozenValue
 class CandidateProvenance(FrozenValue):
     """The durable source lineage attached to research and proposal artifacts."""
 
-    candidate_source: Literal["SCREENING", "HOLDING", "MANUAL_SYMBOL_OVERRIDE"]
+    candidate_source: Literal[
+        "SCREENING", "HOLDING", "MANUAL_SYMBOL_OVERRIDE", "EXTERNAL_EVENT"
+    ]
     screening_run_id: StrictStr | None = Field(default=None, min_length=1, max_length=160)
     screening_strategy: StrictStr | None = Field(default=None, min_length=1, max_length=128)
     screening_rank: StrictInt | None = Field(default=None, ge=1)

@@ -27,6 +27,7 @@ from src.investment.m2.identity import (
 )
 from src.investment.m2.policy import CanonicalRiskPolicyLoader
 from src.investment.m2.repository import M2InputConflictError, M2OperationalRepository
+from src.investment.m2.research_trigger import ResearchTriggerCoordinator
 from src.investment.m2.runtime_diagnostics import analysis_failure_marker
 from src.investment.m2.screening_candidates import (
     DatabaseScreeningCandidateSource,
@@ -205,6 +206,7 @@ class M2ShadowLoopService:
         repository: M2OperationalRepository,
         execution_coordinator: M3ExecutionCoordinator | None = None,
         screening_candidate_source: ScreeningCandidateSource | None = None,
+        trigger_coordinator: ResearchTriggerCoordinator | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._config = config
@@ -216,6 +218,7 @@ class M2ShadowLoopService:
         self._execution_coordinator = execution_coordinator
         self._screening_candidate_source = screening_candidate_source
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._trigger_coordinator = trigger_coordinator
 
     @classmethod
     def from_config(cls, config: Config) -> "M2ShadowLoopService":
@@ -305,6 +308,7 @@ class M2ShadowLoopService:
             lineage_store=DecisionScorecardService(db_manager=db),
             repository=M2OperationalRepository(db),
             execution_coordinator=execution_coordinator,
+            trigger_coordinator=ResearchTriggerCoordinator(db),
             screening_candidate_source=(
                 DatabaseScreeningCandidateSource(db)
                 if bool(getattr(config, "single_brain_m2_screening_enabled", False))
@@ -360,7 +364,7 @@ class M2ShadowLoopService:
                 snapshot = self._snapshot_source.capture_snapshot()
                 snapshot_validation_time = self._snapshot_receipt_time()
                 policy = self._policy_source.load()
-                symbols = self._select_symbols(snapshot)
+                symbols = self._select_symbols(snapshot, cycle_id=cycle, now=snapshot_validation_time)
             else:
                 snapshot_was_captured = False
                 snapshot = PortfolioSnapshot.model_validate_json(mirror.snapshot_json)
@@ -513,6 +517,7 @@ class M2ShadowLoopService:
                     decision_cycle_id=cycle,
                     decision_id=stable_decision_id,
                     allow_nonpositive_return=True,
+                    research_trigger=scope.get("research_trigger"),
                 )
                 decision = artifacts.investment_decision
                 if self._execution_coordinator is None:
@@ -527,6 +532,12 @@ class M2ShadowLoopService:
                         rationale_summary=decision.rationale,
                     )
                     persisted.append(decision.decision_id)
+                    self._mark_trigger_success(
+                        scope=scope,
+                        research_id=artifacts.research_bundle.research_id,
+                        proposal_id=decision.decision_id,
+                        reviewed_at=decision_now,
+                    )
                 else:
                     execution = self._execution_coordinator.process(artifacts)
                     if execution.status == "PERSISTED":
@@ -542,6 +553,12 @@ class M2ShadowLoopService:
                             decision_action=decision.action,
                             rationale_summary=decision.rationale,
                         )
+                        self._mark_trigger_success(
+                            scope=scope,
+                            research_id=artifacts.research_bundle.research_id,
+                            proposal_id=decision.decision_id,
+                            reviewed_at=decision_now,
+                        )
             except (M2ShadowBlocked, ShadowWiringRejected, M2InputConflictError) as exc:
                 reason = f"{symbol}: {exc}"
                 blocked.append(reason)
@@ -551,6 +568,7 @@ class M2ShadowLoopService:
                     status="BLOCKED",
                     reason=str(exc),
                 )
+                self._mark_trigger_failure(scope=scope, now=slot)
             except Exception as exc:  # one bounded attempt; later trigger may recover
                 reason = f"{symbol}: {type(exc).__name__}: {exc}"
                 blocked.append(reason)
@@ -560,6 +578,7 @@ class M2ShadowLoopService:
                     status="FAILED",
                     reason=f"{type(exc).__name__}: {exc}",
                 )
+                self._mark_trigger_failure(scope=scope, now=slot)
                 logger.exception("M2 shadow symbol failed closed: cycle=%s symbol=%s", cycle, symbol)
 
         if execution_pending:
@@ -771,8 +790,22 @@ class M2ShadowLoopService:
         )
         return Decimal(microseconds) / Decimal(1000)
 
-    def _select_symbols(self, snapshot: PortfolioSnapshot) -> list[dict[str, Any]]:
+    def _select_symbols(
+        self,
+        snapshot: PortfolioSnapshot,
+        *,
+        cycle_id: str | None = None,
+        now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
         screening_candidates = self._load_screening_candidates()
+        if self._trigger_coordinator is not None:
+            return self._trigger_coordinator.plan(
+                config=self._config,
+                snapshot=snapshot,
+                screening_candidates=screening_candidates,
+                cycle_id=cycle_id or "m2-cycle",
+                now=now or self._aware_now(),
+            )
         return select_m2_research_objects(
             config=self._config,
             snapshot=snapshot,
@@ -802,6 +835,32 @@ class M2ShadowLoopService:
             )
             return []
         return [item.as_scope() for item in candidates]
+
+    def _mark_trigger_success(
+        self,
+        *,
+        scope: dict[str, Any],
+        research_id: str,
+        proposal_id: str,
+        reviewed_at: datetime,
+    ) -> None:
+        if self._trigger_coordinator is None or not scope.get("research_trigger"):
+            return
+        self._trigger_coordinator.mark_success(
+            trigger=scope["research_trigger"],
+            research_id=research_id,
+            proposal_id=proposal_id,
+            reviewed_at=reviewed_at,
+            interval_minutes=int(getattr(self._config, "single_brain_m2_interval_minutes", 60)),
+        )
+
+    def _mark_trigger_failure(self, *, scope: dict[str, Any], now: datetime) -> None:
+        if self._trigger_coordinator is None or not scope.get("research_trigger"):
+            return
+        try:
+            self._trigger_coordinator.mark_failure(trigger=scope["research_trigger"], now=now)
+        except Exception:
+            logger.exception("PALLAS-004 trigger failure checkpoint failed")
 
     def _aware_now(self) -> datetime:
         now = self._clock()

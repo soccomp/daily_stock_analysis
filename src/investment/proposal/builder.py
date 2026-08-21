@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -14,9 +15,15 @@ from src.analyzer import AnalysisResult
 from src.core.trading_calendar import get_market_for_stock
 from src.investment.contracts.base import canonical_json_bytes, decimal_to_json
 from src.investment.contracts.candidate_provenance import CandidateProvenance
+from src.investment.contracts.data_evidence import (
+    DataEvidence,
+    analysis_context_evidence,
+    portfolio_snapshot_evidence,
+)
 from src.investment.contracts.investment_proposal import InvestmentProposal
 from src.investment.contracts.portfolio_snapshot import PortfolioSnapshot
 from src.investment.contracts.research_bundle import ModelProvenance, ResearchBundle
+from src.investment.contracts.research_trigger import ResearchTrigger
 from src.investment.research.adapter import ResearchBundleAdapter
 from src.investment.shadow_wiring import InvestmentShadowWiringService, ShadowWiringRejected
 from src.schemas.decision_action import normalize_decision_action
@@ -93,6 +100,8 @@ class InvestmentProposalBuilder:
         suggested_target_weight: Decimal | None = None,
         authoritative_snapshot: PortfolioSnapshot | None = None,
         candidate_provenance: CandidateProvenance | None = None,
+        research_trigger: ResearchTrigger | dict[str, Any] | None = None,
+        data_evidence: tuple[DataEvidence, ...] | None = None,
     ) -> InvestmentProposalArtifacts:
         now = self._clock()
         if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
@@ -149,6 +158,20 @@ class InvestmentProposalBuilder:
                 {"cycle_id": cycle, "source_report_id": source_report_id, "symbol": symbol}
             )
         ).hexdigest()
+        if data_evidence is None:
+            data_evidence = ()
+            if research_trigger is not None:
+                evidence_items = [analysis_context_evidence(
+                    context_snapshot=context_snapshot,
+                    source_report_id=source_report_id,
+                    now=now,
+                )]
+                if authoritative_snapshot is not None:
+                    evidence_items.insert(0, portfolio_snapshot_evidence(
+                        snapshot=authoritative_snapshot,
+                        now=now,
+                    ))
+                data_evidence = tuple(evidence_items)
         research = ResearchBundleAdapter.from_dsa_views(
             research_id=f"research-{identity_hash[:32]}",
             trace_id=cycle,
@@ -160,6 +183,14 @@ class InvestmentProposalBuilder:
             horizon="swing",
             trigger_source=str(trigger_source or "proposal_handoff").strip(),
             candidate_provenance=candidate_provenance,
+            research_trigger=(
+                research_trigger
+                if isinstance(research_trigger, ResearchTrigger)
+                else ResearchTrigger.model_validate_json(json.dumps(research_trigger))
+                if research_trigger is not None
+                else None
+            ),
+            data_evidence=data_evidence,
             market_regime=InvestmentShadowWiringService._text(
                 getattr(result, "trend_prediction", None), "No separate market-regime view."
             ),
@@ -248,6 +279,8 @@ class InvestmentProposalBuilder:
             market="CN",
             action=action,
             candidate_provenance=candidate_provenance,
+            research_trigger=research.research_trigger,
+            data_evidence=research.data_evidence,
             confidence=research.confidence,
             expected_return=expected_return,
             suggested_target_weight=suggested_target_weight,

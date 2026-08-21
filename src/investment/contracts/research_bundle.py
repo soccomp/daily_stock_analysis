@@ -9,6 +9,8 @@ from typing_extensions import Self
 
 from .base import CanonicalContract, CanonicalDecimal, DataQuality, FrozenValue
 from .candidate_provenance import CandidateProvenance
+from .data_evidence import DataEvidence
+from .research_trigger import ResearchTrigger
 
 
 class ExpectedReturnRange(FrozenValue):
@@ -38,6 +40,7 @@ class ResearchBundle(CanonicalContract):
         "risk_factors": (),
         "invalidation_conditions": (),
         "strategy_refs": (),
+        "data_evidence": (),
     }
 
     schema_version: Literal["1.0"]
@@ -48,6 +51,8 @@ class ResearchBundle(CanonicalContract):
     horizon: StrictStr = Field(min_length=1, max_length=64)
     trigger_source: StrictStr = Field(min_length=1, max_length=128)
     candidate_provenance: CandidateProvenance | None = None
+    research_trigger: ResearchTrigger | None = None
+    data_evidence: tuple[DataEvidence, ...] = ()
 
     market_regime: StrictStr = Field(min_length=1)
     industry_view: StrictStr = Field(min_length=1)
@@ -85,4 +90,7 @@ class ResearchBundle(CanonicalContract):
                 raise ValueError(f"{field_name} cannot contain blank values")
             if len(values) != len(set(values)):
                 raise ValueError(f"{field_name} cannot contain duplicates")
+        evidence_ids = [item.data_evidence_id for item in self.data_evidence]
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise ValueError("data_evidence cannot contain duplicate identifiers")
         return self

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -20,7 +21,13 @@ from src.investment.contracts.investment_decision import (
     TakeProfitPlan,
 )
 from src.investment.contracts.portfolio_snapshot import PortfolioSnapshot
+from src.investment.contracts.data_evidence import (
+    DataEvidence,
+    analysis_context_evidence,
+    portfolio_snapshot_evidence,
+)
 from src.investment.contracts.research_bundle import ModelProvenance, ResearchBundle
+from src.investment.contracts.research_trigger import ResearchTrigger
 from src.investment.contracts.risk_policy import RiskPolicy
 from src.investment.decision.engine import DecisionSizingInput, InvestmentDecisionEngine
 from src.investment.decision.sizing import risk_budget_target_weight
@@ -100,6 +107,8 @@ class InvestmentShadowWiringService:
         decision_cycle_id: str | None = None,
         decision_id: str | None = None,
         allow_nonpositive_return: bool = False,
+        research_trigger: ResearchTrigger | dict[str, Any] | None = None,
+        data_evidence: tuple[DataEvidence, ...] | None = None,
     ) -> InvestmentShadowArtifacts:
         """Build one decision lineage without persistence, transport, or execution."""
 
@@ -159,6 +168,19 @@ class InvestmentShadowWiringService:
         if not effective_decision_cycle_id or not effective_decision_id:
             raise ShadowWiringRejected("explicit shadow decision identities cannot be blank")
 
+        if data_evidence is None:
+            data_evidence = (
+                (
+                    portfolio_snapshot_evidence(snapshot=portfolio_snapshot, now=now),
+                    analysis_context_evidence(
+                        context_snapshot=context_snapshot,
+                        source_report_id=source_report_id,
+                        now=now,
+                    ),
+                )
+                if research_trigger is not None else ()
+            )
+
         research = ResearchBundleAdapter.from_dsa_views(
             research_id=f"research-shadow-{identity_hash[:32]}",
             trace_id=effective_trace_id,
@@ -169,6 +191,14 @@ class InvestmentShadowWiringService:
             as_of=now,
             horizon="swing",
             trigger_source=source,
+            research_trigger=(
+                research_trigger
+                if isinstance(research_trigger, ResearchTrigger)
+                else ResearchTrigger.model_validate_json(json.dumps(research_trigger))
+                if research_trigger is not None
+                else None
+            ),
+            data_evidence=data_evidence,
             market_regime=self._text(
                 getattr(result, "trend_prediction", None),
                 "Completed DSA analysis did not provide a market-regime view.",

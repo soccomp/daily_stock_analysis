@@ -7,8 +7,10 @@ from typing import ClassVar, Literal, Mapping
 from pydantic import AwareDatetime, Field, StrictInt, StrictStr, model_validator
 from typing_extensions import Self
 
-from .base import CanonicalContract, CanonicalDecimal, StrictTrue
+from .base import CanonicalContract, CanonicalDecimal, StrictTrue, canonical_json_bytes
 from .candidate_provenance import CandidateProvenance
+from .data_evidence import DataEvidence
+from .research_trigger import ResearchTrigger
 from .research_bundle import ModelProvenance
 
 
@@ -38,6 +40,8 @@ class InvestmentProposal(CanonicalContract):
     market: Literal["CN"]
     action: Literal["BUY", "HOLD", "AVOID", "REDUCE", "SELL"]
     candidate_provenance: CandidateProvenance | None = None
+    research_trigger: ResearchTrigger | None = None
+    data_evidence: tuple[DataEvidence, ...] = ()
     confidence: CanonicalDecimal = Field(ge=0, le=1)
     expected_return: CanonicalDecimal
     suggested_target_weight: CanonicalDecimal | None = Field(default=None, gt=0, le=1)
@@ -55,6 +59,24 @@ class InvestmentProposal(CanonicalContract):
     final_allocation_permitted: Literal[False]
     execution_permitted: Literal[False]
 
+    def _wire_payload(self) -> dict[str, object]:
+        payload = self.model_dump(mode="python")
+        if self.candidate_provenance is None:
+            payload.pop("candidate_provenance", None)
+        if self.research_trigger is None:
+            payload.pop("research_trigger", None)
+        if not self.data_evidence:
+            payload.pop("data_evidence", None)
+        return payload
+
+    def hash_payload(self) -> dict[str, object]:
+        payload = self._wire_payload()
+        payload.pop("content_hash", None)
+        return payload
+
+    def canonical_json(self) -> str:
+        return canonical_json_bytes(self._wire_payload()).decode("utf-8")
+
     @model_validator(mode="after")
     def _proposal_semantics(self) -> Self:
         if self.valid_until <= self.valid_from:
@@ -63,6 +85,9 @@ class InvestmentProposal(CanonicalContract):
             values = getattr(self, field_name)
             if any(not value.strip() for value in values) or len(values) != len(set(values)):
                 raise ValueError(f"{field_name} must contain unique non-blank values")
+        evidence_ids = [item.data_evidence_id for item in self.data_evidence]
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise ValueError("data_evidence cannot contain duplicate identifiers")
         price_fields = (self.ideal_entry, self.secondary_entry, self.stop_price, self.target_price)
         if self.action == "BUY":
             if any(value is None for value in price_fields):

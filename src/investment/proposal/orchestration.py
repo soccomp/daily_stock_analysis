@@ -15,7 +15,7 @@ from src.investment.m2.screening_candidates import (
     DatabaseScreeningCandidateSource,
     ScreeningCandidateSource,
 )
-from src.investment.m2.selection import select_m2_research_objects
+from src.investment.m2.research_trigger import ResearchTriggerCoordinator
 from src.investment.contracts.candidate_provenance import CandidateProvenance
 from src.investment.integration.runtime_snapshot_ingress import (
     CanonicalHttpPortfolioSnapshotSource,
@@ -57,6 +57,7 @@ class ProposalHandoffLoopService:
         publisher: CanonicalHttpInvestmentProposalPublisher,
         snapshot_source: PortfolioSnapshotSource,
         screening_candidate_source: ScreeningCandidateSource | None = None,
+        trigger_coordinator: ResearchTriggerCoordinator | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._config = config
@@ -65,6 +66,7 @@ class ProposalHandoffLoopService:
         self._snapshot_source = snapshot_source
         self._screening_candidate_source = screening_candidate_source
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._trigger_coordinator = trigger_coordinator
 
     @classmethod
     def from_config(cls, config: Config) -> "ProposalHandoffLoopService":
@@ -102,6 +104,7 @@ class ProposalHandoffLoopService:
                 if bool(getattr(config, "single_brain_m2_screening_enabled", False))
                 else None
             ),
+            trigger_coordinator=ResearchTriggerCoordinator(db),
         )
 
     def run_cycle(self, *, scheduled_for: datetime | None = None) -> ProposalHandoffRunResult:
@@ -117,13 +120,23 @@ class ProposalHandoffLoopService:
         acknowledgements: list[AthenaProposalAcknowledgement] = []
         blocked: list[str] = []
         try:
-            screening_candidates = self._load_screening_candidates()
             authoritative_snapshot = self._snapshot_source.capture_snapshot()
-            scopes = select_m2_research_objects(
-                config=self._config,
-                snapshot=authoritative_snapshot,
-                screening_candidates=screening_candidates,
-            )
+            screening_candidates = self._load_screening_candidates()
+            if self._trigger_coordinator is None:
+                from src.investment.m2.selection import select_m2_research_objects
+                scopes = select_m2_research_objects(
+                    config=self._config,
+                    snapshot=authoritative_snapshot,
+                    screening_candidates=screening_candidates,
+                )
+            else:
+                scopes = self._trigger_coordinator.plan(
+                    config=self._config,
+                    snapshot=authoritative_snapshot,
+                    screening_candidates=screening_candidates,
+                    cycle_id=cycle,
+                    now=now,
+                )
         except Exception as exc:
             return ProposalHandoffRunResult(
                 cycle,
@@ -164,10 +177,19 @@ class ProposalHandoffLoopService:
                     trigger_source="single_brain_proposal_handoff",
                     authoritative_snapshot=authoritative_snapshot,
                     candidate_provenance=candidate_provenance,
+                    research_trigger=scope.get("research_trigger"),
                 )
                 acknowledgement = self._publisher.publish(artifacts.proposal)
                 proposal_ids.append(artifacts.proposal.proposal_id)
                 acknowledgements.append(acknowledgement)
+                if self._trigger_coordinator is not None and scope.get("research_trigger"):
+                    self._trigger_coordinator.mark_success(
+                        trigger=scope["research_trigger"],
+                        research_id=artifacts.research_bundle.research_id,
+                        proposal_id=artifacts.proposal.proposal_id,
+                        reviewed_at=proposal_time,
+                        interval_minutes=interval,
+                    )
                 logger.info(
                     "Issue #9 proposal accepted: proposal_id=%s acknowledgement_id=%s "
                     "acknowledgement_state=%s lifecycle_state=%s deduplicated=%s",
@@ -179,6 +201,13 @@ class ProposalHandoffLoopService:
                 )
             except Exception as exc:
                 blocked.append(f"{symbol}: {type(exc).__name__}: {exc}")
+                if self._trigger_coordinator is not None and scope.get("research_trigger"):
+                    try:
+                        self._trigger_coordinator.mark_failure(
+                            trigger=scope["research_trigger"], now=now
+                        )
+                    except Exception:
+                        logger.exception("PALLAS-004 trigger failure checkpoint failed")
         status = "COMPLETED" if proposal_ids and not blocked else "PARTIAL" if proposal_ids else "FAILED_CLOSED"
         return ProposalHandoffRunResult(
             cycle_id=cycle,
@@ -237,4 +266,6 @@ def _candidate_provenance(scope: dict[str, object]) -> CandidateProvenance:
         return CandidateProvenance(candidate_source="HOLDING")
     if source in {"ALLOWLIST", "MANUAL_SYMBOL_OVERRIDE"}:
         return CandidateProvenance(candidate_source="MANUAL_SYMBOL_OVERRIDE")
+    if source in {"MATERIAL_EVENT", "DEFENSIVE_RISK"}:
+        return CandidateProvenance(candidate_source="EXTERNAL_EVENT")
     raise ProposalHandoffBlocked(f"unsupported research candidate source: {source or 'missing'}")

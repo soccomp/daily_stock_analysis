@@ -1218,6 +1218,56 @@ class SingleBrainM2SnapshotClockDiagnosticRecord(Base):
     recorded_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
 
 
+class ResearchTriggerLedgerRecord(Base):
+    """Durable PALLAS-004 trigger facts and idempotency outcomes."""
+
+    __tablename__ = "research_trigger_ledger"
+
+    research_trigger_id = Column(String(160), primary_key=True)
+    trigger_type = Column(String(40), nullable=False, index=True)
+    trigger_source = Column(String(160), nullable=False)
+    symbol = Column(String(64), nullable=False, index=True)
+    market = Column(String(32), nullable=False)
+    priority = Column(Integer, nullable=False, index=True)
+    created_at = Column(DateTime, nullable=False, index=True)
+    source_event_time = Column(DateTime)
+    effective_at = Column(DateTime, nullable=False)
+    scheduled_for = Column(DateTime, nullable=False, index=True)
+    dedup_key = Column(String(256), nullable=False, unique=True, index=True)
+    policy_version = Column(String(128), nullable=False)
+    evidence_refs_json = Column(Text, nullable=False)
+    screening_scheduler_run_id = Column(String(160))
+    screening_run_id = Column(String(160), index=True)
+    portfolio_snapshot_id = Column(String(160), index=True)
+    supersedes_trigger_id = Column(String(160))
+    content_hash = Column(String(64), nullable=False)
+    status = Column(String(32), nullable=False, index=True)
+    status_history_json = Column(Text, nullable=False, default="[]")
+    duplicate_count = Column(Integer, nullable=False, default=0)
+    processed_at = Column(DateTime, index=True)
+    cooldown_until = Column(DateTime, index=True)
+    created_at_ledger = Column(DateTime, default=utc_naive_now, nullable=False)
+    last_seen_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+
+
+class HoldingsReviewCoverageRecord(Base):
+    """Durable per-symbol holdings review coverage projection."""
+
+    __tablename__ = "holdings_review_coverage"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(64), nullable=False, unique=True, index=True)
+    portfolio_snapshot_id = Column(String(160), nullable=False, index=True)
+    last_successful_review_id = Column(String(160), index=True)
+    last_successful_review_at = Column(DateTime, index=True)
+    next_review_due_at = Column(DateTime, nullable=False, index=True)
+    review_priority = Column(Integer, nullable=False, index=True)
+    review_policy_version = Column(String(128), nullable=False)
+    review_status = Column(String(32), nullable=False, index=True)
+    deferred_count = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
+
+
 class SingleBrainM3ExecutionRecord(Base):
     """Durable no-retry checkpoint for one Brain-owned executable decision."""
 
