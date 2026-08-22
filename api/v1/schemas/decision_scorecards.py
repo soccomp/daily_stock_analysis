@@ -35,6 +35,8 @@ class DecisionScorecardSummary(BaseModel):
     block_reason: Optional[str] = None
     broker_reason: Optional[str] = None
     snapshot_b_available: bool
+    integrity_status: str = "VALID"
+    integrity_error: Optional[str] = None
 
 
 class DecisionScorecardListResponse(BaseModel):

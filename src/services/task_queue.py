@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import os
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, Future
@@ -57,6 +58,26 @@ class TaskStatus(str, Enum):
     FAILED = "failed"          # Failed
     CANCEL_REQUESTED = "cancel_requested"  # Cancellation requested
     CANCELLED = "cancelled"    # Cancelled by user/system
+    STALE = "stale"             # No live worker/heartbeat within the lease
+    INTERRUPTED = "interrupted" # Process restart interrupted the task
+    FAILED_RECOVERABLE = "failed_recoverable"
+
+
+TASK_STAGES = (
+    "QUEUED",
+    "PREPARING",
+    "COLLECTING_INDICES",
+    "COLLECTING_BREADTH",
+    "COLLECTING_SECTORS_CONCEPTS",
+    "COLLECTING_NEWS",
+    "ASSEMBLING_CONTEXT",
+    "LLM_GENERATION",
+    "PARSING_VALIDATING",
+    "PERSISTENCE",
+    "DOWNSTREAM_HANDOFF",
+    "COMPLETED",
+)
+_TASK_STAGE_ORDER = {stage: index for index, stage in enumerate(TASK_STAGES)}
 
 
 @dataclass
@@ -88,6 +109,12 @@ class TaskInfo:
     trace_id: Optional[str] = None
     region: Optional[str] = None
     flow_events: List[Dict[str, Any]] = field(default_factory=list)
+    stage: str = "QUEUED"
+    stage_message: Optional[str] = None
+    updated_at: datetime = field(default_factory=datetime.now)
+    heartbeat_at: Optional[datetime] = None
+    worker_id: Optional[str] = None
+    execution_id: Optional[str] = None
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert task info into an API-friendly dictionary."""
@@ -104,6 +131,12 @@ class TaskInfo:
             "created_at": self.created_at.isoformat(),
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "updated_at": self.updated_at.isoformat(),
+            "heartbeat_at": self.heartbeat_at.isoformat() if self.heartbeat_at else None,
+            "stage": self.stage,
+            "stage_message": self.stage_message,
+            "worker_id": self.worker_id,
+            "execution_id": self.execution_id,
             "error": self.error,
             "original_query": self.original_query,
             "selection_source": self.selection_source,
@@ -138,6 +171,12 @@ class TaskInfo:
             trace_id=self.trace_id or self.task_id,
             region=self.region,
             flow_events=copy.deepcopy(self.flow_events),
+            stage=self.stage,
+            stage_message=self.stage_message,
+            updated_at=self.updated_at,
+            heartbeat_at=self.heartbeat_at,
+            worker_id=self.worker_id,
+            execution_id=self.execution_id,
         )
 
 
@@ -434,6 +473,9 @@ class AnalysisTaskQueue:
                     portfolio_context=dict(portfolio_context) if isinstance(portfolio_context, dict) else None,
                     skills=task_skills,
                     report_language=report_language,
+                    stage="QUEUED",
+                    stage_message="任务已加入队列",
+                    execution_id=uuid.uuid4().hex,
                 )
                 self._tasks[task_id] = task_info
                 self._analyzing_stocks[dedupe_key] = task_id
@@ -495,6 +537,9 @@ class AnalysisTaskQueue:
             message=message,
             report_type=report_type,
             region=region,
+            stage="QUEUED",
+            stage_message=message,
+            execution_id=uuid.uuid4().hex,
         )
 
         with self._data_lock:
@@ -655,6 +700,11 @@ class AnalysisTaskQueue:
                 task.message = message
                 changed = True
 
+            now = datetime.now()
+            task.updated_at = now
+            task.heartbeat_at = now
+            changed = True
+
             if not changed:
                 return task.copy()
 
@@ -662,6 +712,80 @@ class AnalysisTaskQueue:
 
         self._broadcast_event(event_type, task_snapshot.to_dict())
         return task_snapshot
+
+    def update_task_stage(
+        self,
+        task_id: str,
+        stage: str,
+        message: Optional[str] = None,
+        *,
+        progress: Optional[int] = None,
+    ) -> Optional[TaskInfo]:
+        """Advance a task's observable stage without allowing regression."""
+        normalized = str(stage or "").strip().upper()
+        if normalized not in _TASK_STAGE_ORDER:
+            raise ValueError(f"unsupported task stage: {stage}")
+        with self._data_lock:
+            task = self._tasks.get(task_id)
+            if not task or task.status not in (TaskStatus.PENDING, TaskStatus.PROCESSING):
+                return None
+            if _TASK_STAGE_ORDER[normalized] < _TASK_STAGE_ORDER.get(task.stage, 0):
+                raise ValueError(f"task stage regression: {task.stage} -> {normalized}")
+            task.stage = normalized
+            if message is not None:
+                task.stage_message = message
+                task.message = message
+            if progress is not None:
+                task.progress = max(task.progress, max(0, min(99, int(progress))))
+            now = datetime.now()
+            task.updated_at = now
+            task.heartbeat_at = now
+            task_snapshot = task.copy()
+        self._broadcast_event("task_progress", task_snapshot.to_dict())
+        return task_snapshot
+
+    def heartbeat_task(self, task_id: str, *, stage_message: Optional[str] = None) -> Optional[TaskInfo]:
+        """Refresh the liveness lease for a task, even when progress is unchanged."""
+        with self._data_lock:
+            task = self._tasks.get(task_id)
+            if not task or task.status not in (TaskStatus.PENDING, TaskStatus.PROCESSING):
+                return None
+            now = datetime.now()
+            task.updated_at = now
+            task.heartbeat_at = now
+            if stage_message is not None:
+                task.stage_message = stage_message
+                task.message = stage_message
+            task_snapshot = task.copy()
+        self._broadcast_event("heartbeat", task_snapshot.to_dict())
+        return task_snapshot
+
+    def reconcile_stale_tasks(self, *, timeout_seconds: float = 300.0, now: Optional[datetime] = None) -> List[TaskInfo]:
+        """Mark tasks with no live future or expired heartbeat as stale."""
+        current = now or datetime.now()
+        stale: List[TaskInfo] = []
+        with self._data_lock:
+            for task in self._tasks.values():
+                if task.status not in (TaskStatus.PENDING, TaskStatus.PROCESSING):
+                    continue
+                heartbeat = task.heartbeat_at or task.updated_at or task.created_at
+                age = (current - heartbeat).total_seconds()
+                future = self._futures.get(task.task_id)
+                if age <= max(1.0, float(timeout_seconds)) and not (future is not None and future.done()):
+                    continue
+                task.status = TaskStatus.STALE
+                task.error = "task heartbeat expired or worker exited"
+                task.message = "任务已标记为 stale，等待人工/受控恢复"
+                task.stage_message = task.message
+                task.updated_at = current
+                task.completed_at = current
+                dedupe_key = _dedupe_stock_code_key(task.stock_code)
+                if self._analyzing_stocks.get(dedupe_key) == task.task_id:
+                    del self._analyzing_stocks[dedupe_key]
+                stale.append(task.copy())
+        for task in stale:
+            self._broadcast_event("task_failed", task.to_dict())
+        return stale
     
     # ========== 任务执行 ==========
     
@@ -700,6 +824,11 @@ class AnalysisTaskQueue:
             task.started_at = datetime.now()
             task.message = "正在分析中..."
             task.progress = 10
+            task.stage = "PREPARING"
+            task.stage_message = task.message
+            task.updated_at = task.started_at
+            task.heartbeat_at = task.started_at
+            task.worker_id = f"{os.getpid()}:{threading.current_thread().name}"
         
         self._broadcast_event("task_started", task.to_dict())
         
@@ -750,6 +879,10 @@ class AnalysisTaskQueue:
                         task.completed_at = datetime.now()
                         task.result = result
                         task.message = "分析完成"
+                        task.stage = "COMPLETED"
+                        task.stage_message = task.message
+                        task.updated_at = task.completed_at
+                        task.heartbeat_at = task.completed_at
                         task.stock_name = result.get("stock_name", task.stock_name)
                         
                         # 从分析中集合移除
@@ -781,6 +914,9 @@ class AnalysisTaskQueue:
                     task.completed_at = datetime.now()
                     task.error = error_msg[:200]  # 限制错误信息长度
                     task.message = f"分析失败: {error_msg[:50]}"
+                    task.stage_message = task.message
+                    task.updated_at = task.completed_at
+                    task.heartbeat_at = task.completed_at
                     
                     # 从分析中集合移除
                     dedupe_key = _dedupe_stock_code_key(task.stock_code)
@@ -819,6 +955,11 @@ class AnalysisTaskQueue:
             task.started_at = datetime.now()
             task.message = "任务执行中"
             task.progress = 10
+            task.stage = "PREPARING"
+            task.stage_message = task.message
+            task.updated_at = task.started_at
+            task.heartbeat_at = task.started_at
+            task.worker_id = f"{os.getpid()}:{threading.current_thread().name}"
             self._broadcast_event("task_started", task.to_dict())
 
         try:
@@ -847,6 +988,10 @@ class AnalysisTaskQueue:
                     task.completed_at = datetime.now()
                     task.result = result
                     task.message = "任务执行完成"
+                    task.stage = "COMPLETED"
+                    task.stage_message = task.message
+                    task.updated_at = task.completed_at
+                    task.heartbeat_at = task.completed_at
 
             self._broadcast_event("task_completed", task.to_dict())
             logger.info(f"[TaskQueue] 自定义任务完成: {task_id}")
@@ -867,6 +1012,9 @@ class AnalysisTaskQueue:
                     task.completed_at = datetime.now()
                     task.error = error_msg[:200]
                     task.message = f"任务失败: {error_msg[:80]}"
+                    task.stage_message = task.message
+                    task.updated_at = task.completed_at
+                    task.heartbeat_at = task.completed_at
 
             if task:
                 self._broadcast_event("task_failed", task.to_dict())

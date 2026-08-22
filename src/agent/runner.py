@@ -624,6 +624,14 @@ def _execute_tools(
             non_retriable_tool_results=non_retriable_tool_results,
         )
 
+    def _timeout_for(tc_item) -> Optional[float]:
+        category_timeout = tool_registry.timeout_for(tc_item.name)
+        if category_timeout and category_timeout > 0:
+            if tool_wait_timeout_seconds and tool_wait_timeout_seconds > 0:
+                return min(category_timeout, tool_wait_timeout_seconds)
+            return category_timeout
+        return tool_wait_timeout_seconds
+
     results: List[Dict[str, Any]] = []
 
     if len(tool_calls) == 1:
@@ -631,24 +639,25 @@ def _execute_tools(
         if progress_callback:
             progress_callback(stream_event("tool_start", step=step, tool=tc.name))
         timeout_triggered = False
-        if tool_wait_timeout_seconds and tool_wait_timeout_seconds > 0:
+        effective_timeout = _timeout_for(tc)
+        if effective_timeout and effective_timeout > 0:
             pool = ThreadPoolExecutor(max_workers=1)
             ctx = contextvars.copy_context()
             try:
                 future = pool.submit(ctx.run, _exec_single, tc)
                 try:
-                    _, result_str, success, dur, cached, guard_result = future.result(timeout=tool_wait_timeout_seconds)
+                    _, result_str, success, dur, cached, guard_result = future.result(timeout=effective_timeout)
                 except FuturesTimeoutError:
                     timeout_triggered = True
                     future.cancel()
-                    timeout_label = f"{tool_wait_timeout_seconds:.2f}s"
+                    timeout_label = f"{effective_timeout:.2f}s"
                     logger.warning("Tool '%s' timed out after %s at step %d", tc.name, timeout_label, step)
                     result_str = json.dumps({
                         "error": f"Tool execution timed out after {timeout_label}",
                         "timeout": True,
                     })
                     success = False
-                    dur = round(tool_wait_timeout_seconds, 2)
+                    dur = round(effective_timeout, 2)
                     cached = False
                     guard_result = None
             finally:
@@ -662,7 +671,7 @@ def _execute_tools(
             "success": success, "duration": dur, "result_length": len(result_str),
             "cached": cached,
         }
-        if tool_wait_timeout_seconds and tool_wait_timeout_seconds > 0 and not success:
+        if effective_timeout and effective_timeout > 0 and not success:
             try:
                 if json.loads(result_str).get("timeout") is True:
                     log_entry["timeout"] = True
@@ -684,12 +693,16 @@ def _execute_tools(
 
         pool = ThreadPoolExecutor(max_workers=min(len(tool_calls), 5))
         timeout_triggered = False
+        batch_timeout = min(
+            [value for value in (_timeout_for(tc) for tc in tool_calls) if value and value > 0],
+            default=tool_wait_timeout_seconds,
+        )
         try:
             futures = {pool.submit(contextvars.copy_context().run, _exec_single, tc): tc for tc in tool_calls}
             pending = set(futures)
             for future in as_completed(
                 futures,
-                timeout=tool_wait_timeout_seconds if tool_wait_timeout_seconds and tool_wait_timeout_seconds > 0 else None,
+                timeout=batch_timeout if batch_timeout and batch_timeout > 0 else None,
             ):
                 pending.discard(future)
                 tc_item, result_str, success, dur, cached, guard_result = future.result()
@@ -712,8 +725,8 @@ def _execute_tools(
         except FuturesTimeoutError:
             timeout_triggered = True
             timeout_label = (
-                f"{tool_wait_timeout_seconds:.2f}s"
-                if tool_wait_timeout_seconds is not None
+                f"{batch_timeout:.2f}s"
+                if batch_timeout is not None
                 else "the configured limit"
             )
             logger.warning("Tool batch timed out after %s at step %d", timeout_label, step)
@@ -730,14 +743,14 @@ def _execute_tools(
                             step=step,
                             tool=tc_item.name,
                             success=False,
-                            duration=round(tool_wait_timeout_seconds or 0.0, 2),
+                            duration=round(batch_timeout or 0.0, 2),
                         ))
                     tool_calls_log.append({
                         "step": step,
                         "tool": tc_item.name,
                         "arguments": tc_item.arguments,
                         "success": False,
-                        "duration": round(tool_wait_timeout_seconds or 0.0, 2),
+                        "duration": round(batch_timeout or 0.0, 2),
                         "result_length": len(result_str),
                         "cached": False,
                         "timeout": True,

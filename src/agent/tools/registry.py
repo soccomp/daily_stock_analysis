@@ -172,8 +172,20 @@ class ToolRegistry:
         registry.execute("get_realtime_quote", stock_code="600519")
     """
 
-    def __init__(self):
+    def __init__(self, category_timeout_map: Optional[Dict[str, float]] = None):
         self._tools: Dict[str, ToolDefinition] = {}
+        self.category_timeout_map = {
+            str(category): float(timeout)
+            for category, timeout in (category_timeout_map or {}).items()
+            if isinstance(timeout, (int, float)) and float(timeout) > 0
+        }
+
+    def timeout_for(self, name: str) -> Optional[float]:
+        """Return the configured category ceiling for a tool, if any."""
+        tool = self.resolve(name)
+        if tool is None:
+            return None
+        return self.category_timeout_map.get(tool.category)
 
     # ----- Registration -----
 

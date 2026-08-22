@@ -103,6 +103,12 @@ class MarketOverview:
     bottom_sectors: List[Dict] = field(default_factory=list)  # 跌幅前5板块
     top_concepts: List[Dict] = field(default_factory=list)    # 涨幅前5概念
     bottom_concepts: List[Dict] = field(default_factory=list) # 跌幅前5概念
+    indices_data_status: str = "unknown"
+    breadth_data_status: str = "unknown"
+    sector_data_status: str = "unknown"
+    concept_data_status: str = "unknown"
+    source_failures: List[str] = field(default_factory=list)
+    fallback_sources: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -432,7 +438,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         overview = MarketOverview(date=today)
         
         # 1. 获取主要指数行情（按 region 切换 A 股/美股）
-        overview.indices = self._get_main_indices()
+        overview.indices = self._get_main_indices(overview)
 
         # 2. 获取涨跌统计（A 股有，美股无等效数据）
         if self.profile.has_market_stats:
@@ -449,7 +455,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         return overview
 
     
-    def _get_main_indices(self) -> List[MarketIndex]:
+    def _get_main_indices(self, overview: Optional[MarketOverview] = None) -> List[MarketIndex]:
         """获取主要指数实时行情"""
         indices = []
 
@@ -478,8 +484,12 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                     indices.append(index)
 
             if not indices:
+                if overview is not None:
+                    overview.indices_data_status = "unavailable"
                 logger.warning("[大盘] %s action=get_main_indices status=empty", self._log_context())
             else:
+                if overview is not None:
+                    overview.indices_data_status = "available"
                 logger.info(
                     "[大盘] %s action=get_main_indices status=success count=%d",
                     self._log_context(),
@@ -487,6 +497,9 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 )
 
         except Exception as e:
+            if overview is not None:
+                overview.indices_data_status = "failed"
+                overview.source_failures.append(f"indices:{type(e).__name__}")
             logger.error("[大盘] %s action=get_main_indices status=failed error=%s", self._log_context(), e)
 
         return indices
@@ -499,6 +512,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             stats = self.data_manager.get_market_stats(purpose=f"market_review:{self.region}")
 
             if stats:
+                overview.breadth_data_status = "available"
                 overview.up_count = stats.get('up_count', 0)
                 overview.down_count = stats.get('down_count', 0)
                 overview.flat_count = stats.get('flat_count', 0)
@@ -518,9 +532,12 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                     overview.total_amount,
                 )
             else:
+                overview.breadth_data_status = "unavailable"
                 logger.warning("[大盘] %s action=get_market_stats status=empty", self._log_context())
 
         except Exception as e:
+            overview.breadth_data_status = "failed"
+            overview.source_failures.append(f"breadth:{type(e).__name__}")
             logger.error("[大盘] %s action=get_market_stats status=failed error=%s", self._log_context(), e)
 
     def _get_sector_rankings(self, overview: MarketOverview):
@@ -531,6 +548,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             top_sectors, bottom_sectors = self.data_manager.get_sector_rankings(5)
 
             if top_sectors or bottom_sectors:
+                overview.sector_data_status = "available"
                 overview.top_sectors = top_sectors
                 overview.bottom_sectors = bottom_sectors
 
@@ -541,9 +559,12 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                     [s['name'] for s in overview.bottom_sectors],
                 )
             else:
+                overview.sector_data_status = "available_empty"
                 logger.warning("[大盘] %s action=get_sector_rankings status=empty", self._log_context())
 
         except Exception as e:
+            overview.sector_data_status = "failed"
+            overview.source_failures.append(f"sectors:{type(e).__name__}")
             logger.error("[大盘] %s action=get_sector_rankings status=failed error=%s", self._log_context(), e)
 
     def _get_concept_rankings(self, overview: MarketOverview):
@@ -554,6 +575,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             top_concepts, bottom_concepts = self.data_manager.get_concept_rankings(5)
 
             if top_concepts or bottom_concepts:
+                overview.concept_data_status = "available"
                 overview.top_concepts = top_concepts
                 overview.bottom_concepts = bottom_concepts
 
@@ -564,9 +586,12 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                     [s.get('name') for s in overview.bottom_concepts],
                 )
             else:
+                overview.concept_data_status = "available_empty"
                 logger.warning("[大盘] %s action=get_concept_rankings status=empty", self._log_context())
 
         except Exception as e:
+            overview.concept_data_status = "failed"
+            overview.source_failures.append(f"concepts:{type(e).__name__}")
             logger.warning("[大盘] %s action=get_concept_rankings status=failed error=%s", self._log_context(), e)
     
     # def _get_north_flow(self, overview: MarketOverview):
@@ -809,6 +834,28 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             "concepts": {
                 "top": list(overview.top_concepts or []),
                 "bottom": list(overview.bottom_concepts or []),
+                "data_status": overview.concept_data_status,
+            },
+            "data_quality": {
+                "indices": overview.indices_data_status,
+                "breadth": overview.breadth_data_status,
+                "sectors": overview.sector_data_status,
+                "concepts": overview.concept_data_status,
+                "requested_sources": ["indices", "breadth", "sectors", "concepts"],
+                "successful_sources": [
+                    name
+                    for name, status in (
+                        ("indices", overview.indices_data_status),
+                        ("breadth", overview.breadth_data_status),
+                        ("sectors", overview.sector_data_status),
+                        ("concepts", overview.concept_data_status),
+                    )
+                    if status.startswith("available")
+                ],
+                "failed_sources": list(overview.source_failures),
+                "source_failures": list(overview.source_failures),
+                "fallback_sources": list(overview.fallback_sources),
+                "status": "degraded" if overview.source_failures else "complete",
             },
             "news": [self._normalize_news_item(item) for item in (news or [])[:8]],
             "sections": sections,

@@ -15,7 +15,7 @@ import inspect
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 import uuid
 
 from src.config import get_config
@@ -35,6 +35,7 @@ from src.utils.market_review_region import (
     MARKET_REVIEW_REGION_ORDER,
     normalize_market_review_region_lenient,
 )
+from src.market_review_contract import build_market_context
 
 
 logger = logging.getLogger(__name__)
@@ -184,6 +185,7 @@ def run_market_review(
     save_report_file: bool = True,
     persist_history: bool = True,
     trigger_source: str = "cli",
+    progress_callback: Optional[Callable[..., Any]] = None,
 ) -> Optional[str] | Optional[MarketReviewRunResult]:
     """
     执行大盘复盘分析
@@ -221,6 +223,17 @@ def run_market_review(
         persist_region,
     )
 
+    def report_progress(progress: int, stage: str, message: str) -> None:
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(progress, stage, message)
+        except TypeError:
+            # Keep compatibility with existing two-argument pipeline callbacks.
+            progress_callback(progress, message)
+
+    report_progress(2, "PREPARING", "Preparing market review runtime")
+
     try:
         if len(run_markets) > 1:
             # 多市场顺序执行，合并报告
@@ -238,6 +251,7 @@ def run_market_review(
                     mkt,
                     label,
                 )
+                report_progress(10, "COLLECTING_INDICES", f"Collecting {label} indices")
                 mkt_analyzer = MarketAnalyzer(
                     search_service=search_service,
                     analyzer=analyzer,
@@ -245,6 +259,7 @@ def run_market_review(
                     config=runtime_config,
                 )
                 review_result = mkt_analyzer.run_daily_review_with_snapshot()
+                report_progress(42, "COLLECTING_BREADTH", f"Collecting {label} breadth")
                 mkt_report = review_result.report
                 _collect_market_light_snapshot(
                     market_light_snapshots,
@@ -256,6 +271,7 @@ def run_market_review(
                     region=mkt,
                     report=mkt_report,
                 )
+                report_progress(58, "COLLECTING_SECTORS_CONCEPTS", f"Collecting {label} sectors and concepts")
                 if mkt_report:
                     parts.append(f"{review_text[title_key]}\n\n{mkt_report}")
             if parts:
@@ -276,6 +292,7 @@ def run_market_review(
                 run_region,
                 label,
             )
+            report_progress(10, "COLLECTING_INDICES", f"Collecting {label} indices")
             market_analyzer = MarketAnalyzer(
                 search_service=search_service,
                 analyzer=analyzer,
@@ -283,6 +300,7 @@ def run_market_review(
                 config=runtime_config,
             )
             review_result = market_analyzer.run_daily_review_with_snapshot()
+            report_progress(42, "COLLECTING_BREADTH", f"Collecting {label} breadth")
             review_report = review_result.report
             market_light_snapshots = {}
             _collect_market_light_snapshot(
@@ -297,24 +315,29 @@ def run_market_review(
                     report=review_report,
                 )
             }
+            report_progress(58, "COLLECTING_SECTORS_CONCEPTS", f"Collecting {label} sectors and concepts")
         
         if review_report:
+            report_progress(70, "ASSEMBLING_CONTEXT", "Assembling structured market context")
             market_review_payload = _build_combined_market_review_payload(
                 review_report=review_report,
                 payloads=market_review_payloads,
                 region=persist_region,
                 language=getattr(runtime_config, "report_language", "zh"),
                 root_title=review_text["root_title"],
+                source_task_id=history_query_id,
             )
             markdown_report = _render_market_review_payload_markdown(
                 market_review_payload,
                 wrapper_title=review_text["root_title"],
             )
+            report_progress(82, "PARSING_VALIDATING", "Validating market review payload")
             merge_markdown_report = _render_market_review_merge_markdown(
                 market_review_payload,
                 review_report=review_report,
             )
             if save_report_file:
+                report_progress(90, "PERSISTENCE", "Saving market review report")
                 # 保存报告到文件
                 date_str = datetime.now().strftime('%Y%m%d')
                 report_filename = f"market_review_{date_str}.md"
@@ -322,6 +345,8 @@ def run_market_review(
                     markdown_report,
                     report_filename
                 )
+                if not filepath:
+                    raise RuntimeError("report_save_failed: notifier returned empty report path")
                 logger.info(
                     "[MarketReview] component=market_review action=save_report "
                     "trigger_source=%s query_id=%s region=%s path=%s",
@@ -332,6 +357,7 @@ def run_market_review(
                 )
 
             if persist_history:
+                report_progress(94, "PERSISTENCE", "Persisting market review history")
                 _persist_market_review_history(
                     review_report=review_report,
                     markdown_report=markdown_report,
@@ -432,6 +458,7 @@ def run_market_review(
                 )
             
             if return_structured:
+                report_progress(98, "DOWNSTREAM_HANDOFF", "Market review ready for downstream handoff")
                 return MarketReviewRunResult(
                     report=review_report,
                     market_review_payload=market_review_payload,
@@ -487,6 +514,7 @@ def _build_combined_market_review_payload(
     region: str,
     language: str,
     root_title: str,
+    source_task_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     normalized_language = normalize_report_language(language)
     title = root_title.lstrip("#").strip()
@@ -498,8 +526,13 @@ def _build_combined_market_review_payload(
         payload["language"] = payload.get("language") or normalized_language
         payload["root_title"] = title
         payload["markdown_report"] = review_report
+        payload["market_context"] = build_market_context(
+            payload,
+            task_id=source_task_id or "unknown",
+            market_review_id=source_task_id,
+        )
         return payload
-    return {
+    combined = {
         "version": 1,
         "kind": MARKET_REVIEW_REPORT_TYPE,
         "region": region,
@@ -509,6 +542,16 @@ def _build_combined_market_review_payload(
         "markets": payloads,
         "markdown_report": review_report,
     }
+    combined["market_context"] = {
+        market: build_market_context(
+            market_payload,
+            task_id=source_task_id or "unknown",
+            market_review_id=source_task_id,
+        )
+        for market, market_payload in payloads.items()
+        if isinstance(market_payload, dict)
+    }
+    return combined
 
 
 def _render_market_review_payload_markdown(

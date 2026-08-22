@@ -151,8 +151,11 @@ class ProposalHandoffLoopService:
         if not scopes:
             return ProposalHandoffRunResult(
                 cycle,
-                "FAILED_CLOSED",
-                blocked_reasons=("M2 research-object selector returned an empty scope",),
+                "NO_ACTION",
+                blocked_reasons=(
+                    "candidate_count=0; outcome=NO_ACTION; "
+                    "reason=no candidate satisfied strategy-evidence threshold",
+                ),
             )
         for scope in scopes:
             symbol = scope["symbol"]

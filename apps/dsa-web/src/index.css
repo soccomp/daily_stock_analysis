@@ -1187,6 +1187,19 @@ textarea {
   box-shadow: var(--shadow-soft-card);
 }
 
+/* The nested ScrollArea viewport is the only vertical mobile scroll owner. */
+.home-stock-scroll-shell,
+.glass-card.home-stock-scroll-shell {
+  overflow: visible;
+}
+
+@media (min-width: 48rem) {
+  .home-stock-scroll-shell,
+  .glass-card.home-stock-scroll-shell {
+    overflow: hidden;
+  }
+}
+
 .glass-card::before {
   content: "";
   position: absolute;

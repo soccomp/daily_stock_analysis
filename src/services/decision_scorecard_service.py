@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from typing import Any, Optional, TYPE_CHECKING
 
 from src.investment.scorecard import SingleDecisionScorecard
@@ -117,12 +118,22 @@ class DecisionScorecardService:
         )
         summaries: list[tuple[datetime, str, dict[str, Any]]] = []
         for row in rows:
-            scorecard = SingleDecisionScorecard.from_json(row.payload_json)
-            if (
-                scorecard.decision_id != row.decision_id
-                or scorecard.scorecard_hash != row.payload_hash
-            ):
-                raise ValueError("persisted decision scorecard metadata mismatch")
+            try:
+                scorecard = SingleDecisionScorecard.from_json(row.payload_json)
+                if (
+                    scorecard.decision_id != row.decision_id
+                    or scorecard.scorecard_hash != row.payload_hash
+                ):
+                    raise ValueError("persisted decision scorecard metadata mismatch")
+            except Exception as exc:
+                # Historical rows are immutable evidence.  A schema/version or
+                # hash incompatibility must be visible to the operator, but it
+                # must not make one bad row turn the whole read-only list into
+                # HTTP 500 or be silently rewritten as current.
+                summaries.append(
+                    (row.created_at, row.decision_id, self._invalid_summary(row, exc))
+                )
+                continue
             if source_report_id is not None and scorecard.source_report_id != source_report_id:
                 continue
             diagnostics = scorecard.execution_diagnostics
@@ -185,4 +196,49 @@ class DecisionScorecardService:
             "block_reason": None if latest_result is None else latest_result.block_reason,
             "broker_reason": None if latest_result is None else latest_result.broker_reason,
             "snapshot_b_available": scorecard.portfolio_snapshot_b is not None,
+            "integrity_status": "VALID",
+            "integrity_error": None,
+        }
+
+    @staticmethod
+    def _invalid_summary(row: Any, error: Exception) -> dict[str, Any]:
+        """Project an unverifiable immutable row without claiming validity."""
+        message = str(error)[:240] or error.__class__.__name__
+        try:
+            payload = json.loads(row.payload_json)
+        except Exception:
+            payload = {}
+        schema_version = payload.get("schema_version") if isinstance(payload, dict) else None
+        status = (
+            "LEGACY_UNVERIFIABLE"
+            if schema_version != "p1-scorecard-v1"
+            else "INTEGRITY_MISMATCH"
+        )
+        created_at = getattr(row, "created_at", None)
+        return {
+            "decision_id": row.decision_id,
+            "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at),
+            "source_report_id": 0,
+            "account_id": "UNKNOWN",
+            "symbol": row.symbol,
+            "market": "UNKNOWN",
+            "action": row.action,
+            "current_quantity": 0,
+            "target_quantity": 0,
+            "delta_quantity": 0,
+            "confidence": "UNKNOWN",
+            "rationale": "Historical scorecard requires compatibility review",
+            "mode": None,
+            "execution_status": None,
+            "reconciliation_status": None,
+            "requested_quantity": None,
+            "submitted_quantity": None,
+            "filled_quantity": None,
+            "remaining_quantity": None,
+            "average_fill_price": None,
+            "block_reason": None,
+            "broker_reason": None,
+            "snapshot_b_available": False,
+            "integrity_status": status,
+            "integrity_error": message,
         }

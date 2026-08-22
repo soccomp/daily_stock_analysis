@@ -135,13 +135,13 @@ class SingleBrainM2ReadinessService:
         """Read the durable proposal-handoff records without using M2 shadow data."""
 
         with self._db_manager.get_session() as session:
-            analysis = session.execute(
+            analysis = session.scalar(
                 select(AnalysisHistory)
                 .where(AnalysisHistory.query_id.like("m2-analysis-%"))
                 .order_by(desc(AnalysisHistory.created_at), desc(AnalysisHistory.id))
                 .limit(1)
-            ).scalar_one_or_none()
-            trigger = session.execute(
+            )
+            trigger = session.scalar(
                 select(ResearchTriggerLedgerRecord)
                 .where(ResearchTriggerLedgerRecord.processed_at.is_not(None))
                 .order_by(
@@ -149,7 +149,7 @@ class SingleBrainM2ReadinessService:
                     desc(ResearchTriggerLedgerRecord.created_at_ledger),
                 )
                 .limit(1)
-            ).scalar_one_or_none()
+            )
 
         projection = {
             "projection_scope": "PROPOSAL_HANDOFF",

@@ -26,6 +26,9 @@ class TaskStatusEnum(str, Enum):
     FAILED = "failed"
     CANCEL_REQUESTED = "cancel_requested"
     CANCELLED = "cancelled"
+    STALE = "stale"
+    INTERRUPTED = "interrupted"
+    FAILED_RECOVERABLE = "failed_recoverable"
 
 
 AnalysisPhase = Literal["auto", "premarket", "intraday", "postmarket"]
@@ -320,6 +323,12 @@ class TaskStatus(BaseModel):
         None,
         description="大盘复盘任务实际执行的 canonical 市场范围",
     )
+    stage: str = Field("QUEUED", description="当前语义阶段")
+    stage_message: Optional[str] = Field(None, description="当前阶段说明")
+    updated_at: Optional[str] = Field(None, description="最近状态更新时间")
+    heartbeat_at: Optional[str] = Field(None, description="最近 worker heartbeat")
+    worker_id: Optional[str] = Field(None, description="worker/execution identity")
+    execution_id: Optional[str] = Field(None, description="单次执行 identity")
     error: Optional[str] = Field(
         None, 
         description="错误信息（仅在 failed 时存在）"
@@ -385,6 +394,12 @@ class TaskInfo(BaseModel):
         None,
         description="大盘复盘任务实际执行的 canonical 市场范围",
     )
+    stage: str = Field("QUEUED", description="当前语义阶段")
+    stage_message: Optional[str] = Field(None, description="当前阶段说明")
+    updated_at: Optional[str] = Field(None, description="最近状态更新时间")
+    heartbeat_at: Optional[str] = Field(None, description="最近 worker heartbeat")
+    worker_id: Optional[str] = Field(None, description="worker/execution identity")
+    execution_id: Optional[str] = Field(None, description="单次执行 identity")
     
     model_config = ConfigDict(json_schema_extra={
         "example": {

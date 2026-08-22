@@ -1396,7 +1396,7 @@ const HomePage: React.FC<HomePageProps> = ({ initialMode = 'overview' }) => {
           onHistoryItemClick={handleHistoryItemClick}
           onDeleteStock={handleDeleteStock}
           isDeleting={isDeletingStock}
-          className="flex-1 overflow-hidden"
+          className="flex-1"
         />
       </div>
     ),

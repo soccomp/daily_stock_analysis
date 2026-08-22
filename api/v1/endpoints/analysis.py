@@ -156,6 +156,12 @@ def _run_market_review_background(
         }
         if query_id:
             review_kwargs["query_id"] = query_id
+            review_kwargs["progress_callback"] = lambda progress, stage, message: get_task_queue().update_task_stage(
+                query_id,
+                stage,
+                message,
+                progress=progress,
+            )
         logger.info(
             "[MarketReview] component=market_review action=background_start "
             "trigger_source=api task_id=%s region=%s",
@@ -646,6 +652,12 @@ def get_task_list(
             analysis_phase=t.analysis_phase,
             skills=getattr(t, "skills", None),
             region=t.region,
+            stage=getattr(t, "stage", "QUEUED"),
+            stage_message=getattr(t, "stage_message", None),
+            updated_at=(getattr(t, "updated_at", None).isoformat() if getattr(t, "updated_at", None) else None),
+            heartbeat_at=(getattr(t, "heartbeat_at", None).isoformat() if getattr(t, "heartbeat_at", None) else None),
+            worker_id=getattr(t, "worker_id", None),
+            execution_id=getattr(t, "execution_id", None),
         )
         for t in all_tasks
     ]
@@ -1088,6 +1100,12 @@ def get_analysis_status(task_id: str) -> TaskStatus:
             selection_source=task.selection_source,
             analysis_phase=task.analysis_phase,
             skills=getattr(task, "skills", None),
+            stage=getattr(task, "stage", "QUEUED"),
+            stage_message=getattr(task, "stage_message", None),
+            updated_at=(task.updated_at.isoformat() if getattr(task, "updated_at", None) else None),
+            heartbeat_at=(task.heartbeat_at.isoformat() if getattr(task, "heartbeat_at", None) else None),
+            worker_id=getattr(task, "worker_id", None),
+            execution_id=getattr(task, "execution_id", None),
         )
     
     # 2. 从数据库查询已完成的记录

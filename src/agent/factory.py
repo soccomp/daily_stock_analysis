@@ -26,6 +26,7 @@ Usage::
 
 import copy
 import logging
+import math
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -37,6 +38,7 @@ logger = logging.getLogger(__name__)
 # Module-level caches
 # ---------------------------------------------------------------------------
 _TOOL_REGISTRY = None
+_CACHED_TOOL_TIMEOUTS = None
 _SKILL_MANAGER_PROTOTYPE = None
 # Sentinel used as initial value so None (i.e. no custom dir) compares as "changed"
 # on the very first call, forcing a build rather than accidentally skipping it.
@@ -190,10 +192,43 @@ def _should_use_legacy_default_prompt(
     return getattr(bull_trend_skill, "source", None) == "builtin"
 
 
-def get_tool_registry():
+def _category_timeout_map(config) -> dict[str, float]:
+    """Resolve opt-in per-category timeouts without trusting mock values."""
+    fields = {
+        "data": "agent_data_tool_timeout_s",
+        "search": "agent_search_tool_timeout_s",
+        "analysis": "agent_analysis_tool_timeout_s",
+        "action": "agent_action_tool_timeout_s",
+    }
+    result: dict[str, float] = {}
+    for category, field_name in fields.items():
+        raw = getattr(config, field_name, 0)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = 0.0
+        if math.isfinite(value) and value > 0:
+            result[category] = min(value, 3600.0)
+    # Market-data tools use the same network budget as data tools.
+    if "data" in result:
+        result["market"] = result["data"]
+    return result
+
+
+def reset_tool_registry() -> None:
+    global _TOOL_REGISTRY, _CACHED_TOOL_TIMEOUTS
+    _TOOL_REGISTRY = None
+    _CACHED_TOOL_TIMEOUTS = None
+
+
+def get_tool_registry(config=None):
     """Return a cached ToolRegistry (built once, shared across requests)."""
-    global _TOOL_REGISTRY
-    if _TOOL_REGISTRY is not None:
+    global _TOOL_REGISTRY, _CACHED_TOOL_TIMEOUTS
+    if config is None:
+        from src.config import get_config
+        config = get_config()
+    timeout_map = _category_timeout_map(config)
+    if _TOOL_REGISTRY is not None and _CACHED_TOOL_TIMEOUTS == timeout_map:
         return _TOOL_REGISTRY
 
     from src.agent.tools.registry import ToolRegistry
@@ -203,11 +238,12 @@ def get_tool_registry():
     from src.agent.tools.market_tools import ALL_MARKET_TOOLS
     from src.agent.tools.backtest_tools import ALL_BACKTEST_TOOLS
 
-    registry = ToolRegistry()
+    registry = ToolRegistry(category_timeout_map=timeout_map)
     for tool_fn in ALL_DATA_TOOLS + ALL_ANALYSIS_TOOLS + ALL_SEARCH_TOOLS + ALL_MARKET_TOOLS + ALL_BACKTEST_TOOLS:
         registry.register(tool_fn)
 
     _TOOL_REGISTRY = registry
+    _CACHED_TOOL_TIMEOUTS = timeout_map
     logger.info("[AgentFactory] ToolRegistry cached (%d tools)", len(registry._tools) if hasattr(registry, "_tools") else -1)
     return _TOOL_REGISTRY
 
@@ -336,7 +372,7 @@ def build_agent_executor(config=None, skills: Optional[List[str]] = None):
 
     from src.agent.llm_adapter import LLMToolAdapter
 
-    registry = get_tool_registry()
+    registry = get_tool_registry(config)
     prompt_state = resolve_skill_prompt_state(config, skills=skills)
     skill_manager = prompt_state.skill_manager
     logger.info(
@@ -406,7 +442,7 @@ def build_agent_chat_executor(config=None, skills: Optional[List[str]] = None):
     if backend_id == "litellm" and arch == "multi":
         return build_agent_executor(config, skills=skills)
 
-    registry = get_tool_registry()
+    registry = get_tool_registry(config)
     prompt_state = resolve_skill_prompt_state(config, skills=skills)
     if backend_id == "litellm":
         from src.agent.llm_adapter import LLMToolAdapter
