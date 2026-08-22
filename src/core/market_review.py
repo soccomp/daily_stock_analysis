@@ -251,15 +251,14 @@ def run_market_review(
                     mkt,
                     label,
                 )
-                report_progress(10, "COLLECTING_INDICES", f"Collecting {label} indices")
                 mkt_analyzer = MarketAnalyzer(
                     search_service=search_service,
                     analyzer=analyzer,
                     region=mkt,
                     config=runtime_config,
+                    progress_callback=report_progress,
                 )
                 review_result = mkt_analyzer.run_daily_review_with_snapshot()
-                report_progress(42, "COLLECTING_BREADTH", f"Collecting {label} breadth")
                 mkt_report = review_result.report
                 _collect_market_light_snapshot(
                     market_light_snapshots,
@@ -271,7 +270,6 @@ def run_market_review(
                     region=mkt,
                     report=mkt_report,
                 )
-                report_progress(58, "COLLECTING_SECTORS_CONCEPTS", f"Collecting {label} sectors and concepts")
                 if mkt_report:
                     parts.append(f"{review_text[title_key]}\n\n{mkt_report}")
             if parts:
@@ -292,15 +290,14 @@ def run_market_review(
                 run_region,
                 label,
             )
-            report_progress(10, "COLLECTING_INDICES", f"Collecting {label} indices")
             market_analyzer = MarketAnalyzer(
                 search_service=search_service,
                 analyzer=analyzer,
                 region=run_region,
                 config=runtime_config,
+                progress_callback=report_progress,
             )
             review_result = market_analyzer.run_daily_review_with_snapshot()
-            report_progress(42, "COLLECTING_BREADTH", f"Collecting {label} breadth")
             review_report = review_result.report
             market_light_snapshots = {}
             _collect_market_light_snapshot(
@@ -315,7 +312,6 @@ def run_market_review(
                     report=review_report,
                 )
             }
-            report_progress(58, "COLLECTING_SECTORS_CONCEPTS", f"Collecting {label} sectors and concepts")
         
         if review_report:
             report_progress(70, "ASSEMBLING_CONTEXT", "Assembling structured market context")

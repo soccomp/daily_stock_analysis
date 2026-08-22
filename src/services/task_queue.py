@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import logging
 import os
 import threading
@@ -23,6 +24,7 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Optional, Dict, List, Any, TYPE_CHECKING, Tuple, Literal, Callable
 
 if TYPE_CHECKING:
@@ -38,6 +40,15 @@ from src.utils.analysis_metadata import SELECTION_SOURCES
 from src.services.stock_code_utils import resolve_index_stock_code_for_analysis
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_task_datetime(value: Any, fallback: Optional[datetime] = None) -> datetime:
+    if not value:
+        return fallback or datetime.now()
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+    except (TypeError, ValueError):
+        return fallback or datetime.now()
 
 
 def _dedupe_stock_code_key(stock_code: str) -> str:
@@ -241,7 +252,11 @@ class AnalysisTaskQueue:
         # 任务历史保留数量（内存中）
         self._max_history = 100
         self._max_flow_events_per_task = 200
-        
+        self._state_path = Path(
+            os.environ.get("DSA_TASK_QUEUE_STATE_PATH", "data/task_queue_state.json")
+        )
+        self._load_persisted_tasks()
+
         self._initialized = True
         logger.info(f"[TaskQueue] 初始化完成，最大并发: {max_workers}")
     
@@ -316,6 +331,88 @@ class AnalysisTaskQueue:
         if log:
             logger.info("[TaskQueue] 最大并发已更新: %s -> %s", previous, target)
         return "applied"
+
+    def _persist_tasks_locked(self) -> None:
+        """Persist lifecycle metadata so restart reconciliation has an input."""
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = []
+            for task in self._tasks.values():
+                item = task.to_dict()
+                item["_query_source"] = task.query_source
+                payload.append(item)
+            temporary = self._state_path.with_suffix(self._state_path.suffix + ".tmp")
+            temporary.write_text(
+                json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+            )
+            temporary.replace(self._state_path)
+        except Exception as exc:  # diagnostics must not break task execution
+            logger.warning("[TaskQueue] 持久化任务状态失败: %s", exc)
+
+    def _load_persisted_tasks(self) -> None:
+        """Restore task identity/dedupe metadata before startup reconciliation."""
+        try:
+            if not self._state_path.exists():
+                return
+            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, list):
+                return
+            for item in payload:
+                if not isinstance(item, dict) or not item.get("task_id") or not item.get("stock_code"):
+                    continue
+                try:
+                    status = TaskStatus(item.get("status", TaskStatus.FAILED.value))
+                except ValueError:
+                    continue
+                created_at = _parse_task_datetime(item.get("created_at"))
+                task = TaskInfo(
+                    task_id=str(item["task_id"]),
+                    trace_id=item.get("trace_id"),
+                    stock_code=str(item["stock_code"]),
+                    stock_name=item.get("stock_name"),
+                    status=status,
+                    progress=int(item.get("progress") or 0),
+                    message=item.get("message"),
+                    error=item.get("error"),
+                    report_type=item.get("report_type") or "detailed",
+                    analysis_phase=item.get("analysis_phase") or "auto",
+                    created_at=created_at,
+                    started_at=_parse_task_datetime(item.get("started_at"), None) if item.get("started_at") else None,
+                    completed_at=_parse_task_datetime(item.get("completed_at"), None) if item.get("completed_at") else None,
+                    original_query=item.get("original_query"),
+                    selection_source=item.get("selection_source"),
+                    query_source=item.get("query_source") or item.get("_query_source") or "api",
+                    skills=item.get("skills"),
+                    region=item.get("region"),
+                    stage=item.get("stage") or "QUEUED",
+                    stage_message=item.get("stage_message"),
+                    updated_at=_parse_task_datetime(item.get("updated_at"), created_at),
+                    heartbeat_at=_parse_task_datetime(item.get("heartbeat_at"), None) if item.get("heartbeat_at") else None,
+                    worker_id=item.get("worker_id"),
+                    execution_id=item.get("execution_id"),
+                )
+                self._tasks[task.task_id] = task
+                if status in (TaskStatus.PENDING, TaskStatus.PROCESSING):
+                    self._analyzing_stocks[_dedupe_stock_code_key(task.stock_code)] = task.task_id
+        except Exception as exc:
+            logger.warning("[TaskQueue] 恢复任务状态失败: %s", exc)
+
+    def _start_task_heartbeat(self, task_id: str) -> tuple[threading.Event, threading.Thread]:
+        stop = threading.Event()
+        interval = max(0.5, float(os.environ.get("DSA_TASK_HEARTBEAT_INTERVAL_SECONDS", "5")))
+
+        def refresh() -> None:
+            while not stop.wait(interval):
+                if self.heartbeat_task(task_id) is None:
+                    return
+
+        thread = threading.Thread(
+            target=refresh,
+            name=f"task-heartbeat-{task_id[:8]}",
+            daemon=True,
+        )
+        thread.start()
+        return stop, thread
     
     # ========== 任务提交与查询 ==========
     
@@ -501,6 +598,8 @@ class AnalysisTaskQueue:
                 created_task_ids.append(task_id)
                 logger.info(f"[TaskQueue] 任务已提交: {stock_code} -> {task_id}")
 
+            self._persist_tasks_locked()
+
             # Keep task_created ordered before worker-emitted task_started/task_completed.
             # Broadcasting here also preserves batch rollback semantics because we only
             # reach this point after every submit in the batch has succeeded.
@@ -553,6 +652,7 @@ class AnalysisTaskQueue:
                 raise
 
             self._futures[task_id] = future
+            self._persist_tasks_locked()
             self._broadcast_event("task_created", task_info.to_dict())
 
         return task_info.copy()
@@ -569,6 +669,7 @@ class AnalysisTaskQueue:
                 dedupe_key = _dedupe_stock_code_key(task.stock_code)
                 if self._analyzing_stocks.get(dedupe_key) == task_id:
                     del self._analyzing_stocks[dedupe_key]
+        self._persist_tasks_locked()
     
     def get_task(self, task_id: str) -> Optional[TaskInfo]:
         """
@@ -608,6 +709,7 @@ class AnalysisTaskQueue:
             if len(task.flow_events) > self._max_flow_events_per_task:
                 task.flow_events = task.flow_events[-self._max_flow_events_per_task:]
             task_snapshot = task.copy()
+            self._persist_tasks_locked()
 
         payload = task_snapshot.to_dict()
         payload["flow_event"] = event_payload
@@ -709,6 +811,7 @@ class AnalysisTaskQueue:
                 return task.copy()
 
             task_snapshot = task.copy()
+            self._persist_tasks_locked()
 
         self._broadcast_event(event_type, task_snapshot.to_dict())
         return task_snapshot
@@ -741,6 +844,7 @@ class AnalysisTaskQueue:
             task.updated_at = now
             task.heartbeat_at = now
             task_snapshot = task.copy()
+            self._persist_tasks_locked()
         self._broadcast_event("task_progress", task_snapshot.to_dict())
         return task_snapshot
 
@@ -757,6 +861,7 @@ class AnalysisTaskQueue:
                 task.stage_message = stage_message
                 task.message = stage_message
             task_snapshot = task.copy()
+            self._persist_tasks_locked()
         self._broadcast_event("heartbeat", task_snapshot.to_dict())
         return task_snapshot
 
@@ -771,7 +876,7 @@ class AnalysisTaskQueue:
                 heartbeat = task.heartbeat_at or task.updated_at or task.created_at
                 age = (current - heartbeat).total_seconds()
                 future = self._futures.get(task.task_id)
-                if age <= max(1.0, float(timeout_seconds)) and not (future is not None and future.done()):
+                if future is not None and not future.done() and age <= max(1.0, float(timeout_seconds)):
                     continue
                 task.status = TaskStatus.STALE
                 task.error = "task heartbeat expired or worker exited"
@@ -783,6 +888,7 @@ class AnalysisTaskQueue:
                 if self._analyzing_stocks.get(dedupe_key) == task.task_id:
                     del self._analyzing_stocks[dedupe_key]
                 stale.append(task.copy())
+            self._persist_tasks_locked()
         for task in stale:
             self._broadcast_event("task_failed", task.to_dict())
         return stale
@@ -829,8 +935,10 @@ class AnalysisTaskQueue:
             task.updated_at = task.started_at
             task.heartbeat_at = task.started_at
             task.worker_id = f"{os.getpid()}:{threading.current_thread().name}"
+            self._persist_tasks_locked()
         
         self._broadcast_event("task_started", task.to_dict())
+        heartbeat_stop, heartbeat_thread = self._start_task_heartbeat(task_id)
         
         try:
             # 导入分析服务（延迟导入避免循环依赖）
@@ -889,6 +997,7 @@ class AnalysisTaskQueue:
                         dedupe_key = _dedupe_stock_code_key(task.stock_code)
                         if dedupe_key in self._analyzing_stocks:
                             del self._analyzing_stocks[dedupe_key]
+                        self._persist_tasks_locked()
                 
                 self._broadcast_event("task_completed", task.to_dict())
                 logger.info(f"[TaskQueue] 任务完成: {task_id} ({stock_code})")
@@ -922,6 +1031,7 @@ class AnalysisTaskQueue:
                     dedupe_key = _dedupe_stock_code_key(task.stock_code)
                     if dedupe_key in self._analyzing_stocks:
                         del self._analyzing_stocks[dedupe_key]
+                    self._persist_tasks_locked()
             
             self._broadcast_event("task_failed", task.to_dict())
             
@@ -929,6 +1039,9 @@ class AnalysisTaskQueue:
             self._cleanup_old_tasks()
             
             return None
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=1)
 
     def _execute_background_task(
         self,
@@ -960,7 +1073,10 @@ class AnalysisTaskQueue:
             task.updated_at = task.started_at
             task.heartbeat_at = task.started_at
             task.worker_id = f"{os.getpid()}:{threading.current_thread().name}"
+            self._persist_tasks_locked()
             self._broadcast_event("task_started", task.to_dict())
+
+        heartbeat_stop, heartbeat_thread = self._start_task_heartbeat(task_id)
 
         try:
             diag_token = None
@@ -992,6 +1108,7 @@ class AnalysisTaskQueue:
                     task.stage_message = task.message
                     task.updated_at = task.completed_at
                     task.heartbeat_at = task.completed_at
+                    self._persist_tasks_locked()
 
             self._broadcast_event("task_completed", task.to_dict())
             logger.info(f"[TaskQueue] 自定义任务完成: {task_id}")
@@ -1015,12 +1132,16 @@ class AnalysisTaskQueue:
                     task.stage_message = task.message
                     task.updated_at = task.completed_at
                     task.heartbeat_at = task.completed_at
+                    self._persist_tasks_locked()
 
             if task:
                 self._broadcast_event("task_failed", task.to_dict())
 
             self._cleanup_old_tasks()
             return None
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=1)
     
     def _cleanup_old_tasks(self) -> int:
         """
@@ -1053,6 +1174,7 @@ class AnalysisTaskQueue:
             
             if removed > 0:
                 logger.debug(f"[TaskQueue] 清理了 {removed} 个过期任务")
+                self._persist_tasks_locked()
             
             return removed
     
@@ -1128,6 +1250,8 @@ class AnalysisTaskQueue:
     
     def shutdown(self) -> None:
         """关闭任务队列"""
+        with self._data_lock:
+            self._persist_tasks_locked()
         if self._executor:
             self._executor.shutdown(wait=True)
             self._executor = None
@@ -1152,5 +1276,13 @@ def get_task_queue() -> AnalysisTaskQueue:
         queue.sync_max_workers(target_workers, log=False)
     except Exception as exc:
         logger.debug("[TaskQueue] 读取 MAX_WORKERS 失败，使用当前并发设置: %s", exc)
+
+    try:
+        timeout = float(os.environ.get("DSA_TASK_HEARTBEAT_TIMEOUT_SECONDS", "300"))
+        reconciled = queue.reconcile_stale_tasks(timeout_seconds=timeout)
+        if reconciled:
+            logger.warning("[TaskQueue] 启动/运行态回收 %s 个失联任务", len(reconciled))
+    except Exception as exc:
+        logger.warning("[TaskQueue] 启动任务回收失败: %s", exc)
 
     return queue

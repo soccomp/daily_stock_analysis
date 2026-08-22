@@ -111,6 +111,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class PipelineRunError(RuntimeError):
+    """Explicit non-success outcome for scheduler/CLI callers."""
+
+    def __init__(self, outcome: str, message: str, *, partial_results: Optional[List[AnalysisResult]] = None):
+        self.outcome = outcome
+        self.partial_results = list(partial_results or [])
+        super().__init__(f"{outcome}: {message}")
+
+
 def _share_image_payload(result: Any) -> Optional[Dict[str, Any]]:
     """Return structured poster data when the result exposes the real contract."""
 
@@ -3354,7 +3363,10 @@ class StockAnalysisPipeline:
         
         if not stock_codes:
             logger.error("未配置自选股列表，请在 .env 文件中设置 STOCK_LIST")
-            return []
+            raise PipelineRunError(
+                "NO_STOCK_CODES",
+                "未配置自选股列表，请在 .env 文件中设置 STOCK_LIST",
+            )
         
         logger.info(f"===== 开始分析 {len(stock_codes)} 只股票 =====")
         logger.info(f"股票列表: {', '.join(stock_codes)}")
@@ -3473,6 +3485,13 @@ class StockAnalysisPipeline:
         else:
             success_count = len(results)
             fail_count = len(stock_codes) - success_count
+
+        if not dry_run and not results:
+            raise PipelineRunError(
+                "NO_REPORT",
+                f"本轮 {len(stock_codes)} 只股票均未生成可持久化报告",
+                partial_results=results,
+            )
         
         logger.info("===== 分析完成 =====")
         logger.info(f"成功: {success_count}, 失败: {fail_count}, 耗时: {elapsed_time:.2f} 秒")
@@ -3602,9 +3621,22 @@ class StockAnalysisPipeline:
         try:
             report = self._generate_aggregate_report(results, report_type)
             filepath = self.notifier.save_report_to_file(report)
+            if not filepath:
+                raise PipelineRunError(
+                    "REPORT_SAVE_FAILED",
+                    "通知服务未返回本地报告路径",
+                    partial_results=results,
+                )
             logger.info(f"决策仪表盘日报已保存: {filepath}")
+        except PipelineRunError:
+            raise
         except Exception as e:
             logger.error(f"保存本地报告失败: {e}")
+            raise PipelineRunError(
+                "REPORT_SAVE_FAILED",
+                str(e),
+                partial_results=results,
+            ) from e
 
     def _send_notifications(
         self,

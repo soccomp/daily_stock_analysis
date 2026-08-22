@@ -1712,6 +1712,92 @@ class TestAgentExecutor(unittest.TestCase):
         self.assertTrue(result.tool_calls_log[0].get("timeout"))
         self.assertEqual(result.tool_calls_log[0]["arguments"]["message"], "slow")
 
+    def test_timeout_result_is_non_retriable_and_suppresses_same_call(self):
+        calls = []
+        registry = ToolRegistry()
+
+        def _cooperative_slow(message):
+            from src.agent.tools.execution import check_tool_execution
+            calls.append(message)
+            for _ in range(20):
+                time.sleep(0.005)
+                check_tool_execution()
+            return {"echo": message}
+
+        registry.register(ToolDefinition(
+            name="echo",
+            description="Echoes back the input",
+            parameters=[ToolParameter(name="message", type="string", description="Message")],
+            handler=_cooperative_slow,
+        ))
+        adapter = _make_mock_adapter()
+        adapter.call_with_tools.side_effect = [
+            LLMResponse(content="", tool_calls=[ToolCall(id="q1", name="echo", arguments={"message": "same"})], usage={"total_tokens": 1}, provider="openai"),
+            LLMResponse(content="", tool_calls=[ToolCall(id="q2", name="echo", arguments={"message": "same"})], usage={"total_tokens": 1}, provider="openai"),
+            LLMResponse(content=json.dumps(SAMPLE_DASHBOARD), tool_calls=[], usage={"total_tokens": 1}, provider="openai"),
+        ]
+
+        result = run_agent_loop(
+            messages=[{"role": "system", "content": "system"}, {"role": "user", "content": "Analyze"}],
+            tool_registry=registry,
+            llm_adapter=adapter,
+            max_steps=4,
+            tool_call_timeout_seconds=0.02,
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(calls, ["same"])
+        timeout_result = json.loads(next(message for message in result.messages if message.get("role") == "tool")["content"])
+        self.assertFalse(timeout_result["retriable"])
+        self.assertTrue(result.tool_calls_log[1]["cached"])
+
+    def test_mixed_category_timeouts_do_not_kill_longer_tool(self):
+        registry = ToolRegistry({"data": 0.01, "analysis": 0.2})
+
+        def _category_tool(message):
+            if message == "short":
+                time.sleep(0.05)
+            else:
+                time.sleep(0.04)
+            return {"echo": message}
+
+        registry.register(ToolDefinition(
+            name="short_tool",
+            description="short category tool",
+            parameters=[ToolParameter(name="message", type="string", description="Message")],
+            handler=_category_tool,
+            category="data",
+        ))
+        registry.register(ToolDefinition(
+            name="long_tool",
+            description="long category tool",
+            parameters=[ToolParameter(name="message", type="string", description="Message")],
+            handler=_category_tool,
+            category="analysis",
+        ))
+        adapter = _make_mock_adapter()
+        adapter.call_with_tools.side_effect = [
+            LLMResponse(content="", tool_calls=[
+                ToolCall(id="short", name="short_tool", arguments={"message": "short"}),
+                ToolCall(id="long", name="long_tool", arguments={"message": "long"}),
+            ], usage={"total_tokens": 1}, provider="openai"),
+            LLMResponse(content=json.dumps(SAMPLE_DASHBOARD), tool_calls=[], usage={"total_tokens": 1}, provider="openai"),
+        ]
+
+        result = run_agent_loop(
+            messages=[{"role": "system", "content": "system"}, {"role": "user", "content": "Analyze"}],
+            tool_registry=registry,
+            llm_adapter=adapter,
+            max_steps=3,
+            tool_call_timeout_seconds=0.2,
+        )
+
+        self.assertTrue(result.success)
+        by_tool = {entry["tool"]: entry for entry in result.tool_calls_log}
+        self.assertTrue(by_tool["short_tool"]["timeout"])
+        self.assertFalse(by_tool["long_tool"].get("timeout", False))
+        self.assertTrue(by_tool["long_tool"]["success"])
+
     def test_llm_call_receives_remaining_timeout_budget(self):
         """LLM tool calls should receive the remaining wall-clock budget."""
         registry = _make_registry_with_echo()

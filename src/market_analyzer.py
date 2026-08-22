@@ -12,11 +12,12 @@
 
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from inspect import getattr_static
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable
 
 import pandas as pd
 
@@ -139,6 +140,8 @@ class MarketAnalyzer:
         analyzer=None,
         region: str = "cn",
         config: Optional[Any] = None,
+        progress_callback: Optional[Callable[[int, str, str], None]] = None,
+        heartbeat_interval_seconds: float = 5.0,
     ):
         """
         初始化大盘分析器
@@ -156,9 +159,43 @@ class MarketAnalyzer:
         self.region = region if region in ("cn", "us", "hk", "jp", "kr") else "cn"
         self.profile: MarketProfile = get_profile(self.region)
         self.strategy = get_market_strategy_blueprint(self.region)
+        self.progress_callback = progress_callback
+        self.heartbeat_interval_seconds = max(0.01, float(heartbeat_interval_seconds))
 
     def _log_context(self) -> str:
         return f"component=market_review region={self.region}"
+
+    def _emit_progress(self, progress: int, stage: str, message: str) -> None:
+        if getattr(self, "progress_callback", None) is None:
+            return
+        try:
+            self.progress_callback(progress, stage, message)
+        except TypeError:
+            self.progress_callback(progress, message)  # compatibility with old callers
+        except Exception as exc:
+            logger.debug("[大盘] progress callback failed: %s", exc)
+
+    def _run_stage(self, progress: int, stage: str, message: str, operation):
+        """Run one blocking stage while emitting truthful liveness heartbeats."""
+        self._emit_progress(progress, stage, message)
+        interval = max(0.01, float(getattr(self, "heartbeat_interval_seconds", 5.0)))
+        stop = threading.Event()
+
+        def heartbeat() -> None:
+            while not stop.wait(interval):
+                self._emit_progress(progress, stage, f"{message}（仍在进行）")
+
+        thread = threading.Thread(
+            target=heartbeat,
+            name=f"market-review-{stage.lower()}",
+            daemon=True,
+        )
+        thread.start()
+        try:
+            return operation()
+        finally:
+            stop.set()
+            thread.join(timeout=max(1.0, interval))
 
     def _get_output_language(self) -> str:
         """Return the truthful report language (zh/en/ko) for payload and directives."""
@@ -438,16 +475,33 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         overview = MarketOverview(date=today)
         
         # 1. 获取主要指数行情（按 region 切换 A 股/美股）
-        overview.indices = self._get_main_indices(overview)
+        overview.indices = self._run_stage(
+            10,
+            "COLLECTING_INDICES",
+            "Collecting market indices",
+            lambda: self._get_main_indices(overview),
+        )
 
         # 2. 获取涨跌统计（A 股有，美股无等效数据）
         if self.profile.has_market_stats:
-            self._get_market_statistics(overview)
+            self._run_stage(
+                30,
+                "COLLECTING_BREADTH",
+                "Collecting market breadth",
+                lambda: self._get_market_statistics(overview),
+            )
 
         # 3. 获取板块涨跌榜（A 股有，美股暂无）
         if self.profile.has_sector_rankings:
-            self._get_sector_rankings(overview)
-            self._get_concept_rankings(overview)
+            self._run_stage(
+                45,
+                "COLLECTING_SECTORS_CONCEPTS",
+                "Collecting sectors and concepts",
+                lambda: (
+                    self._get_sector_rankings(overview),
+                    self._get_concept_rankings(overview),
+                ),
+            )
         
         # 4. 获取北向资金（可选）
         # self._get_north_flow(overview)
@@ -642,35 +696,44 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             "kr": "韩国股市" if review_language == "zh" else "Korea stock market",
         }
         
+        self._emit_progress(60, "COLLECTING_NEWS", "Collecting market news")
         try:
-            logger.info("[大盘] %s action=search_market_news status=start", self._log_context())
-            
-            # 根据 region 设置搜索上下文名称，避免美股搜索被解读为 A 股语境
-            market_name = market_names.get(self.region, "大盘")
-            for query in search_queries:
-                response = self.search_service.search_stock_news(
-                    stock_code="market",
-                    stock_name=market_name,
-                    max_results=3,
-                    focus_keywords=query.split()
-                )
-                if response and response.results:
-                    all_news.extend(response.results)
-                    logger.info(
-                        "[大盘] %s action=search_market_news status=query_success count=%d",
-                        self._log_context(),
-                        len(response.results),
-                    )
-            
-            logger.info(
-                "[大盘] %s action=search_market_news status=success count=%d",
-                self._log_context(),
-                len(all_news),
-            )
-            
+            return self._run_stage(60, "COLLECTING_NEWS", "Collecting market news", self._search_market_news_impl)
         except Exception as e:
             logger.error("[大盘] %s action=search_market_news status=failed error=%s", self._log_context(), e)
-        
+            return all_news
+
+    def _search_market_news_impl(self) -> List[Dict]:
+        """Search news under a heartbeat scope; the public method keeps no-op semantics."""
+        all_news = []
+        search_queries = self.profile.news_queries
+        review_language = self._get_review_language()
+        market_names = {
+            "cn": "大盘" if review_language == "zh" else "A-share market",
+            "us": "美股市场" if review_language == "zh" else "US market",
+            "hk": "港股市场" if review_language == "zh" else "HK market",
+            "jp": "日本股市" if review_language == "zh" else "Japan stock market",
+            "kr": "韩国股市" if review_language == "zh" else "Korea stock market",
+        }
+        logger.info("[大盘] %s action=search_market_news status=start", self._log_context())
+        market_name = market_names.get(self.region, "大盘")
+        for query in search_queries:
+            response = self.search_service.search_stock_news(
+                stock_code="market",
+                stock_name=market_name,
+                max_results=3,
+                focus_keywords=query.split(),
+            )
+            if response and response.results:
+                all_news.extend(response.results)
+                logger.info(
+                    "[大盘] %s action=search_market_news status=query_success count=%d",
+                    self._log_context(), len(response.results),
+                )
+        logger.info(
+            "[大盘] %s action=search_market_news status=success count=%d",
+            self._log_context(), len(all_news),
+        )
         return all_news
     
     def generate_market_review(self, overview: MarketOverview, news: List) -> str:
@@ -716,12 +779,15 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         # Use the public generate_text() entry point - never access private analyzer attributes.
         llm_started_at = time.perf_counter()
         try:
-            record_llm_run_started(
-                provider="litellm",
-                model=getattr(self.config, "litellm_model", None),
-                call_type="market_review",
-            )
-            review = self.analyzer.generate_text(prompt, max_tokens=8192, temperature=0.7)
+            def call_llm():
+                record_llm_run_started(
+                    provider="litellm",
+                    model=getattr(self.config, "litellm_model", None),
+                    call_type="market_review",
+                )
+                return self.analyzer.generate_text(prompt, max_tokens=8192, temperature=0.7)
+
+            review = self._run_stage(75, "LLM_GENERATION", "Generating market review", call_llm)
         except Exception as exc:
             record_llm_run(
                 success=False,
@@ -745,6 +811,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         )
 
         if review:
+            self._emit_progress(84, "PARSING_VALIDATING", "Parsing and validating market review")
             logger.info(
                 "[大盘] %s action=generate_review status=success length=%d",
                 self._log_context(),
@@ -1856,10 +1923,12 @@ Market conditions can change quickly. The data above is for reference only and d
 
         # 2. 搜索市场新闻
         news = self.search_market_news()
+        self._emit_progress(68, "ASSEMBLING_CONTEXT", "Merging persisted market intelligence")
         news = self._merge_persisted_market_intelligence(news)
 
         # 3. 生成复盘报告
         report = self.generate_market_review(overview, news)
+        self._emit_progress(88, "PARSING_VALIDATING", "Building structured market review payload")
         snapshot = self.build_market_light_snapshot(overview) if self._supports_market_light() else None
         structured_payload = self.build_market_review_payload(
             overview,

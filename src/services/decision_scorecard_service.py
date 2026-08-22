@@ -118,6 +118,17 @@ class DecisionScorecardService:
         )
         summaries: list[tuple[datetime, str, dict[str, Any]]] = []
         for row in rows:
+            if source_report_id is not None or normalized_mode is not None:
+                try:
+                    raw_payload = json.loads(row.payload_json)
+                except Exception:
+                    raw_payload = {}
+                if source_report_id is not None and raw_payload.get("source_report_id") != source_report_id:
+                    continue
+                if normalized_mode is not None:
+                    raw_diagnostics = raw_payload.get("execution_diagnostics")
+                    if not isinstance(raw_diagnostics, dict) or raw_diagnostics.get("mode") != normalized_mode:
+                        continue
             try:
                 scorecard = SingleDecisionScorecard.from_json(row.payload_json)
                 if (

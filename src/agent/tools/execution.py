@@ -305,6 +305,8 @@ def execute_runner_tool_call(
     tool_registry: ToolRegistry,
     stock_scope: Any = None,
     non_retriable_tool_results: Optional[Dict[str, str]] = None,
+    cancel_event: Optional[threading.Event] = None,
+    deadline: Optional[float] = None,
 ) -> tuple[Any, str, bool, float, bool, Optional[Dict[str, Any]]]:
     """Execute a single tool call using the legacy runner semantics."""
     t0 = time.time()
@@ -333,16 +335,32 @@ def execute_runner_tool_call(
         )
         return tool_call, non_retriable_tool_results[cache_key], False, dur, True, None
 
+    context_token = bind_tool_execution_context(
+        ToolAccessContext(cancel_event=cancel_event, deadline=deadline)
+    )
     try:
+        check_tool_execution()
         res = tool_registry.execute(tool_call.name, **tool_call.arguments)
+        check_tool_execution()
         res_str = serialize_tool_result(res)
         ok = True
         if cache_key and non_retriable_tool_results is not None and _is_non_retriable_tool_result(res):
+            non_retriable_tool_results[cache_key] = res_str
+    except (ToolExecutionCancelled, ToolExecutionDeadlineExceeded) as e:
+        res_str = json.dumps({
+            "error": str(e),
+            "timeout": isinstance(e, ToolExecutionDeadlineExceeded),
+            "retriable": False,
+        })
+        ok = False
+        if cache_key and non_retriable_tool_results is not None:
             non_retriable_tool_results[cache_key] = res_str
     except Exception as e:
         res_str = json.dumps({"error": str(e)})
         ok = False
         logger.warning("Tool '%s' failed: %s", tool_call.name, e)
+    finally:
+        reset_tool_execution_context(context_token)
     dur = round(time.time() - t0, 2)
     return tool_call, res_str, ok, dur, False, None
 

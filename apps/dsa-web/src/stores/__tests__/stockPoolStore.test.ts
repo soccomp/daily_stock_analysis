@@ -1060,7 +1060,7 @@ describe('stockPoolStore', () => {
     await useStockPoolStore.getState().refreshActiveTasks();
 
     expect(analysisApi.getTasks).toHaveBeenCalledWith({
-      status: 'pending,processing,cancel_requested',
+      status: 'pending,processing,cancel_requested,stale,interrupted,failed_recoverable',
       limit: 100,
     });
     expect(useStockPoolStore.getState().activeTasks).toHaveLength(0);

@@ -1,9 +1,11 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+import time
 
 from src.market_review_contract import build_market_context, derive_market_strength, no_action_outcome
 from src.services.decision_scorecard_service import DecisionScorecardService
 from src.services.task_queue import AnalysisTaskQueue, TaskInfo, TaskStatus
+from src.market_analyzer import MarketAnalyzer
 
 
 def test_invalid_historical_scorecard_is_listed_without_rewrite():
@@ -61,6 +63,61 @@ def test_task_stage_is_monotonic_and_stale_reconciliation_is_explicit():
     assert stale[0].status is TaskStatus.STALE
     assert stale[0].task_id == task.task_id
     assert "heartbeat" in stale[0].error
+
+
+def test_restart_reconciles_persisted_processing_task_and_keeps_identity(tmp_path, monkeypatch):
+    state_path = tmp_path / "task-queue.json"
+    monkeypatch.setenv("DSA_TASK_QUEUE_STATE_PATH", str(state_path))
+    original = AnalysisTaskQueue._instance
+    try:
+        AnalysisTaskQueue._instance = None
+        first = AnalysisTaskQueue(max_workers=1)
+        task = TaskInfo(
+            task_id="restart-task-1",
+            trace_id="restart-trace-1",
+            stock_code="600519",
+            status=TaskStatus.PROCESSING,
+            stage="LLM_GENERATION",
+            execution_id="execution-1",
+            heartbeat_at=datetime.now() - timedelta(minutes=10),
+            updated_at=datetime.now() - timedelta(minutes=10),
+        )
+        first._tasks[task.task_id] = task
+        first._analyzing_stocks["600519"] = task.task_id
+        with first._data_lock:
+            first._persist_tasks_locked()
+
+        AnalysisTaskQueue._instance = None
+        restarted = AnalysisTaskQueue(max_workers=1)
+        recovered = restarted.get_task(task.task_id)
+        assert recovered is not None
+        assert recovered.task_id == "restart-task-1"
+        assert recovered.execution_id == "execution-1"
+        stale = restarted.reconcile_stale_tasks(timeout_seconds=60)
+        assert stale[0].task_id == "restart-task-1"
+        assert stale[0].status is TaskStatus.STALE
+        assert restarted.get_analyzing_task_id("600519") is None
+    finally:
+        AnalysisTaskQueue._instance = original
+
+
+def test_slow_market_review_stage_emits_liveness_without_fake_progress():
+    events = []
+    analyzer = object.__new__(MarketAnalyzer)
+    analyzer.progress_callback = lambda progress, stage, message: events.append(
+        (progress, stage, message)
+    )
+    analyzer.heartbeat_interval_seconds = 0.01
+
+    assert analyzer._run_stage(
+        75,
+        "LLM_GENERATION",
+        "Generating market review",
+        lambda: (time.sleep(0.05), "report")[1],
+    ) == "report"
+    assert events[0] == (75, "LLM_GENERATION", "Generating market review")
+    assert any("仍在进行" in message for _, _, message in events[1:])
+    assert all(progress == 75 and stage == "LLM_GENERATION" for progress, stage, _ in events)
 
 
 def test_market_context_strength_is_structured_and_no_action_is_durable():

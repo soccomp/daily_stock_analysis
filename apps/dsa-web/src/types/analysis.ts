@@ -457,7 +457,7 @@ export type AnalyzeResponse = AnalysisResult | AnalyzeAsyncResponse;
 export interface TaskStatus {
   taskId: string;
   traceId?: string;
-  status: 'pending' | 'processing' | 'completed' | 'failed' | 'cancel_requested' | 'cancelled';
+  status: 'pending' | 'processing' | 'completed' | 'failed' | 'cancel_requested' | 'cancelled' | 'stale' | 'interrupted' | 'failed_recoverable';
   progress?: number;
   result?: AnalysisResult;
   marketReviewReport?: string;
@@ -477,7 +477,7 @@ export interface TaskInfo {
   traceId?: string;
   stockCode: string;
   stockName?: string;
-  status: 'pending' | 'processing' | 'completed' | 'failed' | 'cancel_requested' | 'cancelled';
+  status: 'pending' | 'processing' | 'completed' | 'failed' | 'cancel_requested' | 'cancelled' | 'stale' | 'interrupted' | 'failed_recoverable';
   progress: number;
   message?: string;
   reportType: string;
@@ -490,6 +490,12 @@ export interface TaskInfo {
   analysisPhase?: AnalysisPhase;
   skills?: string[];
   region?: string;
+  stage?: string;
+  stageMessage?: string;
+  updatedAt?: string;
+  heartbeatAt?: string;
+  workerId?: string;
+  executionId?: string;
 }
 
 /** Task list response */

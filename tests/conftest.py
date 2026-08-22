@@ -17,6 +17,7 @@ import anyio.to_thread
 import fastapi.testclient
 import httpx
 import starlette.testclient
+import pytest
 from anyio._backends import _asyncio
 
 T = TypeVar("T")
@@ -249,3 +250,9 @@ class _ThreadlessTestClient:
 
 fastapi.testclient.TestClient = _ThreadlessTestClient
 starlette.testclient.TestClient = _ThreadlessTestClient
+
+
+@pytest.fixture(autouse=True)
+def isolate_task_queue_state_path(tmp_path, monkeypatch):
+    """Keep lifecycle-journal tests isolated; production keeps its configured path."""
+    monkeypatch.setenv("DSA_TASK_QUEUE_STATE_PATH", str(tmp_path / "task-queue-state.json"))

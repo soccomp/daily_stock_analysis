@@ -1102,7 +1102,7 @@ const HomePage: React.FC<HomePageProps> = ({ initialMode = 'overview' }) => {
   const activeTaskByCode = useMemo(() => {
     const tasksByCode = new Map<string, TaskInfo>();
     for (const task of activeTasks) {
-      if (!['pending', 'processing', 'cancel_requested'].includes(task.status)) {
+      if (!['pending', 'processing', 'cancel_requested', 'stale', 'interrupted', 'failed_recoverable'].includes(task.status)) {
         continue;
       }
       if (task.reportType === 'market_review') {

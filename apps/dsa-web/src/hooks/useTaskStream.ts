@@ -114,6 +114,12 @@ const toTaskInfo = (data: Record<string, unknown>): TaskInfo => {
     selectionSource: data.selection_source as string | undefined,
     analysisPhase: data.analysis_phase as TaskInfo['analysisPhase'],
     skills: Array.isArray(data.skills) ? data.skills.map(String) : undefined,
+    stage: data.stage as string | undefined,
+    stageMessage: data.stage_message as string | undefined,
+    updatedAt: data.updated_at as string | undefined,
+    heartbeatAt: data.heartbeat_at as string | undefined,
+    workerId: data.worker_id as string | undefined,
+    executionId: data.execution_id as string | undefined,
   };
 
   if (typeof data.trace_id === 'string' && data.trace_id.trim()) {

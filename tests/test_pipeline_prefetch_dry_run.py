@@ -28,6 +28,7 @@ class TestPipelinePrefetchBehavior(unittest.TestCase):
         pipeline.db = MagicMock()
         pipeline.db.has_today_data.return_value = False
         pipeline.process_single_stock = MagicMock(return_value=process_result)
+        pipeline._save_local_report = MagicMock()
         pipeline.config = SimpleNamespace(
             stock_list=["000001"],
             refresh_stock_list=lambda: None,
@@ -45,7 +46,7 @@ class TestPipelinePrefetchBehavior(unittest.TestCase):
         pipeline.fetcher_manager.prefetch_stock_names.assert_not_called()
 
     def test_run_non_dry_run_prefetches_stock_names(self):
-        pipeline = self._build_pipeline(process_result=SimpleNamespace(code="000001"))
+        pipeline = self._build_pipeline(process_result=SimpleNamespace(success=True, code="000001"))
 
         pipeline.run(stock_codes=["000001"], dry_run=False, send_notification=False)
 

@@ -24,13 +24,19 @@ const TaskItem: React.FC<TaskItemProps> = ({ task, onOpenRunFlow }) => {
   const isProcessing = task.status === 'processing';
   const isCancelRequested = task.status === 'cancel_requested';
   const isCancelled = task.status === 'cancelled';
+  const isRecoverable = task.status === 'stale'
+    || task.status === 'interrupted'
+    || task.status === 'failed_recoverable';
   const statusLabel = isCancelRequested
     ? t('taskPanel.cancelRequested')
     : isCancelled
       ? t('taskPanel.cancelled')
-      : isProcessing ? t('taskPanel.processing') : t('taskPanel.pending');
-  const statusVariant = isCancelRequested ? 'warning' : isProcessing ? 'info' : 'default';
-  const statusTone = isCancelRequested ? 'warning' : isProcessing ? 'info' : 'neutral';
+      : task.status === 'stale' ? t('taskPanel.stale')
+        : task.status === 'interrupted' ? t('taskPanel.interrupted')
+          : task.status === 'failed_recoverable' ? t('taskPanel.failedRecoverable')
+            : isProcessing ? t('taskPanel.processing') : t('taskPanel.pending');
+  const statusVariant = isCancelRequested || isRecoverable ? 'warning' : isProcessing ? 'info' : 'default';
+  const statusTone = isCancelRequested || isRecoverable ? 'warning' : isProcessing ? 'info' : 'neutral';
   const progress = Math.max(0, Math.min(100, task.progress || 0));
   const traceId = (task.traceId || '').trim();
   const requestedPhaseLabel = getRequestedPhaseLabel(task.analysisPhase, language);
@@ -100,6 +106,23 @@ const TaskItem: React.FC<TaskItemProps> = ({ task, onOpenRunFlow }) => {
           {task.message}
         </p>
       ) : null}
+
+      <div className="grid min-w-0 gap-1 text-[11px] text-muted-text" data-testid="task-panel-runtime-truth">
+        <span className="break-all font-mono" data-testid="task-panel-task-id">
+          {t('taskPanel.taskId')}: {task.taskId}
+        </span>
+        <span className="truncate" data-testid="task-panel-stage">
+          {t('taskPanel.stage')}: {task.stage || '-'}{task.stageMessage ? ` · ${task.stageMessage}` : ''}
+        </span>
+        <span className="truncate" data-testid="task-panel-heartbeat">
+          {t('taskPanel.heartbeat')}: {task.heartbeatAt || task.updatedAt || '-'}
+        </span>
+        {(task.workerId || task.executionId) ? (
+          <span className="break-all">
+            {t('taskPanel.worker')}: {task.workerId || '-'} · {t('taskPanel.execution')}: {task.executionId || '-'}
+          </span>
+        ) : null}
+      </div>
 
       {requestedPhaseLabel ? (
         <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -181,9 +204,14 @@ export const TaskPanel: React.FC<TaskPanelProps> = ({
   const { t } = useUiLanguage();
   const contentId = useId();
   const [internalCollapsed, setInternalCollapsed] = useState(false);
-  // 筛选活跃任务（pending / processing / cancel requested）
+  // 保留运行中与需要人工/受控恢复的任务，避免 stale/interrupted 从面板消失。
   const activeTasks = tasks.filter(
-    (t) => t.status === 'pending' || t.status === 'processing' || t.status === 'cancel_requested'
+    (t) => t.status === 'pending'
+      || t.status === 'processing'
+      || t.status === 'cancel_requested'
+      || t.status === 'stale'
+      || t.status === 'interrupted'
+      || t.status === 'failed_recoverable',
   );
   const isCollapsed = collapsed ?? internalCollapsed;
 
@@ -195,6 +223,9 @@ export const TaskPanel: React.FC<TaskPanelProps> = ({
   const pendingCount = activeTasks.filter((t) => t.status === 'pending').length;
   const processingCount = activeTasks.filter((t) => t.status === 'processing').length;
   const cancelRequestedCount = activeTasks.filter((t) => t.status === 'cancel_requested').length;
+  const recoverableCount = activeTasks.filter((t) => (
+    t.status === 'stale' || t.status === 'interrupted' || t.status === 'failed_recoverable'
+  )).length;
   const averageProgress = processingCount > 0
     ? Math.round(
       activeTasks
@@ -241,6 +272,12 @@ export const TaskPanel: React.FC<TaskPanelProps> = ({
                     {t('taskPanel.pendingTasks', { count: pendingCount })}
                   </span>
                 ) : null}
+                {recoverableCount > 0 ? (
+                  <span className="flex items-center gap-1">
+                    <StatusDot tone="warning" className="h-1.5 w-1.5" />
+                    {t('taskPanel.recoverableTasks', { count: recoverableCount })}
+                  </span>
+                ) : null}
               </div>
               <Button
                 type="button"
@@ -277,6 +314,9 @@ export const TaskPanel: React.FC<TaskPanelProps> = ({
             ) : null}
             {cancelRequestedCount > 0 ? (
               <span>{t('taskPanel.cancelRequestedTasks', { count: cancelRequestedCount })}</span>
+            ) : null}
+            {recoverableCount > 0 ? (
+              <span>{t('taskPanel.recoverableTasks', { count: recoverableCount })}</span>
             ) : null}
             {processingCount > 0 ? (
               <span>{t('taskPanel.averageProgress', { progress: averageProgress })}</span>

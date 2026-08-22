@@ -981,7 +981,7 @@ export const useStockPoolStore = create<StockPoolState>((set, get) => ({
     const localRevisionAtRequest = activeTaskLocalRevision;
     try {
       const response = await analysisApi.getTasks({
-        status: 'pending,processing,cancel_requested',
+        status: 'pending,processing,cancel_requested,stale,interrupted,failed_recoverable',
         limit: 100,
       });
       if (requestId !== activeTaskRequestSeq) {
@@ -995,7 +995,12 @@ export const useStockPoolStore = create<StockPoolState>((set, get) => ({
       const remoteTaskById = new Map(remoteTasks.map((task) => [task.taskId, task]));
       const activeTaskCount = response.pending
         + response.processing
-        + response.tasks.filter((task) => task.status === 'cancel_requested').length;
+        + response.tasks.filter((task) => (
+          task.status === 'cancel_requested'
+          || task.status === 'stale'
+          || task.status === 'interrupted'
+          || task.status === 'failed_recoverable'
+        )).length;
       const isCompleteSnapshot = response.tasks.length === activeTaskCount;
       const canPruneLocalTasks = isCompleteSnapshot && activeTaskLocalRevision === localRevisionAtRequest;
 

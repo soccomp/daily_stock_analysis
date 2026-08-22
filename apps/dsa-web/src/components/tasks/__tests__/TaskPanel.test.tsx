@@ -174,6 +174,30 @@ describe('TaskPanel', () => {
     expect(screen.queryByText('失败')).not.toBeInTheDocument();
   });
 
+  it('shows stale runtime truth and keeps recovery states visible', () => {
+    render(
+      <TaskPanel
+        tasks={[{
+          ...baseTask,
+          taskId: 'task-stale-25',
+          status: 'stale',
+          stage: 'LLM_GENERATION',
+          stageMessage: '等待 LLM 响应',
+          updatedAt: '2026-08-22T08:03:00Z',
+          heartbeatAt: '2026-08-22T08:02:59Z',
+          workerId: 'worker-1',
+          executionId: 'execution-1',
+        }]}
+      />,
+    );
+
+    expect(screen.getByText('已失联')).toBeInTheDocument();
+    expect(screen.getByTestId('task-panel-task-id')).toHaveTextContent('task-stale-25');
+    expect(screen.getByTestId('task-panel-stage')).toHaveTextContent('LLM_GENERATION');
+    expect(screen.getByTestId('task-panel-heartbeat')).toHaveTextContent('2026-08-22T08:02:59Z');
+    expect(screen.getByText(/worker-1/)).toBeInTheDocument();
+  });
+
   it('does not keep cancelled terminal tasks in the active task panel', () => {
     const { container } = render(
       <TaskPanel
