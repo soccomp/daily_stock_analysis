@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import subprocess
+import sys
 import time
 from statistics import median
 from typing import Any, Dict, Iterable, Optional
@@ -48,6 +51,64 @@ def _request_json(path: str, *, timeout: float) -> tuple[bool, Any, Optional[str
         return False, None, f"{type(exc).__name__}: {exc}", max(0, int((time.monotonic() - started) * 1000))
 
 
+def _process_health() -> Dict[str, Any]:
+    """Read coarse launchd/process health without persisting command lines."""
+    if sys.platform != "darwin":
+        return {"service_label": None, "status": "UNAVAILABLE", "reason": "PLATFORM_UNSUPPORTED"}
+    label = os.getenv("LLM_OMLX_LAUNCHD_LABEL", "com.athena.olmx").strip()
+    if not label:
+        return {"service_label": None, "status": "UNKNOWN", "reason": "SERVICE_LABEL_NOT_CONFIGURED"}
+    domain = f"gui/{os.getuid()}/{label}"
+    try:
+        result = subprocess.run(
+            ["launchctl", "print", domain],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"service_label": label, "status": "UNKNOWN", "reason": type(exc).__name__}
+    if result.returncode != 0:
+        return {"service_label": label, "status": "FAILED", "reason": "LAUNCHD_SERVICE_UNAVAILABLE"}
+    values: Dict[str, Any] = {"service_label": label, "status": "UNKNOWN"}
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("state ="):
+            values["state"] = stripped.split("=", 1)[1].strip()
+        elif stripped.startswith("pid ="):
+            try:
+                values["pid"] = int(stripped.split("=", 1)[1].strip())
+            except ValueError:
+                pass
+        elif stripped.startswith("runs ="):
+            try:
+                values["launchd_runs"] = int(stripped.split("=", 1)[1].strip())
+            except ValueError:
+                pass
+        elif stripped.startswith("last exit code ="):
+            values["last_exit_code"] = stripped.split("=", 1)[1].strip()
+    values["status"] = "HEALTHY" if values.get("state") in {"running", "active"} else "DEGRADED"
+    pid = values.get("pid")
+    if isinstance(pid, int) and pid > 0:
+        try:
+            ps = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "etime=,rss="],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            fields = ps.stdout.strip().split()
+            if fields:
+                values["uptime"] = fields[0]
+            if len(fields) > 1:
+                values["process_rss_kb"] = int(fields[1])
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    return values
+
+
 def probe_qwen_identity(*, timeout_seconds: float = 3.0) -> Dict[str, Any]:
     """Probe only local oMLX metadata; no generation and no trading path."""
     _load_runtime_env()
@@ -68,6 +129,7 @@ def probe_qwen_identity(*, timeout_seconds: float = 3.0) -> Dict[str, Any]:
         "failure_class": None,
         "error": None,
         "latency_ms": None,
+        "process": _process_health(),
     }
     if not enabled:
         result.update(success=None, reachable=None, usable=None, status="DISABLED")
@@ -95,7 +157,7 @@ def probe_qwen_identity(*, timeout_seconds: float = 3.0) -> Dict[str, Any]:
         success=True,
         reachable=True,
         usable=bool(exact and loaded_exact),
-        status="HEALTHY" if exact and loaded_exact else "DEGRADED",
+        status="HEALTHY" if exact and loaded_exact else "FAILED",
         model_ids=model_ids,
         loaded_model_ids=[item.get("id") for item in loaded],
         loaded_count=len(loaded),
@@ -107,7 +169,8 @@ def probe_qwen_identity(*, timeout_seconds: float = 3.0) -> Dict[str, Any]:
         max_tokens=(status_payload.get("max_tokens") if isinstance(status_payload, dict) else None) or loaded_exact_record.get("max_tokens"),
         identity_match=exact,
         loaded_identity_match=loaded_exact,
-        error=(models_error or status_error),
+        failure_class=None if exact and loaded_exact else "MODEL_IDENTITY_MISMATCH",
+        error=(models_error or status_error or (None if exact and loaded_exact else "EXPECTED_MODEL_NOT_LOADED")),
     )
     return result
 
@@ -117,15 +180,27 @@ def summarize_generation_metrics(samples: Iterable[Dict[str, Any]]) -> Dict[str,
     latencies = sorted(float(row["latency_ms"]) for row in rows if row.get("success") and row.get("latency_ms") is not None)
     successes = sum(1 for row in rows if row.get("success") is True)
     timeouts = sum(1 for row in rows if row.get("failure_class") in {"TIMEOUT", "READ_TIMEOUT"})
+    structured_successes = sum(1 for row in rows if row.get("success") is True and row.get("json_parse") is True)
+    empty_or_truncated = sum(
+        1 for row in rows if row.get("failure_class") in {"EMPTY_RESPONSE", "TRUNCATED_RESPONSE"}
+    )
+    p95_index = min(len(latencies) - 1, max(0, math.ceil(len(latencies) * 0.95) - 1)) if latencies else None
+    recommended_concurrency = 1 if not latencies or max(latencies) >= 30_000 else 2
+    operational_context = 16_384 if not latencies or max(latencies) >= 30_000 else 65_536
     return {
         "sample_count": len(rows),
         "success_count": successes,
         "success_rate": (successes / len(rows)) if rows else 0.0,
+        "structured_output_success_count": structured_successes,
+        "structured_output_success_rate": (structured_successes / len(rows)) if rows else 0.0,
         "timeout_count": timeouts,
+        "timeout_rate": (timeouts / len(rows)) if rows else 0.0,
+        "empty_or_truncated_count": empty_or_truncated,
         "p50_latency_ms": (median(latencies) if latencies else None),
-        "p95_latency_ms": (latencies[min(len(latencies) - 1, max(0, int(len(latencies) * 0.95) - 1))] if latencies else None),
-        "concurrency_limit": 1 if not latencies or (latencies and max(latencies) >= 30_000) else 2,
-        "max_operational_context": 16_384 if not latencies or (latencies and max(latencies) >= 30_000) else 65_536,
+        "p95_latency_ms": (latencies[p95_index] if p95_index is not None else None),
+        "concurrency_limit": recommended_concurrency,
+        "recommended_concurrency": recommended_concurrency,
+        "max_operational_context": operational_context,
         "status": "HEALTHY" if rows and successes == len(rows) else ("DEGRADED" if successes else "FAILED"),
     }
 

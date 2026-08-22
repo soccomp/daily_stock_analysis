@@ -40,6 +40,7 @@ CRITICAL_CATEGORIES = (
 _DEFAULT_PATH = Path(__file__).resolve().parents[2] / "runtime" / "dependency_health.json"
 _DEFAULT_INTERVAL_SECONDS = 300
 _MAX_TRANSITIONS = 300
+_MAX_ALERTS = 300
 
 
 def _now() -> datetime:
@@ -180,6 +181,7 @@ class DependencyHealthStore:
                 document.setdefault("dependencies", {})
                 document.setdefault("categories", {})
                 document.setdefault("transitions", [])
+                document.setdefault("alerts", [])
                 document.setdefault("monitor", self.monitor_config())
                 return document
         except (OSError, ValueError, TypeError):
@@ -190,6 +192,7 @@ class DependencyHealthStore:
             "dependencies": {},
             "categories": {},
             "transitions": [],
+            "alerts": [],
             "monitor": self.monitor_config(),
             "readiness": {
                 "AUTONOMOUS_SIMULATION_READINESS": READINESS_BLOCKED,
@@ -227,7 +230,7 @@ class DependencyHealthStore:
     def _record_transition_locked(self, previous: Mapping[str, Any], current: Mapping[str, Any]) -> None:
         old_status = previous.get("status")
         new_status = current.get("status")
-        if old_status == new_status:
+        if not previous or (old_status or UNKNOWN) == new_status:
             return
         previous_event = previous.get("last_transition_at")
         if previous_event:
@@ -244,8 +247,21 @@ class DependencyHealthStore:
             "fallback_from": current.get("fallback_from"),
             "fallback_to": current.get("fallback_to"),
         }
+        recovered = new_status == HEALTHY and old_status not in {None, HEALTHY}
+        critical_failure = (
+            current.get("category") in CRITICAL_CATEGORIES
+            and new_status in {FAILED, STALE, UNKNOWN}
+        )
+        event["alert_id"] = f"{current.get('dependency_id')}:{new_status}:{event['timestamp']}"
         self._document.setdefault("transitions", []).append(event)
         self._document["transitions"] = self._document["transitions"][-self.history_limit :]
+        self._document.setdefault("alerts", []).append({
+            **event,
+            "kind": "dependency_health_transition",
+            "severity": "info" if recovered else ("critical" if critical_failure else "warning"),
+            "recovery": recovered,
+        })
+        self._document["alerts"] = self._document["alerts"][-min(self.history_limit, _MAX_ALERTS) :]
 
     def record_result(
         self,
@@ -381,21 +397,51 @@ class DependencyHealthStore:
             return json.loads(json.dumps(self._document, ensure_ascii=False))
 
     def record_inventory(self, inventory: Iterable[Mapping[str, Any]]) -> None:
-        """Persist configured/disabled state without probing external services."""
-        for item in inventory:
-            self.record_result(
-                str(item.get("dependency_id") or item.get("name") or "unknown"),
-                category=str(item.get("category") or "UNKNOWN"),
-                configured=bool(item.get("configured", False)),
-                enabled=bool(item.get("enabled", False)),
-                role=str(item.get("role") or "AUXILIARY"),
-                priority=int(item.get("priority") or 99),
-                endpoint=item.get("endpoint"),
-                success=None,
-                reachable=None,
-                usable=None,
-                metadata=item,
-            )
+        """Persist configuration without replacing the last real observation.
+
+        Inventory refreshes are not provider probes.  A refresh must therefore
+        preserve the last real success/failure, latency and freshness evidence;
+        otherwise the monitor would turn every dependency into UNKNOWN before
+        a caller has a chance to report its next real request.
+        """
+        with self._lock:
+            dependencies = self._document.setdefault("dependencies", {})
+            for item in inventory:
+                dependency_id = _safe_text(item.get("dependency_id") or item.get("name"), 100) or "unknown"
+                category = _safe_text(item.get("category"), 80) or "UNKNOWN"
+                configured = bool(item.get("configured", False))
+                enabled = bool(item.get("enabled", False))
+                previous = dict(dependencies.get(dependency_id) or {})
+                current = {
+                    **previous,
+                    "dependency_id": dependency_id,
+                    "category": category,
+                    "configured": configured,
+                    "enabled": enabled,
+                    "role": _safe_text(item.get("role") or "AUXILIARY", 40) or "AUXILIARY",
+                    "priority": int(item.get("priority") or 99),
+                    "endpoint": _safe_endpoint(item.get("endpoint")),
+                    "metadata": {
+                        **(previous.get("metadata") if isinstance(previous.get("metadata"), dict) else {}),
+                        **_safe_metadata(item),
+                    },
+                }
+                if not configured or not enabled:
+                    current["status"] = DISABLED
+                    current["reachable"] = False
+                    current["usable"] = False
+                elif previous.get("status") == DISABLED:
+                    current["status"] = UNKNOWN
+                    current["reachable"] = None
+                    current["usable"] = None
+                else:
+                    current["status"] = previous.get("status") or UNKNOWN
+                if current.get("status") != previous.get("status") and previous:
+                    current["last_transition_at"] = _iso()
+                    self._record_transition_locked(previous, current)
+                dependencies[dependency_id] = current
+            self._rebuild_categories_locked()
+            self._persist_locked()
 
 
 def _env_configured(name: str) -> bool:
