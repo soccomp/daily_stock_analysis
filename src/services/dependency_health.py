@@ -39,6 +39,7 @@ CRITICAL_CATEGORIES = (
 
 _DEFAULT_PATH = Path(__file__).resolve().parents[2] / "runtime" / "dependency_health.json"
 _DEFAULT_INTERVAL_SECONDS = 300
+_DEFAULT_QWEN_GENERATION_TTL_SECONDS = 900
 _MAX_TRANSITIONS = 300
 _MAX_ALERTS = 300
 
@@ -154,6 +155,63 @@ def _category_status(items: Iterable[Mapping[str, Any]]) -> str:
     if FAILED in active:
         return FAILED
     return UNKNOWN
+
+
+def _qwen_combined_status(row: Mapping[str, Any]) -> str:
+    """Combine Qwen identity and generation without allowing metadata to heal generation."""
+    if row.get("configured") is False or row.get("enabled") is False:
+        return DISABLED
+    identity = row.get("identity")
+    generation = row.get("generation")
+    if not isinstance(identity, Mapping):
+        return str((generation or {}).get("status") or row.get("status") or UNKNOWN)
+    identity_status = str(identity.get("status") or UNKNOWN)
+    if identity_status != HEALTHY:
+        return identity_status
+    if not isinstance(generation, Mapping):
+        return UNKNOWN
+    generation_status = str(generation.get("status") or UNKNOWN)
+    if generation_status == HEALTHY:
+        expires_at = _parse_timestamp(generation.get("freshness_expires_at"))
+        if expires_at is not None and _now() >= expires_at:
+            return STALE
+    return generation_status
+
+
+def _qwen_observation_layer(
+    current: Mapping[str, Any],
+    previous: Mapping[str, Any],
+    *,
+    observation_kind: str,
+    freshness_ttl_seconds: Optional[int],
+) -> Dict[str, Any]:
+    """Keep a redacted, independently aging identity or generation observation."""
+    previous_layer = previous.get(observation_kind)
+    layer = {
+        key: current.get(key)
+        for key in (
+            "status", "configured", "enabled", "reachable", "usable", "last_attempt_at",
+            "last_success_at", "last_failure_at", "latency_ms", "records", "empty_valid",
+            "data_timestamp", "max_age_seconds", "failure_class", "last_error", "metadata",
+        )
+    }
+    if isinstance(previous_layer, Mapping):
+        for key, value in previous_layer.items():
+            if key not in {"metadata"} and value is not None and layer.get(key) is None:
+                layer[key] = value
+        layer["metadata"] = {
+            **(previous_layer.get("metadata") if isinstance(previous_layer.get("metadata"), dict) else {}),
+            **(layer.get("metadata") if isinstance(layer.get("metadata"), dict) else {}),
+        }
+        layer["observation_count"] = int(previous_layer.get("observation_count") or 0) + 1
+    else:
+        layer["observation_count"] = 1
+    if observation_kind == "generation" and current.get("status") == HEALTHY and freshness_ttl_seconds is not None:
+        expires_at = _now().timestamp() + max(0, int(freshness_ttl_seconds))
+        layer["freshness_expires_at"] = datetime.fromtimestamp(expires_at, timezone.utc).isoformat()
+    elif isinstance(previous_layer, Mapping):
+        layer["freshness_expires_at"] = previous_layer.get("freshness_expires_at")
+    return layer
 
 
 class DependencyHealthStore:
@@ -286,6 +344,8 @@ class DependencyHealthStore:
         fallback_from: Optional[str] = None,
         fallback_to: Optional[str] = None,
         metadata: Optional[Mapping[str, Any]] = None,
+        observation_kind: Optional[str] = None,
+        freshness_ttl_seconds: Optional[int] = None,
     ) -> Dict[str, Any]:
         dependency_id = _safe_text(dependency_id, 100) or "unknown"
         category = _safe_text(category, 80) or "UNKNOWN"
@@ -333,7 +393,38 @@ class DependencyHealthStore:
                     **_safe_metadata(metadata),
                 },
             }
-            if status != previous.get("status"):
+            if dependency_id == "qwen-omlx" and observation_kind in {"identity", "generation"}:
+                for other_kind in ("identity", "generation"):
+                    if other_kind != observation_kind and isinstance(previous.get(other_kind), Mapping):
+                        current[other_kind] = dict(previous[other_kind])
+                current[observation_kind] = _qwen_observation_layer(
+                    current,
+                    previous,
+                    observation_kind=observation_kind,
+                    freshness_ttl_seconds=(
+                        freshness_ttl_seconds
+                        if freshness_ttl_seconds is not None
+                        else int(os.getenv(
+                            "DSA_QWEN_GENERATION_HEALTH_TTL_SECONDS",
+                            str(_DEFAULT_QWEN_GENERATION_TTL_SECONDS),
+                        ))
+                    ),
+                )
+                current["identity_status"] = (current.get("identity") or {}).get("status")
+                current["generation_status"] = (current.get("generation") or {}).get("status")
+                current["generation_freshness_expires_at"] = (current.get("generation") or {}).get("freshness_expires_at")
+                current["status"] = _qwen_combined_status(current)
+                current["usable"] = current["status"] == HEALTHY
+                identity_layer = current.get("identity") or previous.get("identity") or {}
+                current["reachable"] = identity_layer.get("reachable", current.get("reachable"))
+                generation_layer = current.get("generation") or previous.get("generation") or {}
+                current["last_success_at"] = generation_layer.get("last_success_at")
+                current["last_failure_at"] = generation_layer.get("last_failure_at")
+                current["failure_class"] = generation_layer.get("failure_class") or (
+                    "GENERATION_HEALTH_EXPIRED" if current["status"] == STALE else None
+                )
+                current["last_error"] = generation_layer.get("last_error")
+            if current.get("status") != previous.get("status"):
                 current["last_transition_at"] = attempted_at
             self._record_transition_locked(previous, current)
             self._document["dependencies"][dependency_id] = current
@@ -342,6 +433,16 @@ class DependencyHealthStore:
             return dict(current)
 
     def _rebuild_categories_locked(self) -> None:
+        qwen = self._document.get("dependencies", {}).get("qwen-omlx")
+        if isinstance(qwen, dict) and ("identity" in qwen or "generation" in qwen):
+            combined = _qwen_combined_status(qwen)
+            qwen["status"] = combined
+            qwen["usable"] = combined == HEALTHY
+            qwen["identity_status"] = (qwen.get("identity") or {}).get("status")
+            qwen["generation_status"] = (qwen.get("generation") or {}).get("status")
+            qwen["generation_freshness_expires_at"] = (qwen.get("generation") or {}).get("freshness_expires_at")
+            if combined == STALE:
+                qwen["failure_class"] = "GENERATION_HEALTH_EXPIRED"
         grouped: Dict[str, list[Mapping[str, Any]]] = {}
         for row in self._document.get("dependencies", {}).values():
             grouped.setdefault(str(row.get("category") or "UNKNOWN"), []).append(row)
@@ -377,12 +478,15 @@ class DependencyHealthStore:
                 degraded.append(category)
                 reasons.append(f"{category}:{status}")
         news = categories.get("NEWS_SEARCH")
+        advisories = []
         if news and news.get("status") not in {HEALTHY, DISABLED}:
-            reasons.append(f"NEWS_SEARCH:{news.get('status')}")
+            advisories.append(f"NEWS_SEARCH:{news.get('status')}")
         readiness = READINESS_BLOCKED if blocked else (READINESS_DEGRADED if degraded or reasons else READINESS_READY)
         return {
             "AUTONOMOUS_SIMULATION_READINESS": readiness,
             "reasons": reasons,
+            "advisories": advisories,
+            "advisory_categories": ["NEWS_SEARCH"] if advisories else [],
             "blocked_categories": blocked,
             "degraded_categories": degraded,
             "simulation_only": True,
@@ -522,6 +626,7 @@ class DependencyHealthMonitor:
                 failure_class_name=identity.get("failure_class"),
                 error=identity.get("error"),
                 metadata=identity,
+                observation_kind="identity",
             )
         except Exception as exc:  # pragma: no cover - defensive monitor boundary
             self.store.record_result(
@@ -536,6 +641,7 @@ class DependencyHealthMonitor:
                 usable=False,
                 failure_class_name=type(exc).__name__,
                 error=str(exc),
+                observation_kind="identity",
             )
         return self.store.snapshot()
 

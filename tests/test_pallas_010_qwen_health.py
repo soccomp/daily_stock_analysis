@@ -7,7 +7,7 @@ def test_qwen_generation_metrics_are_conservative_for_slow_or_missing_samples():
         {"success": False, "latency_ms": 90000, "failure_class": "TIMEOUT"},
     ])
     assert summary["p50_latency_ms"] == 67851
-    assert summary["p95_latency_ms"] == 67851
+    assert summary["p95_latency_ms"] is None
     assert summary["concurrency_limit"] == 1
-    assert summary["max_operational_context"] == 16384
+    assert summary["max_operational_context"] is None
     assert summary["status"] == "DEGRADED"
