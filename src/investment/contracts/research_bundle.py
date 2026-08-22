@@ -7,10 +7,11 @@ from typing import ClassVar, Literal, Mapping
 from pydantic import AwareDatetime, Field, StrictStr, model_validator
 from typing_extensions import Self
 
-from .base import CanonicalContract, CanonicalDecimal, DataQuality, FrozenValue
+from .base import CanonicalContract, CanonicalDecimal, DataQuality, FrozenValue, canonical_json_bytes
 from .candidate_provenance import CandidateProvenance
 from .data_evidence import DataEvidence
 from .research_trigger import ResearchTrigger
+from .strategy_evidence import Pallas008StrategyEvidence
 
 
 class ExpectedReturnRange(FrozenValue):
@@ -52,6 +53,7 @@ class ResearchBundle(CanonicalContract):
     trigger_source: StrictStr = Field(min_length=1, max_length=128)
     candidate_provenance: CandidateProvenance | None = None
     research_trigger: ResearchTrigger | None = None
+    strategy_evidence: Pallas008StrategyEvidence | None = None
     data_evidence: tuple[DataEvidence, ...] = ()
 
     market_regime: StrictStr = Field(min_length=1)
@@ -93,4 +95,25 @@ class ResearchBundle(CanonicalContract):
         evidence_ids = [item.data_evidence_id for item in self.data_evidence]
         if len(evidence_ids) != len(set(evidence_ids)):
             raise ValueError("data_evidence cannot contain duplicate identifiers")
+        trigger_evidence = (
+            self.research_trigger.strategy_evidence
+            if self.research_trigger is not None
+            else None
+        )
+        if trigger_evidence is not None and self.strategy_evidence != trigger_evidence:
+            raise ValueError("research trigger and research strategy evidence do not match")
         return self
+
+    def _wire_payload(self) -> dict[str, object]:
+        payload = self.model_dump(mode="python")
+        if self.strategy_evidence is None:
+            payload.pop("strategy_evidence", None)
+        return payload
+
+    def hash_payload(self) -> dict[str, object]:
+        payload = self._wire_payload()
+        payload.pop("content_hash", None)
+        return payload
+
+    def canonical_json(self) -> str:
+        return canonical_json_bytes(self._wire_payload()).decode("utf-8")

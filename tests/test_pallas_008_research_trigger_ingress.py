@@ -13,6 +13,7 @@ from src.analyzer import AnalysisResult
 from src.investment.contracts.research_trigger import ResearchTrigger
 from src.investment.m2.research_trigger import ResearchTriggerCoordinator
 from src.investment.m2.orchestration import AnalysisCompletion
+from src.investment.proposal.builder import InvestmentProposalBuilder
 from src.investment.proposal.orchestration import ProposalHandoffLoopService
 from src.investment.proposal.transport import AthenaProposalAcknowledgement
 from src.investment.contracts.portfolio_snapshot import PortfolioSnapshot
@@ -47,6 +48,21 @@ def _trigger():
         dedup_key="PALLAS-008:MANUAL_OWNER_REVIEW:2026-08-22:600002",
         policy_version="pallas-004-research-trigger-v1",
         evidence_refs=("market-candidate:600002", "market-reference:benchmark:P008"),
+        strategy_evidence={
+            "strategy_id": "PALLAS-008-A-SHARE-AUTONOMOUS-V1",
+            "strategy_version": "1.0",
+            "ranking_method": "PALLAS_008_QUANTITATIVE_EVIDENCE",
+            "ranking_score": "0.800000",
+            "discovery_rank": 1,
+            "ranking_components": {
+                "momentum_20": "0.800000",
+                "momentum_60": "0.800000",
+                "trend_strength": "0.800000",
+                "liquidity_ratio": "0.800000",
+                "market_strength": "0.800000",
+            },
+            "market_strength_raw": "0.030000",
+        },
     )
 
 
@@ -61,6 +77,19 @@ def test_pallas008_ingress_uses_canonical_coordinator_ledger(trigger_db):
     assert [item.research_trigger_id for item in coordinator.ledger.pending(now=NOW)] == [
         "research-trigger-pallas-008-ingress"
     ]
+
+
+def test_pallas008_ledger_persists_strategy_evidence(trigger_db):
+    trigger = _trigger()
+    coordinator = ResearchTriggerCoordinator(trigger_db)
+    assert coordinator.enqueue(trigger).status == "FIRED"
+
+    persisted = coordinator.ledger.get(trigger.research_trigger_id)
+
+    assert persisted is not None
+    assert persisted.strategy_evidence == trigger.strategy_evidence
+    assert persisted.strategy_evidence is not None
+    assert persisted.strategy_evidence.ranking_score == trigger.strategy_evidence.ranking_score
 
 
 def test_pallas008_http_ingress_delegates_to_the_same_coordinator(monkeypatch, trigger_db):
@@ -97,7 +126,7 @@ def test_pallas008_http_ingress_exercises_the_real_route_and_coordinator(monkeyp
     assert ResearchTriggerCoordinator(trigger_db).ledger.get(payload["research_trigger_id"]) is not None
 
 
-def test_enqueued_trigger_enters_the_existing_research_and_proposal_builder_path(trigger_db):
+def test_enqueued_trigger_enters_the_existing_research_and_proposal_builder_path(trigger_db, monkeypatch):
     trigger = _trigger()
     coordinator = ResearchTriggerCoordinator(trigger_db)
     assert coordinator.enqueue(trigger).status == "FIRED"
@@ -161,6 +190,15 @@ def test_enqueued_trigger_enters_the_existing_research_and_proposal_builder_path
             )
 
     publisher = Publisher()
+    captured = []
+    original_build = InvestmentProposalBuilder.build
+
+    def capture_build(builder, **kwargs):
+        artifacts = original_build(builder, **kwargs)
+        captured.append(artifacts)
+        return artifacts
+
+    monkeypatch.setattr(InvestmentProposalBuilder, "build", capture_build)
     result = ProposalHandoffLoopService(
         config=SimpleNamespace(
             single_brain_m2_enabled=True,
@@ -179,8 +217,12 @@ def test_enqueued_trigger_enters_the_existing_research_and_proposal_builder_path
     assert result.status == "COMPLETED"
     assert len(publisher.proposals) == 1
     proposal = publisher.proposals[0]
+    artifacts = captured[0]
     assert proposal.symbol == trigger.symbol
     assert proposal.research_trigger is not None
     assert proposal.research_trigger.research_trigger_id == trigger.research_trigger_id
+    assert proposal.strategy_evidence == trigger.strategy_evidence
+    assert artifacts.research_bundle.strategy_evidence == trigger.strategy_evidence
+    assert artifacts.proposal.strategy_evidence == trigger.strategy_evidence
     assert result.acknowledgements[0].acknowledgement_state == "ACCEPTED"
     assert coordinator.ledger.pending(now=NOW) == ()

@@ -14,7 +14,9 @@ from urllib.request import urlopen
 import pytest
 
 from src.investment.contracts.investment_proposal import InvestmentProposal
+from src.investment.contracts.research_trigger import ResearchTrigger
 from src.investment.m2.orchestration import AnalysisCompletion
+from src.investment.m2.research_trigger import ResearchTriggerCoordinator
 from src.investment.m2.screening_candidates import DatabaseScreeningCandidateSource
 from src.investment.proposal.builder import InvestmentProposalBuilder
 from src.investment.proposal.orchestration import ProposalHandoffLoopService
@@ -35,10 +37,14 @@ from src.investment_authority.service import InvestmentAuthorityService
 
 class IsolatedAthenaIntake:
     def __init__(self):
-        self.authority = InvestmentAuthorityService(
-            journal_path=sys.argv[1],
-            clock=lambda: datetime.now(timezone.utc),
-        )
+        policy_path = sys.argv[2] if len(sys.argv) > 2 else None
+        kwargs = {
+            "journal_path": sys.argv[1],
+            "clock": lambda: datetime.now(timezone.utc),
+        }
+        if policy_path:
+            kwargs["acceptance_policy_path"] = policy_path
+        self.authority = InvestmentAuthorityService(**kwargs)
 
     def health(self):
         return {"service": "READY", "runtime_projection": "READ_ONLY", "read_only": True}
@@ -60,11 +66,12 @@ server.serve_forever()
 
 
 class _DeterministicAnalysisRunner:
-    def __init__(self, completed_at: datetime):
+    def __init__(self, completed_at: datetime, action: str = "hold"):
         self._completed_at = completed_at
+        self._action = action
 
     def complete(self, **kwargs):
-        result = _result("hold")
+        result = _result(self._action)
         result.code = kwargs["symbol"]
         return AnalysisCompletion(
             result=result,
@@ -88,10 +95,16 @@ def _aware(value: str) -> datetime:
 
 
 @contextmanager
-def _isolated_athena_intake(tmp_path: Path) -> Iterator[str]:
+def _isolated_athena_intake(
+    tmp_path: Path,
+    acceptance_policy_path: Path | None = None,
+    athena_root: Path | None = None,
+) -> Iterator[str]:
     default_root = Path(__file__).resolve().parents[2] / "pallas-athena-recovery"
-    athena_root = Path(
-        os.environ.get("PALLAS_ATHENA_RECOVERY_ROOT", str(default_root))
+    athena_root = (
+        athena_root
+        if athena_root is not None
+        else Path(os.environ.get("PALLAS_ATHENA_RECOVERY_ROOT", str(default_root)))
     ).resolve()
     athena_python = Path(
         os.environ.get(
@@ -108,7 +121,10 @@ def _isolated_athena_intake(tmp_path: Path) -> Iterator[str]:
     environment["PYTHONPATH"] = str(athena_root)
     journal_path = tmp_path / "athena-investment-authority.jsonl"
     process = subprocess.Popen(
-        [str(athena_python), "-u", "-c", ATHENA_SERVER, str(journal_path)],
+        [
+            str(athena_python), "-u", "-c", ATHENA_SERVER, str(journal_path),
+            *( [str(acceptance_policy_path)] if acceptance_policy_path is not None else [] ),
+        ],
         cwd=athena_root,
         env=environment,
         stdout=subprocess.PIPE,
@@ -245,3 +261,86 @@ def test_persistence_backed_screening_to_isolated_athena_ack(
             lookup = json.loads(response.read())
         assert lookup["acknowledgement_id"] == acknowledgement.acknowledgement_id
         assert lookup["acknowledgement_state"] == "ACCEPTED"
+
+
+def test_p008_strategy_evidence_survives_real_dsa_to_athena_http_ack(
+    persisted_screening_db,
+    tmp_path,
+):
+    db = persisted_screening_db
+    runtime_now = datetime.now(timezone.utc).replace(microsecond=0)
+    trigger = ResearchTrigger.build(
+        research_trigger_id="research-trigger-p008-http-evidence",
+        trigger_type="MANUAL_OWNER_REVIEW",
+        trigger_source="athena:pallas-008-autonomous-investing",
+        symbol="300274",
+        market="CN",
+        priority=6,
+        created_at=runtime_now,
+        source_event_time=runtime_now,
+        effective_at=runtime_now,
+        scheduled_for=runtime_now,
+        dedup_key="PALLAS-008:MANUAL_OWNER_REVIEW:http:300274",
+        policy_version="pallas-004-research-trigger-v1",
+        evidence_refs=("market-candidate:300274", "market-reference:benchmark:P008"),
+        strategy_evidence={
+            "strategy_id": "PALLAS-008-A-SHARE-AUTONOMOUS-V1",
+            "strategy_version": "1.0",
+            "ranking_method": "PALLAS_008_QUANTITATIVE_EVIDENCE",
+            "ranking_score": "0.800000",
+            "discovery_rank": 1,
+            "ranking_components": {
+                "momentum_20": "0.800000",
+                "momentum_60": "0.800000",
+                "trend_strength": "0.800000",
+                "liquidity_ratio": "0.800000",
+                "market_strength": "0.800000",
+            },
+            "market_strength_raw": "0.030000",
+        },
+    )
+    coordinator = ResearchTriggerCoordinator(db)
+    assert coordinator.enqueue(trigger).status == "FIRED"
+    config = type("P008HttpConfig", (), {
+        "single_brain_m2_enabled": True,
+        "single_brain_m2_interval_minutes": 60,
+        "single_brain_m2_symbols": ("300274",),
+        "single_brain_m2_max_symbols": 1,
+        "single_brain_m2_holdings_limit": 0,
+        "single_brain_m2_screening_enabled": False,
+        "single_brain_m2_screening_max_candidates": 3,
+        "single_brain_m2_screening_max_age_hours": 72,
+    })()
+    captured_artifacts = []
+    real_build = InvestmentProposalBuilder.build
+
+    def build_and_capture(builder, **kwargs):
+        artifacts = real_build(builder, **kwargs)
+        captured_artifacts.append(artifacts)
+        return artifacts
+
+    with _isolated_athena_intake(
+        tmp_path,
+        acceptance_policy_path=Path(__file__).resolve().parents[1]
+        / "../pallas-008-athena-impl/config/pallas_008_investment_acceptance_policy.json",
+        athena_root=Path(__file__).resolve().parents[1] / "../pallas-008-athena-impl",
+    ) as endpoint:
+        publisher = CanonicalHttpInvestmentProposalPublisher(url=endpoint)
+        service = ProposalHandoffLoopService(
+            config=config,
+            analysis_runner=_DeterministicAnalysisRunner(runtime_now, action="buy"),
+            publisher=publisher,
+            snapshot_source=_SnapshotSource(),
+            trigger_coordinator=coordinator,
+            clock=lambda: runtime_now,
+        )
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setattr(InvestmentProposalBuilder, "build", build_and_capture)
+            result = service.run_cycle(scheduled_for=runtime_now)
+
+        assert result.status == "COMPLETED", result.blocked_reasons
+        assert len(captured_artifacts) == 1
+        artifacts = captured_artifacts[0]
+        assert artifacts.research_bundle.strategy_evidence == trigger.strategy_evidence
+        assert artifacts.proposal.strategy_evidence == trigger.strategy_evidence
+        assert result.acknowledgements[0].acknowledgement_state == "ACCEPTED"

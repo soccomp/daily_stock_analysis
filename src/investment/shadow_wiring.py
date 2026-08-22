@@ -181,6 +181,14 @@ class InvestmentShadowWiringService:
                 if research_trigger is not None else ()
             )
 
+        trigger = (
+            research_trigger
+            if isinstance(research_trigger, ResearchTrigger)
+            else ResearchTrigger.model_validate_json(json.dumps(research_trigger))
+            if research_trigger is not None
+            else None
+        )
+
         research = ResearchBundleAdapter.from_dsa_views(
             research_id=f"research-shadow-{identity_hash[:32]}",
             trace_id=effective_trace_id,
@@ -191,13 +199,8 @@ class InvestmentShadowWiringService:
             as_of=now,
             horizon="swing",
             trigger_source=source,
-            research_trigger=(
-                research_trigger
-                if isinstance(research_trigger, ResearchTrigger)
-                else ResearchTrigger.model_validate_json(json.dumps(research_trigger))
-                if research_trigger is not None
-                else None
-            ),
+            research_trigger=trigger,
+            strategy_evidence=trigger.strategy_evidence if trigger is not None else None,
             data_evidence=data_evidence,
             market_regime=self._text(
                 getattr(result, "trend_prediction", None),

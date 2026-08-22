@@ -192,6 +192,7 @@ class InvestmentProposalBuilder:
             candidate_provenance=candidate_provenance,
             supersedes_id=trigger.supersedes_trigger_id if trigger is not None else None,
             research_trigger=trigger,
+            strategy_evidence=trigger.strategy_evidence if trigger is not None else None,
             data_evidence=data_evidence,
             market_regime=InvestmentShadowWiringService._text(
                 getattr(result, "trend_prediction", None), "No separate market-regime view."
@@ -283,6 +284,7 @@ class InvestmentProposalBuilder:
             action=action,
             candidate_provenance=candidate_provenance,
             research_trigger=research.research_trigger,
+            strategy_evidence=research.strategy_evidence,
             data_evidence=research.data_evidence,
             confidence=research.confidence,
             expected_return=expected_return,

@@ -1236,6 +1236,7 @@ class ResearchTriggerLedgerRecord(Base):
     dedup_key = Column(String(256), nullable=False, unique=True, index=True)
     policy_version = Column(String(128), nullable=False)
     evidence_refs_json = Column(Text, nullable=False)
+    strategy_evidence_json = Column(Text)
     screening_scheduler_run_id = Column(String(160))
     screening_run_id = Column(String(160), index=True)
     portfolio_snapshot_id = Column(String(160), index=True)
@@ -1553,6 +1554,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             Base.metadata.create_all(self._engine)
             self._ensure_llm_usage_telemetry_columns()
             self._ensure_decision_signal_profile_schema()
+            self._ensure_research_trigger_strategy_evidence_schema()
             self._ensure_intelligence_item_scope_values()
             self._ensure_schema_migration_record()
             self._ensure_intelligence_items_unique_index()
@@ -1599,6 +1601,21 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             raise
         finally:
             session.close()
+
+    def _ensure_research_trigger_strategy_evidence_schema(self) -> None:
+        """Add the nullable P008 evidence column to existing trigger ledgers."""
+
+        table_name = ResearchTriggerLedgerRecord.__tablename__
+        inspector = inspect(self._engine)
+        if not inspector.has_table(table_name):
+            return
+        columns = {column["name"] for column in inspector.get_columns(table_name)}
+        if "strategy_evidence_json" in columns:
+            return
+        with self._engine.begin() as connection:
+            connection.exec_driver_sql(
+                f"ALTER TABLE {table_name} ADD COLUMN strategy_evidence_json TEXT"
+            )
 
     def _ensure_decision_signal_profile_schema(self) -> None:
         """Add and backfill nullable decision_profile for existing SQLite DBs."""

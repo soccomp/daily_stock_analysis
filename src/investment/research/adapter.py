@@ -8,6 +8,7 @@ from decimal import Decimal
 from src.investment.contracts.candidate_provenance import CandidateProvenance
 from src.investment.contracts.data_evidence import DataEvidence
 from src.investment.contracts.research_trigger import ResearchTrigger
+from src.investment.contracts.strategy_evidence import Pallas008StrategyEvidence
 from src.investment.contracts.research_bundle import (
     ExpectedReturnRange,
     ModelProvenance,
@@ -52,6 +53,7 @@ class ResearchBundleAdapter:
         strategy_refs: tuple[str, ...] = (),
         candidate_provenance: CandidateProvenance | None = None,
         research_trigger: ResearchTrigger | None = None,
+        strategy_evidence: Pallas008StrategyEvidence | None = None,
         data_evidence: tuple[DataEvidence, ...] = (),
         supersedes_id: str | None = None,
     ) -> ResearchBundle:
@@ -68,6 +70,7 @@ class ResearchBundleAdapter:
             trigger_source=trigger_source,
             candidate_provenance=candidate_provenance,
             research_trigger=research_trigger,
+            strategy_evidence=strategy_evidence,
             data_evidence=data_evidence,
             market_regime=market_regime,
             industry_view=industry_view,

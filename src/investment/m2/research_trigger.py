@@ -101,6 +101,16 @@ class ResearchTriggerLedgerRepository:
                     evidence_refs_json=json.dumps(
                         list(trigger.evidence_refs), ensure_ascii=False, separators=(",", ":")
                     ),
+                    strategy_evidence_json=(
+                        json.dumps(
+                            trigger.strategy_evidence.model_dump(mode="json"),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        if trigger.strategy_evidence is not None
+                        else None
+                    ),
                     screening_scheduler_run_id=trigger.screening_scheduler_run_id,
                     screening_run_id=trigger.screening_run_id,
                     portfolio_snapshot_id=trigger.portfolio_snapshot_id,
@@ -281,6 +291,11 @@ class ResearchTriggerLedgerRepository:
     @staticmethod
     def _to_trigger(row: ResearchTriggerLedgerRecord) -> ResearchTrigger:
         evidence = json.loads(row.evidence_refs_json)
+        strategy_evidence = (
+            json.loads(row.strategy_evidence_json)
+            if row.strategy_evidence_json
+            else None
+        )
         return ResearchTrigger.build(
             research_trigger_id=row.research_trigger_id,
             trigger_type=row.trigger_type,
@@ -299,6 +314,7 @@ class ResearchTriggerLedgerRepository:
             dedup_key=row.dedup_key,
             policy_version=row.policy_version,
             evidence_refs=tuple(evidence),
+            strategy_evidence=strategy_evidence,
             screening_scheduler_run_id=row.screening_scheduler_run_id,
             screening_run_id=row.screening_run_id,
             portfolio_snapshot_id=row.portfolio_snapshot_id,

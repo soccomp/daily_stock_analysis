@@ -10,6 +10,7 @@ from pydantic import AwareDatetime, Field, StrictInt, StrictStr, model_validator
 from typing_extensions import Self
 
 from .base import FrozenValue, canonical_json_bytes
+from .strategy_evidence import Pallas008StrategyEvidence
 
 
 ResearchTriggerType = Literal[
@@ -41,7 +42,14 @@ class ResearchTrigger(FrozenValue):
     screening_run_id: StrictStr | None = Field(default=None, min_length=1, max_length=160)
     portfolio_snapshot_id: StrictStr | None = Field(default=None, min_length=1, max_length=160)
     supersedes_trigger_id: StrictStr | None = Field(default=None, min_length=1, max_length=160)
+    strategy_evidence: Pallas008StrategyEvidence | None = None
     content_hash: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+
+    def _hash_payload(self) -> dict[str, object]:
+        payload = self.model_dump(mode="python", exclude={"content_hash"})
+        if self.strategy_evidence is None:
+            payload.pop("strategy_evidence", None)
+        return payload
 
     @model_validator(mode="after")
     def _validate_trigger(self) -> Self:
@@ -49,9 +57,7 @@ class ResearchTrigger(FrozenValue):
             raise ValueError("evidence_refs cannot contain blank values")
         if len(self.evidence_refs) != len(set(self.evidence_refs)):
             raise ValueError("evidence_refs cannot contain duplicates")
-        expected = hashlib.sha256(
-            canonical_json_bytes(self.model_dump(mode="python", exclude={"content_hash"}))
-        ).hexdigest()
+        expected = hashlib.sha256(canonical_json_bytes(self._hash_payload())).hexdigest()
         if self.content_hash != expected:
             raise ValueError("research trigger content_hash does not match canonical content")
         return self
@@ -60,8 +66,16 @@ class ResearchTrigger(FrozenValue):
     def build(cls, **values: object) -> "ResearchTrigger":
         """Validate producer values and calculate the immutable content hash."""
 
+        if values.get("strategy_evidence") is not None and not isinstance(
+            values["strategy_evidence"], Pallas008StrategyEvidence
+        ):
+            values = {
+                **values,
+                "strategy_evidence": Pallas008StrategyEvidence.model_validate(
+                    values["strategy_evidence"]
+                ),
+            }
         draft = cls.model_construct(**{**values, "content_hash": "0" * 64})
-        payload = draft.model_dump(mode="python", exclude={"content_hash"})
+        payload = draft._hash_payload()
         content_hash = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
         return cls.model_validate({**payload, "content_hash": content_hash})
-

@@ -12,6 +12,7 @@ from .candidate_provenance import CandidateProvenance
 from .data_evidence import DataEvidence
 from .research_trigger import ResearchTrigger
 from .research_bundle import ModelProvenance
+from .strategy_evidence import Pallas008StrategyEvidence
 
 
 class InvestmentProposal(CanonicalContract):
@@ -41,6 +42,7 @@ class InvestmentProposal(CanonicalContract):
     action: Literal["BUY", "HOLD", "AVOID", "REDUCE", "SELL"]
     candidate_provenance: CandidateProvenance | None = None
     research_trigger: ResearchTrigger | None = None
+    strategy_evidence: Pallas008StrategyEvidence | None = None
     data_evidence: tuple[DataEvidence, ...] = ()
     confidence: CanonicalDecimal = Field(ge=0, le=1)
     expected_return: CanonicalDecimal
@@ -65,6 +67,8 @@ class InvestmentProposal(CanonicalContract):
             payload.pop("candidate_provenance", None)
         if self.research_trigger is None:
             payload.pop("research_trigger", None)
+        if self.strategy_evidence is None:
+            payload.pop("strategy_evidence", None)
         if not self.data_evidence:
             payload.pop("data_evidence", None)
         return payload
@@ -88,6 +92,13 @@ class InvestmentProposal(CanonicalContract):
         evidence_ids = [item.data_evidence_id for item in self.data_evidence]
         if len(evidence_ids) != len(set(evidence_ids)):
             raise ValueError("data_evidence cannot contain duplicate identifiers")
+        trigger_evidence = (
+            self.research_trigger.strategy_evidence
+            if self.research_trigger is not None
+            else None
+        )
+        if trigger_evidence is not None and self.strategy_evidence != trigger_evidence:
+            raise ValueError("research trigger and proposal strategy evidence do not match")
         price_fields = (self.ideal_entry, self.secondary_entry, self.stop_price, self.target_price)
         if self.action == "BUY":
             if any(value is None for value in price_fields):

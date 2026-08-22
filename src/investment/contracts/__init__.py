@@ -10,6 +10,7 @@ from .portfolio_snapshot import PortfolioSnapshot
 from .research_bundle import ResearchBundle
 from .research_trigger import ResearchTrigger
 from .risk_policy import RiskPolicy
+from .strategy_evidence import Pallas008StrategyEvidence
 
 __all__ = [
     "ExecutionMandate",
@@ -22,4 +23,5 @@ __all__ = [
     "ResearchBundle",
     "ResearchTrigger",
     "RiskPolicy",
+    "Pallas008StrategyEvidence",
 ]
