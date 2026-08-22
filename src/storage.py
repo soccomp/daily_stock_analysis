@@ -390,6 +390,56 @@ class AnalysisHistory(Base):
         }
 
 
+class MarketReviewOutcomeRecord(Base):
+    """Durable market-review terminal outcomes consumed by read-only Pallas projections."""
+
+    __tablename__ = "market_review_outcomes"
+
+    outcome_id = Column(String(160), primary_key=True)
+    source_task_id = Column(String(160), nullable=False, index=True)
+    trade_date = Column(Date, nullable=False, index=True)
+    outcome = Column(String(32), nullable=False)
+    candidate_count = Column(Integer, nullable=False, default=0)
+    reason = Column(Text, nullable=False)
+    persisted_at = Column(DateTime, nullable=False, index=True)
+    provenance_json = Column(Text, nullable=False)
+    content_hash = Column(String(64), nullable=False, unique=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_task_id",
+            "trade_date",
+            "outcome",
+            name="uix_market_review_outcome_task_date_kind",
+        ),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        provenance: Dict[str, Any]
+        try:
+            parsed = json.loads(self.provenance_json or "{}")
+            provenance = parsed if isinstance(parsed, dict) else {}
+        except (TypeError, ValueError):
+            provenance = {}
+        return {
+            "outcome_id": self.outcome_id,
+            "source_task_id": self.source_task_id,
+            "trade_date": self.trade_date.isoformat() if self.trade_date else None,
+            "outcome": self.outcome,
+            "candidate_count": int(self.candidate_count or 0),
+            "reason": self.reason,
+            "persisted_at": (
+                self.persisted_at.replace(tzinfo=timezone.utc).isoformat()
+                if self.persisted_at
+                else None
+            ),
+            "durable": True,
+            "execution_authority": False,
+            "provenance": provenance,
+            "content_hash": self.content_hash,
+        }
+
+
 class BacktestResult(Base):
     """单条分析记录的回测结果。"""
 

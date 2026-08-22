@@ -50,6 +50,25 @@ _MARKET_REVIEW_MARKETS = (
     ('kr', 'kr_title', '韩股'),
 )
 _MARKET_REVIEW_REGION_ORDER = MARKET_REVIEW_REGION_ORDER
+_MARKET_REVIEW_STAGE_ORDER = {
+    stage: index
+    for index, stage in enumerate(
+        (
+            "QUEUED",
+            "PREPARING",
+            "COLLECTING_INDICES",
+            "COLLECTING_BREADTH",
+            "COLLECTING_SECTORS_CONCEPTS",
+            "COLLECTING_NEWS",
+            "ASSEMBLING_CONTEXT",
+            "LLM_GENERATION",
+            "PARSING_VALIDATING",
+            "PERSISTENCE",
+            "DOWNSTREAM_HANDOFF",
+            "COMPLETED",
+        )
+    )
+}
 
 
 @dataclass
@@ -223,14 +242,34 @@ def run_market_review(
         persist_region,
     )
 
+    last_stage = "QUEUED"
+    last_stage_rank = _MARKET_REVIEW_STAGE_ORDER[last_stage]
+    active_market: str | None = None
+
     def report_progress(progress: int, stage: str, message: str) -> None:
+        nonlocal last_stage, last_stage_rank
         if progress_callback is None:
             return
+        normalized_stage = str(stage or "").strip().upper()
+        stage_rank = _MARKET_REVIEW_STAGE_ORDER.get(normalized_stage)
+        display_stage = normalized_stage
+        display_message = message
+        if active_market:
+            display_message = f"[market={active_market} substage={normalized_stage}] {message}"
+        if stage_rank is not None and stage_rank < last_stage_rank:
+            # A multi-market run intentionally keeps one task-level stage
+            # monotonic while exposing the next market's local substage in the
+            # message.  This prevents a second analyzer from resetting the API
+            # task to COLLECTING_INDICES after the first one reached LLM/PARSING.
+            display_stage = last_stage
+        elif stage_rank is not None:
+            last_stage = display_stage
+            last_stage_rank = stage_rank
         try:
-            progress_callback(progress, stage, message)
+            progress_callback(progress, display_stage, display_message)
         except TypeError:
             # Keep compatibility with existing two-argument pipeline callbacks.
-            progress_callback(progress, message)
+            progress_callback(progress, display_message)
 
     report_progress(2, "PREPARING", "Preparing market review runtime")
 
@@ -243,6 +282,7 @@ def run_market_review(
             for mkt, title_key, label in _MARKET_REVIEW_MARKETS:
                 if mkt not in run_markets:
                     continue
+                active_market = mkt
                 logger.info(
                     "[MarketReview] component=market_review action=build_report "
                     "trigger_source=%s query_id=%s region=%s label=%s",
@@ -278,6 +318,7 @@ def run_market_review(
                 review_report = None
         else:
             run_region = run_markets[0]
+            active_market = run_region
             label = next(
                 (market_label for mkt, _, market_label in _MARKET_REVIEW_MARKETS if mkt == run_region),
                 run_region,
@@ -314,7 +355,6 @@ def run_market_review(
             }
         
         if review_report:
-            report_progress(70, "ASSEMBLING_CONTEXT", "Assembling structured market context")
             market_review_payload = _build_combined_market_review_payload(
                 review_report=review_report,
                 payloads=market_review_payloads,
@@ -327,7 +367,6 @@ def run_market_review(
                 market_review_payload,
                 wrapper_title=review_text["root_title"],
             )
-            report_progress(82, "PARSING_VALIDATING", "Validating market review payload")
             merge_markdown_report = _render_market_review_merge_markdown(
                 market_review_payload,
                 review_report=review_report,

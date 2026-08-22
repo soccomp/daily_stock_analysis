@@ -115,11 +115,23 @@ def build_market_context(
 
 
 def no_action_outcome(*, task_id: str, reason: str, candidate_count: int = 0) -> dict[str, Any]:
-    """Represent zero candidates as a durable terminal outcome."""
+    """Represent zero candidates before repository persistence.
+
+    Callers that need a durable artifact must use
+    ``MarketReviewOutcomeRepository.persist_no_action`` and pass its returned
+    record downstream.  Keeping this helper explicitly non-durable prevents an
+    in-memory projection from being mistaken for persisted evidence.
+    """
     return {
         "outcome": "NO_ACTION",
         "candidate_count": int(candidate_count),
         "reason": reason,
         "source_task_id": task_id,
+        "outcome_id": None,
+        "trade_date": None,
+        "persisted_at": None,
+        "durable": False,
+        "content_hash": None,
+        "provenance": {"record_type": "in_memory_market_review_outcome"},
         "execution_authority": False,
     }

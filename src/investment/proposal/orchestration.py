@@ -26,6 +26,7 @@ from src.investment.proposal.transport import (
     AthenaProposalAcknowledgement,
     CanonicalHttpInvestmentProposalPublisher,
 )
+from src.repositories.market_review_outcome_repo import MarketReviewOutcomeRepository
 from src.storage import DatabaseManager
 
 
@@ -44,6 +45,7 @@ class ProposalHandoffRunResult:
     acknowledgements: tuple[AthenaProposalAcknowledgement, ...] = ()
     blocked_reasons: tuple[str, ...] = ()
     researched_symbols: tuple[str, ...] = ()
+    no_action_outcome: dict[str, object] | None = None
 
 
 class ProposalHandoffLoopService:
@@ -149,6 +151,11 @@ class ProposalHandoffLoopService:
             )
         researched = tuple(f"{scope['symbol']}:{scope['source']}" for scope in scopes)
         if not scopes:
+            no_action = MarketReviewOutcomeRepository().persist_no_action(
+                source_task_id=cycle,
+                trade_date=now.astimezone(timezone.utc).date(),
+                reason="no candidate satisfied strategy-evidence threshold",
+            )
             return ProposalHandoffRunResult(
                 cycle,
                 "NO_ACTION",
@@ -156,6 +163,7 @@ class ProposalHandoffLoopService:
                     "candidate_count=0; outcome=NO_ACTION; "
                     "reason=no candidate satisfied strategy-evidence threshold",
                 ),
+                no_action_outcome=no_action,
             )
         for scope in scopes:
             symbol = scope["symbol"]
