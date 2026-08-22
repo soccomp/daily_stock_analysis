@@ -9,6 +9,7 @@ from src.services.decision_scorecard_service import DecisionScorecardService
 from src.services.task_queue import AnalysisTaskQueue, TaskInfo, TaskStatus
 from src.market_analyzer import MarketAnalyzer
 from src.investment.proposal.orchestration import ProposalHandoffLoopService
+from src.repositories.market_review_linkage_repo import MarketReviewLinkageRepository
 from src.repositories.market_review_outcome_repo import MarketReviewOutcomeRepository
 from src.storage import DatabaseManager, MarketReviewOutcomeRecord
 
@@ -291,3 +292,118 @@ def test_api_market_review_callback_is_monotonic_for_llm_and_multi_market(tmp_pa
     assert task.stage == "COMPLETED"
     assert task.progress == 100
     assert any("market=us substage=COLLECTING_INDICES" in message for _, _, message in events)
+
+
+def test_api_market_review_context_links_to_the_real_proposal_cycle(tmp_path, monkeypatch):
+    database_path = tmp_path / "market-review-identity-link.db"
+    monkeypatch.setenv("DATABASE_PATH", str(database_path))
+    DatabaseManager.reset_instance()
+    task_id = "market-review-api-identity-task"
+    now = datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
+
+    class LlmReturningAnalyzer:
+        def __init__(self, *, progress_callback=None, region=None, **_kwargs):
+            self.progress_callback = progress_callback
+            self.region = region
+
+        def run_daily_review_with_snapshot(self):
+            if self.progress_callback is not None:
+                self.progress_callback(75, "LLM_GENERATION", "llm")
+            return SimpleNamespace(
+                report="API-style market review",
+                structured_payload={
+                    "kind": "market_review",
+                    "region": self.region,
+                    "date": "2026-08-22",
+                    "generated_at": now.isoformat(),
+                    "indices": [{"change_pct": 1.0}],
+                    "breadth": {
+                        "up_count": 60,
+                        "down_count": 30,
+                        "flat_count": 10,
+                        "limit_up_count": 6,
+                        "limit_down_count": 1,
+                    },
+                    "sectors": {"top": [], "bottom": []},
+                    "concepts": {
+                        "top": [],
+                        "bottom": [],
+                        "data_status": "available_empty",
+                    },
+                    "data_quality": {
+                        "indices": "available",
+                        "breadth": "available",
+                        "sectors": "available",
+                        "concepts": "available_empty",
+                    },
+                    "news": [],
+                },
+            )
+
+    class EmptyCoordinator:
+        def plan(self, **_kwargs):
+            return []
+
+    class SnapshotSource:
+        def capture_snapshot(self):
+            return object()
+
+    class UnusedRunner:
+        def complete(self, **_kwargs):  # pragma: no cover - no scopes must be selected
+            raise AssertionError("NO_ACTION must not analyze a symbol")
+
+    notifier = SimpleNamespace(
+        save_report_to_file=lambda *_args: "/tmp/market-review.md",
+        is_available=lambda: False,
+    )
+    try:
+        with patch("src.core.market_review.MarketAnalyzer", LlmReturningAnalyzer):
+            market_review = run_market_review(
+                notifier,
+                config=SimpleNamespace(report_language="zh", market_review_region="cn"),
+                send_notification=False,
+                save_report_file=False,
+                persist_history=True,
+                return_structured=True,
+                query_id=task_id,
+            )
+
+        context = market_review.market_review_payload["market_context"]
+        assert context["source_task_id"] == task_id
+        assert context["market_review_id"] == task_id
+
+        service = ProposalHandoffLoopService(
+            config=SimpleNamespace(
+                single_brain_m2_enabled=True,
+                single_brain_m2_interval_minutes=60,
+            ),
+            analysis_runner=UnusedRunner(),
+            publisher=object(),
+            snapshot_source=SnapshotSource(),
+            trigger_coordinator=EmptyCoordinator(),
+            clock=lambda: now,
+        )
+        result = service.run_cycle(scheduled_for=now, market_review_context=context)
+
+        assert result.status == "NO_ACTION"
+        assert result.no_action_outcome["source_task_id"] == result.cycle_id
+        assert result.market_review_linkage["market_review_task_id"] == task_id
+        assert result.market_review_linkage["market_context_id"] == context["context_id"]
+        assert result.market_review_linkage["proposal_cycle_id"] == result.cycle_id
+        assert result.market_review_linkage["outcome_id"] == result.no_action_outcome["outcome_id"]
+        assert result.cycle_id != task_id
+
+        stored = MarketReviewLinkageRepository().get_for_context(
+            market_review_task_id=task_id,
+            market_context_id=context["context_id"],
+            trade_date=now.date(),
+        )
+        assert stored == result.market_review_linkage
+
+        # The scheduler-style resolver must use the persisted MarketContext,
+        # while keeping the same immutable cycle/link identity on retry.
+        retry = service.run_cycle(scheduled_for=now)
+        assert retry.status == "NO_ACTION"
+        assert retry.market_review_linkage == result.market_review_linkage
+    finally:
+        DatabaseManager.reset_instance()

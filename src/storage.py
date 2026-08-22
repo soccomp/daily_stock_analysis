@@ -440,6 +440,74 @@ class MarketReviewOutcomeRecord(Base):
         }
 
 
+class MarketReviewLineageRecord(Base):
+    """Immutable bridge from a Market Review context to downstream evidence."""
+
+    __tablename__ = "market_review_lineages"
+
+    linkage_id = Column(String(160), primary_key=True)
+    market_review_task_id = Column(String(160), nullable=False, index=True)
+    market_review_id = Column(String(160), nullable=False, index=True)
+    market_context_id = Column(String(160), nullable=False, index=True)
+    trade_date = Column(Date, nullable=False, index=True)
+    proposal_cycle_id = Column(String(160), nullable=False, index=True)
+    candidate_count = Column(Integer, nullable=False)
+    outcome_id = Column(String(160), index=True)
+    research_trigger_ids_json = Column(Text, nullable=False)
+    proposal_ids_json = Column(Text, nullable=False)
+    acknowledgement_ids_json = Column(Text, nullable=False)
+    market_context_hash = Column(String(64), nullable=False)
+    linked_at = Column(DateTime, nullable=False, index=True)
+    provenance_json = Column(Text, nullable=False)
+    content_hash = Column(String(64), nullable=False, unique=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "market_review_task_id",
+            "market_context_id",
+            "trade_date",
+            "proposal_cycle_id",
+            name="uix_market_review_lineage_identity",
+        ),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        def _list(value: str | None) -> list[str]:
+            try:
+                parsed = json.loads(value or "[]")
+            except (TypeError, ValueError):
+                return []
+            return [str(item) for item in parsed] if isinstance(parsed, list) else []
+
+        try:
+            provenance = json.loads(self.provenance_json or "{}")
+        except (TypeError, ValueError):
+            provenance = {}
+        return {
+            "linkage_id": self.linkage_id,
+            "market_review_task_id": self.market_review_task_id,
+            "market_review_id": self.market_review_id,
+            "market_context_id": self.market_context_id,
+            "trade_date": self.trade_date.isoformat() if self.trade_date else None,
+            "proposal_cycle_id": self.proposal_cycle_id,
+            "candidate_count": int(self.candidate_count or 0),
+            "outcome_id": self.outcome_id,
+            "research_trigger_ids": _list(self.research_trigger_ids_json),
+            "proposal_ids": _list(self.proposal_ids_json),
+            "acknowledgement_ids": _list(self.acknowledgement_ids_json),
+            "market_context_hash": self.market_context_hash,
+            "linked_at": (
+                self.linked_at.replace(tzinfo=timezone.utc).isoformat()
+                if self.linked_at
+                else None
+            ),
+            "durable": True,
+            "execution_authority": False,
+            "provenance": provenance if isinstance(provenance, dict) else {},
+            "content_hash": self.content_hash,
+        }
+
+
 class BacktestResult(Base):
     """单条分析记录的回测结果。"""
 
