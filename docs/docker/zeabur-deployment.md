@@ -164,7 +164,7 @@ Zeabur 服务建议从 `1G` 内存起步；`512M` 仅适合轻量 Web/API、单�
 | `BRAVE_API_KEYS` | Brave Search API 密钥（用逗号分隔） |
 | `MINIMAX_API_KEYS` | MiniMax API 密钥（用逗号分隔） |
 | `SEARXNG_BASE_URLS` | SearXNG 实例地址（逗号分隔，无配额兜底，需在 settings.yml 启用 format: json）；留空时默认自动发现公共实例 |
-| `SEARXNG_PUBLIC_INSTANCES_ENABLED` | 是否在 `SEARXNG_BASE_URLS` 为空时自动从 `searx.space` 获取公共实例（默认 `true`） |
+| `SEARXNG_PUBLIC_INSTANCES_ENABLED` | 是否在 `SEARXNG_BASE_URLS` 为空时自动从 `searx.space` 获取公共实例（默认 `false`，需显式开启） |
 
 ### 5.4 配置方法
 
