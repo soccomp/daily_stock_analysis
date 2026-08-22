@@ -44,6 +44,7 @@ from src.data.stock_mapping import (
     foreign_stock_english_aliases,
 )
 from src.services.run_diagnostics import record_provider_run, record_provider_run_started
+from src.services.dependency_health import get_dependency_health_store
 
 logger = logging.getLogger(__name__)
 
@@ -266,13 +267,19 @@ class SearchResponse:
     success: bool = True
     error_message: Optional[str] = None
     search_time: float = 0.0  # 搜索耗时（秒）
+    fallback_used: bool = False
+    fallback_from: Optional[str] = None
+    fallback_to: Optional[str] = None
     
     def to_context(self, max_results: int = 5) -> str:
         """将搜索结果转换为可用于 AI 分析的上下文"""
         if not self.success or not self.results:
             return f"搜索 '{self.query}' 未找到相关结果。"
         
-        lines = [f"【{self.query} 搜索结果】（来源：{self.provider}）"]
+        provenance = f"来源：{self.provider}"
+        if self.fallback_used:
+            provenance += f"；fallback_from={self.fallback_from or 'unknown'}"
+        lines = [f"【{self.query} 搜索结果】（{provenance}）"]
         for i, result in enumerate(self.results[:max_results], 1):
             lines.append(f"\n{i}. {result.to_text()}")
         
@@ -2392,6 +2399,7 @@ class SearchService:
         searxng_public_instances_enabled: bool = False,
         news_max_age_days: int = 3,
         news_strategy_profile: str = "short",
+        dependency_health_store: Any = None,
     ):
         """
         初始化搜索服务
@@ -2421,6 +2429,7 @@ class SearchService:
             "news_strategy_profile": news_strategy_profile,
         }
         self._providers: List[BaseSearchProvider] = []
+        self._dependency_health_store = dependency_health_store or get_dependency_health_store()
         self.news_max_age_days = max(1, news_max_age_days)
         raw_profile = (news_strategy_profile or "short").strip().lower()
         self.news_strategy_profile = normalize_news_strategy_profile(news_strategy_profile)
@@ -2444,27 +2453,8 @@ class SearchService:
             self._providers.append(BochaSearchProvider(bocha_keys))
             logger.info(f"已配置 Bocha 搜索，共 {len(bocha_keys)} 个 API Key")
 
-        # 2. Tavily（免费额度更多，每月 1000 次）
-        if tavily_keys:
-            self._providers.append(TavilySearchProvider(tavily_keys))
-            logger.info(f"已配置 Tavily 搜索，共 {len(tavily_keys)} 个 API Key")
-
-        # 3. Brave Search（隐私优先，全球覆盖）
-        if brave_keys:
-            self._providers.append(BraveSearchProvider(brave_keys))
-            logger.info(f"已配置 Brave 搜索，共 {len(brave_keys)} 个 API Key")
-
-        # 4. SerpAPI 作为备选（每月 100 次）
-        if serpapi_keys:
-            self._providers.append(SerpAPISearchProvider(serpapi_keys))
-            logger.info(f"已配置 SerpAPI 搜索，共 {len(serpapi_keys)} 个 API Key")
-
-        # 5. MiniMax（Coding Plan Web Search，结构化结果）
-        if minimax_keys:
-            self._providers.append(MiniMaxSearchProvider(minimax_keys))
-            logger.info(f"已配置 MiniMax 搜索，共 {len(minimax_keys)} 个 API Key")
-
-        # 6. SearXNG（自建实例优先；未配置时可自动发现公共实例）
+        # 2. SearXNG is the only canonical fallback for Bocha. Public-instance
+        # discovery remains explicit opt-in and is never enabled by default.
         searxng_provider = SearXNGSearchProvider(
             searxng_base_urls,
             use_public_instances=bool(searxng_public_instances_enabled and not searxng_base_urls),
@@ -2472,13 +2462,33 @@ class SearchService:
         if searxng_provider.is_available:
             self._providers.append(searxng_provider)
             if searxng_base_urls:
-                logger.info("已配置 SearXNG 搜索，共 %s 个自建实例", len(searxng_base_urls))
+                logger.info("已配置 SearXNG fallback，共 %s 个自建实例", len(searxng_base_urls))
             else:
-                logger.info("已启用 SearXNG 公共实例自动发现模式")
+                logger.info("已显式启用 SearXNG 公共实例 fallback 自动发现模式")
 
-        # 7. Anspire Search（实时智能搜索优化）
+        # 3. Other configured engines are auxiliary research providers. They
+        # must not outrank the Bocha/SearXNG canonical chain.
+        if tavily_keys:
+            self._providers.append(TavilySearchProvider(tavily_keys))
+            logger.info(f"已配置 Tavily 搜索，共 {len(tavily_keys)} 个 API Key")
+
+        # 4. Brave Search（隐私优先，全球覆盖）
+        if brave_keys:
+            self._providers.append(BraveSearchProvider(brave_keys))
+            logger.info(f"已配置 Brave 搜索，共 {len(brave_keys)} 个 API Key")
+
+        # 5. SerpAPI 作为辅助 provider（每月 100 次）
+        if serpapi_keys:
+            self._providers.append(SerpAPISearchProvider(serpapi_keys))
+            logger.info(f"已配置 SerpAPI 搜索，共 {len(serpapi_keys)} 个 API Key")
+
+        # 6. MiniMax（Coding Plan Web Search，结构化结果）
+        if minimax_keys:
+            self._providers.append(MiniMaxSearchProvider(minimax_keys))
+            logger.info(f"已配置 MiniMax 搜索，共 {len(minimax_keys)} 个 API Key")
+        # 7. Anspire Search remains auxiliary (never inserted at index 0).
         if anspire_keys:
-            self._providers.insert(0, AnspireSearchProvider(anspire_keys))
+            self._providers.append(AnspireSearchProvider(anspire_keys))
             logger.info(f"已配置 Anspire Search 搜索，共 {len(anspire_keys)} 个 API Key")
             
         if not self._providers:
@@ -3397,6 +3407,9 @@ class SearchService:
             success=response.success,
             error_message=response.error_message,
             search_time=response.search_time,
+            fallback_used=response.fallback_used,
+            fallback_from=response.fallback_from,
+            fallback_to=response.fallback_to,
         )
 
     @classmethod
@@ -3463,6 +3476,9 @@ class SearchService:
             success=response.success,
             error_message=response.error_message,
             search_time=response.search_time,
+            fallback_used=response.fallback_used,
+            fallback_from=response.fallback_from,
+            fallback_to=response.fallback_to,
         )
 
     @classmethod
@@ -3782,6 +3798,9 @@ class SearchService:
             success=response.success,
             error_message=response.error_message,
             search_time=response.search_time,
+            fallback_used=response.fallback_used,
+            fallback_from=response.fallback_from,
+            fallback_to=response.fallback_to,
         )
 
     @staticmethod
@@ -3805,6 +3824,9 @@ class SearchService:
             success=response.success,
             error_message=response.error_message,
             search_time=response.search_time,
+            fallback_used=response.fallback_used,
+            fallback_from=response.fallback_from,
+            fallback_to=response.fallback_to,
         )
 
     @staticmethod
@@ -3835,6 +3857,88 @@ class SearchService:
             record_count=record_count,
         )
 
+    @staticmethod
+    def _provider_role(provider: BaseSearchProvider) -> str:
+        if provider.name == "Bocha":
+            return "PRIMARY"
+        if provider.name == "SearXNG":
+            return "FALLBACK"
+        return "AUXILIARY"
+
+    def provider_inventory(self) -> List[Dict[str, Any]]:
+        """Return non-secret provider order/role metadata for health views."""
+        inventory: List[Dict[str, Any]] = []
+        for index, provider in enumerate(self._providers, 1):
+            endpoint = None
+            if isinstance(provider, BochaSearchProvider):
+                endpoint = "https://api.bocha.cn/v1/web-search"
+            elif isinstance(provider, SearXNGSearchProvider):
+                endpoint = provider._base_urls[0] if provider._base_urls else SearXNGSearchProvider.PUBLIC_INSTANCES_URL
+            inventory.append({
+                "dependency_id": provider.name.lower(),
+                "category": "NEWS_SEARCH",
+                "configured": bool(provider.is_available),
+                "enabled": bool(provider.is_available),
+                "role": self._provider_role(provider),
+                "priority": index,
+                "endpoint": endpoint,
+                "public_discovery": bool(
+                    isinstance(provider, SearXNGSearchProvider) and provider._use_public_instances
+                ),
+            })
+        return inventory
+
+    def _record_provider_health(
+        self,
+        provider: BaseSearchProvider,
+        *,
+        response: Optional[SearchResponse] = None,
+        latency_ms: Optional[int] = None,
+        failure_class: Optional[str] = None,
+        error: Optional[Any] = None,
+        fallback_from: Optional[str] = None,
+        record_count: Optional[int] = None,
+        usable: Optional[bool] = None,
+    ) -> None:
+        success = None if response is None else bool(response.success)
+        if response is not None and error is None:
+            error = response.error_message
+        endpoint = None
+        if isinstance(provider, BochaSearchProvider):
+            endpoint = "https://api.bocha.cn/v1/web-search"
+        elif isinstance(provider, SearXNGSearchProvider):
+            endpoint = provider._base_urls[0] if provider._base_urls else SearXNGSearchProvider.PUBLIC_INSTANCES_URL
+        try:
+            self._dependency_health_store.record_result(
+                provider.name.lower(),
+                category="NEWS_SEARCH",
+                configured=bool(provider.is_available),
+                enabled=bool(provider.is_available),
+                role=self._provider_role(provider),
+                priority=next((i for i, item in enumerate(self._providers, 1) if item is provider), 99),
+                endpoint=endpoint,
+                success=success,
+                reachable=success,
+                usable=usable if usable is not None else (bool(response and response.results) if response else False),
+                records=record_count if record_count is not None else len(response.results or []) if response else 0,
+                empty_valid=False,
+                latency_ms=latency_ms,
+                failure_class_name=failure_class,
+                error=error,
+                fallback_from=fallback_from,
+                fallback_to=provider.name if fallback_from else None,
+            )
+        except Exception:
+            logger.debug("provider health persistence failed", exc_info=True)
+
+    @staticmethod
+    def _mark_fallback(response: SearchResponse, fallback_from: Optional[str]) -> SearchResponse:
+        if fallback_from:
+            response.fallback_used = True
+            response.fallback_from = fallback_from
+            response.fallback_to = response.provider
+        return response
+
     def search_topic_news(
         self,
         topic: str,
@@ -3863,10 +3967,13 @@ class SearchService:
             return cached
 
         had_provider_success = False
+        first_attempted_provider: Optional[str] = None
         try:
             for provider in self._providers:
                 if not provider.is_available:
                     continue
+                if first_attempted_provider is None:
+                    first_attempted_provider = provider.name
                 search_kwargs: Dict[str, Any] = {}
                 if isinstance(provider, TavilySearchProvider):
                     search_kwargs["topic"] = "news"
@@ -3882,6 +3989,15 @@ class SearchService:
                     )
                     response = provider.search(query, provider_max_results, days=search_days, **search_kwargs)
                 except Exception as exc:
+                    self._record_provider_health(
+                        provider,
+                        latency_ms=self._elapsed_ms(started_at),
+                        failure_class=type(exc).__name__,
+                        error=exc,
+                        fallback_from=first_attempted_provider if provider.name != first_attempted_provider else None,
+                        usable=False,
+                        record_count=0,
+                    )
                     self._record_news_search_run(
                         provider=provider.name,
                         operation="search_topic_news",
@@ -3894,11 +4010,26 @@ class SearchService:
                     continue
 
                 had_provider_success = had_provider_success or bool(response.success)
+                self._record_provider_health(
+                    provider,
+                    response=response,
+                    latency_ms=self._elapsed_ms(started_at),
+                    fallback_from=first_attempted_provider if provider.name != first_attempted_provider else None,
+                    usable=bool(response.success and response.results),
+                )
                 filtered = self._filter_news_response(
                     response,
                     search_days=search_days,
                     max_results=provider_max_results,
                     log_scope=f"{topic_text}:{provider.name}:topic_news",
+                )
+                self._record_provider_health(
+                    provider,
+                    response=filtered,
+                    latency_ms=self._elapsed_ms(started_at),
+                    fallback_from=first_attempted_provider if provider.name != first_attempted_provider else None,
+                    usable=bool(filtered.success and filtered.results),
+                    record_count=len(filtered.results or []),
                 )
                 if filtered.success and filtered.results:
                     prioritized, _preferred_count = self._prioritize_news_language(
@@ -3906,6 +4037,12 @@ class SearchService:
                         prefer_chinese=prefer_chinese,
                     )
                     limited = self._limit_search_response(prioritized, max_results=max_results)
+                    self._mark_fallback(
+                        limited,
+                        first_attempted_provider
+                        if provider.name == "SearXNG" and first_attempted_provider == "Bocha"
+                        else None,
+                    )
                     self._record_news_search_run(
                         provider=provider.name,
                         operation="search_topic_news",
@@ -4097,11 +4234,14 @@ class SearchService:
         try:
             # 依次尝试各个搜索引擎（若过滤后为空，继续尝试下一引擎）
             had_provider_success = False
+            first_attempted_provider: Optional[str] = None
             best_ranked_response: Optional[SearchResponse] = None
             best_ranked_stats: Optional[Dict[str, int]] = None
             for provider in self._providers:
                 if not provider.is_available:
                     continue
+                if first_attempted_provider is None:
+                    first_attempted_provider = provider.name
 
                 search_kwargs: Dict[str, Any] = {}
                 if isinstance(provider, TavilySearchProvider):
@@ -4123,6 +4263,15 @@ class SearchService:
                     )
                     response = provider.search(query, provider_max_results, days=search_days, **search_kwargs)
                 except Exception as exc:
+                    self._record_provider_health(
+                        provider,
+                        latency_ms=self._elapsed_ms(started_at),
+                        failure_class=type(exc).__name__,
+                        error=exc,
+                        fallback_from=first_attempted_provider if provider.name != first_attempted_provider else None,
+                        usable=False,
+                        record_count=0,
+                    )
                     self._record_news_search_run(
                         provider=provider.name,
                         operation="search_stock_news",
@@ -4131,7 +4280,8 @@ class SearchService:
                         error_type=type(exc).__name__,
                         error_message=exc,
                     )
-                    raise
+                    logger.warning("%s 股票新闻搜索异常: %s，尝试下一个引擎", provider.name, exc)
+                    continue
                 filtered_response = self._filter_news_response(
                     response,
                     search_days=search_days,
@@ -4139,6 +4289,13 @@ class SearchService:
                     log_scope=f"{stock_code}:{provider.name}:stock_news",
                 )
                 had_provider_success = had_provider_success or bool(response.success)
+                self._record_provider_health(
+                    provider,
+                    response=response,
+                    latency_ms=self._elapsed_ms(started_at),
+                    fallback_from=first_attempted_provider if provider.name != first_attempted_provider else None,
+                    usable=bool(response.success and response.results),
+                )
 
                 if filtered_response.success and filtered_response.results:
                     language_response, _preferred_count = self._prioritize_news_language(
@@ -4160,6 +4317,20 @@ class SearchService:
                     limited_response = self._limit_search_response(
                         admitted_response,
                         max_results=max_results,
+                    )
+                    self._mark_fallback(
+                        limited_response,
+                        first_attempted_provider
+                        if provider.name == "SearXNG" and first_attempted_provider == "Bocha"
+                        else None,
+                    )
+                    self._record_provider_health(
+                        provider,
+                        response=limited_response,
+                        latency_ms=self._elapsed_ms(started_at),
+                        fallback_from=limited_response.fallback_from,
+                        usable=bool(limited_response.results),
+                        record_count=len(limited_response.results or []),
                     )
                     admitted_count = len(limited_response.results or [])
                     self._record_news_search_run(
@@ -4329,11 +4500,21 @@ class SearchService:
         logger.info(f"搜索股票事件: {stock_name}({stock_code}) - {event_types}")
         
         # 依次尝试各个搜索引擎
+        first_attempted_provider: Optional[str] = None
         for provider in self._providers:
             if not provider.is_available:
                 continue
-            
-            response = provider.search(query, max_results=5)
+            if first_attempted_provider is None:
+                first_attempted_provider = provider.name
+            started_at = time.monotonic()
+            try:
+                response = provider.search(query, max_results=5)
+            except Exception as exc:
+                self._record_provider_health(provider, latency_ms=self._elapsed_ms(started_at), failure_class=type(exc).__name__, error=exc, usable=False, record_count=0)
+                continue
+            fallback_from = first_attempted_provider if provider.name == "SearXNG" and first_attempted_provider == "Bocha" else None
+            self._mark_fallback(response, fallback_from)
+            self._record_provider_health(provider, response=response, latency_ms=self._elapsed_ms(started_at), fallback_from=fallback_from, usable=bool(response.success and response.results))
             
             if response.success:
                 self._put_cache(cache_key, response)
@@ -4745,8 +4926,10 @@ class SearchService:
                 if not provider.is_available:
                     continue
                 
+                started_at = time.monotonic()
                 try:
                     response = provider.search(query, max_results=3)
+                    self._record_provider_health(provider, response=response, latency_ms=self._elapsed_ms(started_at), usable=bool(response.success and response.results))
                     
                     if response.success and response.results:
                         # 去重并添加结果
@@ -4764,6 +4947,7 @@ class SearchService:
                         logger.debug(f"[增强搜索] {provider.name} 无结果或失败")
                         
                 except Exception as e:
+                    self._record_provider_health(provider, latency_ms=self._elapsed_ms(started_at), failure_class=type(e).__name__, error=e, usable=False, record_count=0)
                     logger.warning(f"[增强搜索] {provider.name} 搜索异常: {e}")
                     continue
             

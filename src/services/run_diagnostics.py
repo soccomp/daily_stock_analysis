@@ -881,6 +881,28 @@ def record_provider_run(
     record_count: Optional[int] = None,
 ) -> None:
     """Append a provider attempt to the active context without affecting callers."""
+    try:
+        from src.services.dependency_health import get_dependency_health_store
+
+        category = "NEWS_SEARCH" if data_type == "news_search" else "MARKET_DATA" if "market" in data_type or "snapshot" in data_type else "EXTERNAL_DEPENDENCY"
+        provider_name = str(provider).lower()
+        role = "PRIMARY" if provider_name in {"bocha", "tushare", "tencent", "qwen-omlx"} else "FALLBACK" if provider_name in {"searxng", "sina", "efinance", "akshare", "akshare_em", "eastmoney"} else "AUXILIARY"
+        get_dependency_health_store().record_result(
+            provider_name,
+            category=category,
+            role=role,
+            success=bool(success),
+            reachable=bool(success),
+            usable=bool(success and (record_count is None or record_count > 0)),
+            records=max(0, int(record_count or 0)),
+            latency_ms=latency_ms,
+            failure_class_name=error_type,
+            error=error_message,
+            fallback_from=fallback_from,
+            fallback_to=fallback_to,
+        )
+    except Exception:  # pragma: no cover - diagnostics must not affect callers
+        pass
     context = get_current_diagnostic_context()
     if context is None:
         return
@@ -941,6 +963,24 @@ def record_llm_run(
     error_message: Optional[Any] = None,
 ) -> None:
     """Append an LLM call result to the active context without affecting callers."""
+    try:
+        from src.services.dependency_health import get_dependency_health_store
+
+        get_dependency_health_store().record_result(
+            "qwen-omlx" if (provider or "").lower() in {"omlx", "qwen", "openai"} or "qwen" in (model or "").lower() else (provider or "llm").lower(),
+            category="LLM_RESEARCH",
+            role="PRIMARY",
+            success=bool(success),
+            reachable=True,
+            usable=bool(success),
+            records=1 if success else 0,
+            latency_ms=duration_ms,
+            failure_class_name=error_type,
+            error=error_message,
+            metadata={"model": model, "call_type": call_type, "tokens": tokens},
+        )
+    except Exception:  # pragma: no cover - diagnostics must not affect callers
+        pass
     context = get_current_diagnostic_context()
     if context is None:
         return

@@ -200,6 +200,7 @@ def _record_source_success(source: str, *, rows: int | None = None) -> None:
             state["last_rows"] = float(rows)
             previous_avg = float(state.get("avg_rows", rows))
             state["avg_rows"] = previous_avg + (float(rows) - previous_avg) / successes
+    _persist_dependency_observation(source, success=True, rows=rows or 0)
 
 
 def _record_source_failure(source: str, error: object | None = None) -> None:
@@ -214,6 +215,37 @@ def _record_source_failure(source: str, error: object | None = None) -> None:
             state["last_error"] = " ".join(str(error).split())
         if failures >= _SOURCE_HEALTH_FAILURE_THRESHOLD:
             state["disabled_until"] = now + _SOURCE_HEALTH_COOLDOWN_SECONDS
+    _persist_dependency_observation(source, success=False, rows=0, error=error)
+
+
+def _persist_dependency_observation(
+    source: str,
+    *,
+    success: bool,
+    rows: int,
+    error: object | None = None,
+) -> None:
+    """Persist actual snapshot-provider outcomes without exposing credentials."""
+    try:
+        from src.services.dependency_health import get_dependency_health_store
+
+        get_dependency_health_store().record_result(
+            source,
+            category="MARKET_DATA",
+            configured=source != "tushare" or bool(os.getenv("TUSHARE_TOKEN", "").strip()),
+            enabled=True,
+            role="PRIMARY" if source in {"tushare", "efinance"} else "FALLBACK",
+            priority={"tushare": 1, "efinance": 2, "akshare_em": 3, "sina": 4, "em_datacenter": 5}.get(source, 99),
+            success=success,
+            reachable=success,
+            usable=success and rows > 0,
+            records=rows,
+            empty_valid=False,
+            failure_class_name=type(error).__name__ if error is not None else None,
+            error=error,
+        )
+    except Exception:
+        return
 
 
 def snapshot_source_health_snapshot(
