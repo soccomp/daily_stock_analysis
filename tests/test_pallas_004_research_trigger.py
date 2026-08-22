@@ -17,7 +17,10 @@ from src.investment.contracts.data_evidence import (
 from src.investment.m2.orchestration import AnalysisCompletion
 from src.investment.m2.orchestration import M2ShadowLoopService
 from src.investment.m2.repository import M2OperationalRepository
-from src.investment.m2.research_trigger import ResearchTriggerCoordinator
+from src.investment.m2.research_trigger import (
+    ResearchTriggerConflictError,
+    ResearchTriggerCoordinator,
+)
 from src.investment.m2.telemetry import build_research_runtime_signals
 from src.investment.m2.screening_candidates import (
     DatabaseScreeningCandidateSource,
@@ -505,6 +508,107 @@ def test_interrupted_screening_episode_preserves_source_without_duplicate(trigge
     assert second[0]["source"] == "SCREENING"
     assert second[0]["research_trigger"]["trigger_type"] == "SCHEDULED_SCREENING"
     assert second[0]["research_trigger"]["research_trigger_id"] == first[0]["research_trigger"]["research_trigger_id"]
+
+
+def test_processed_screening_episode_replays_by_dedup_identity_without_conflict(trigger_db):
+    coordinator = ResearchTriggerCoordinator(trigger_db)
+    candidate = {
+        "symbol": "300274", "source": "SCREENING", "screening_run_id": "run-replay",
+        "strategy": "capital_heat", "rank": 1, "screening_score": 80.0,
+        "score": 81.0, "selected_at": NOW.isoformat(),
+    }
+    first = coordinator.plan(
+        config=_config(max_symbols=1), snapshot=_snapshot_many(),
+        screening_candidates=[candidate], cycle_id="cycle-replay-first", now=NOW,
+    )
+    trigger = first[0]["research_trigger"]
+    coordinator.mark_success(
+        trigger=trigger,
+        research_id="research-replay",
+        proposal_id="proposal-replay",
+        reviewed_at=NOW,
+        interval_minutes=60,
+    )
+
+    replay = coordinator.plan(
+        config=_config(max_symbols=1), snapshot=_snapshot_many(),
+        screening_candidates=[candidate],
+        cycle_id="cycle-replay-later",
+        now=NOW + timedelta(minutes=61),
+    )
+
+    assert replay == []
+    persisted = coordinator.ledger.get_by_dedup_key("screening:run-replay:300274")
+    assert persisted is not None
+    assert persisted.research_trigger_id == trigger["research_trigger_id"]
+    assert persisted.content_hash == trigger["content_hash"]
+
+
+def test_unprocessed_screening_content_conflict_remains_fail_closed(trigger_db):
+    coordinator = ResearchTriggerCoordinator(trigger_db)
+    candidate = {
+        "symbol": "300274", "source": "SCREENING", "screening_run_id": "run-conflict",
+        "strategy": "capital_heat", "rank": 1, "screening_score": 80.0,
+        "score": 81.0, "selected_at": NOW.isoformat(),
+    }
+    first = coordinator.plan(
+        config=_config(max_symbols=1), snapshot=_snapshot_many(),
+        screening_candidates=[candidate], cycle_id="cycle-conflict-first", now=NOW,
+    )
+    original = coordinator.ledger.get_by_dedup_key("screening:run-conflict:300274")
+    assert original is not None
+    conflicting = ResearchTrigger.build(
+        **{
+            **original.model_dump(mode="python", exclude={"content_hash"}),
+            "evidence_refs": ("screening-run:run-conflict", "cycle:changed", "immutable-change"),
+        }
+    )
+
+    with pytest.raises(ResearchTriggerConflictError, match="dedup_key reused"):
+        coordinator.ledger.enqueue(conflicting)
+
+
+def test_empty_research_scope_is_a_normal_no_opportunity(trigger_db):
+    class SnapshotSource:
+        def capture_snapshot(self):
+            return _snapshot_many()
+
+    result = ProposalHandoffLoopService(
+        config=_config(max_symbols=1),
+        analysis_runner=None,
+        publisher=None,
+        snapshot_source=SnapshotSource(),
+        trigger_coordinator=ResearchTriggerCoordinator(trigger_db),
+        clock=lambda: NOW,
+    ).run_cycle(scheduled_for=NOW)
+
+    assert result.status == "NO_OPPORTUNITY"
+    assert result.proposal_ids == ()
+    assert result.blocked_reasons == ("no eligible research objects",)
+
+
+def test_empty_scope_with_screening_source_failure_remains_failed_closed(trigger_db):
+    class SnapshotSource:
+        def capture_snapshot(self):
+            return _snapshot_many()
+
+    class BrokenScreeningSource:
+        def latest(self, **kwargs):
+            raise RuntimeError("screening database unavailable")
+
+    result = ProposalHandoffLoopService(
+        config=_config(max_symbols=1),
+        analysis_runner=None,
+        publisher=None,
+        snapshot_source=SnapshotSource(),
+        screening_candidate_source=BrokenScreeningSource(),
+        trigger_coordinator=ResearchTriggerCoordinator(trigger_db),
+        clock=lambda: NOW,
+    ).run_cycle(scheduled_for=NOW)
+
+    assert result.status == "FAILED_CLOSED"
+    assert "screening candidate source failed" in result.blocked_reasons[0]
+    assert "screening database unavailable" in result.blocked_reasons[0]
 
 
 def test_interrupted_external_episode_preserves_trigger_type_without_duplicate(trigger_db):

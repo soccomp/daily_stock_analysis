@@ -160,11 +160,14 @@ def build_single_brain_m2_background_tasks(
                 result = M2ShadowLoopService.from_config(loaded_config).run_cycle()
                 persisted_count = len(result.persisted_decision_ids)
             logger.info(
-                "Single Brain %s cycle finished: cycle=%s status=%s persisted=%d",
+                "Single Brain %s cycle finished: cycle=%s status=%s persisted=%d "
+                "researched=%s blocked=%s",
                 execution_mode,
                 result.cycle_id,
                 result.status,
                 persisted_count,
+                ",".join(getattr(result, "researched_symbols", ())) or "-",
+                "|".join(getattr(result, "blocked_reasons", ())) or "-",
             )
 
         acquired = run_with_global_analysis_lock(

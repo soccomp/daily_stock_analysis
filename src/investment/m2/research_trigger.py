@@ -616,13 +616,16 @@ class ResearchTriggerCoordinator:
                 )
                 if screening_key in pending_keys:
                     continue
-                trigger = self._screening_trigger(
-                    scope=scope,
-                    snapshot=snapshot,
-                    cycle_id=cycle_id,
-                    now=now,
-                    policy_version=policy_version,
-                )
+                dedup_key = f"screening:{scope.get('screening_run_id') or ''}:{symbol}"
+                trigger = self.ledger.get_by_dedup_key(dedup_key)
+                if trigger is None:
+                    trigger = self._screening_trigger(
+                        scope=scope,
+                        snapshot=snapshot,
+                        cycle_id=cycle_id,
+                        now=now,
+                        policy_version=policy_version,
+                    )
                 result = self.ledger.enqueue(trigger)
                 if result.status == "DEDUPLICATED" and self._processed(trigger.research_trigger_id):
                     continue

@@ -125,7 +125,7 @@ class ProposalHandoffLoopService:
         blocked: list[str] = []
         try:
             authoritative_snapshot = self._snapshot_source.capture_snapshot()
-            screening_candidates = self._load_screening_candidates()
+            screening_candidates, screening_source_error = self._load_screening_candidates()
             if self._trigger_coordinator is None:
                 from src.investment.m2.selection import select_m2_research_objects
                 scopes = select_m2_research_objects(
@@ -149,10 +149,16 @@ class ProposalHandoffLoopService:
             )
         researched = tuple(f"{scope['symbol']}:{scope['source']}" for scope in scopes)
         if not scopes:
+            if screening_source_error is not None:
+                return ProposalHandoffRunResult(
+                    cycle,
+                    "FAILED_CLOSED",
+                    blocked_reasons=(screening_source_error,),
+                )
             return ProposalHandoffRunResult(
                 cycle,
-                "FAILED_CLOSED",
-                blocked_reasons=("M2 research-object selector returned an empty scope",),
+                "NO_OPPORTUNITY",
+                blocked_reasons=("no eligible research objects",),
             )
         for scope in scopes:
             symbol = scope["symbol"]
@@ -222,9 +228,9 @@ class ProposalHandoffLoopService:
             researched_symbols=researched,
         )
 
-    def _load_screening_candidates(self) -> list[dict[str, object]]:
+    def _load_screening_candidates(self) -> tuple[list[dict[str, object]], str | None]:
         if self._screening_candidate_source is None:
-            return []
+            return [], None
         max_candidates = min(
             50,
             max(1, int(getattr(self._config, "single_brain_m2_screening_max_candidates", 3))),
@@ -244,8 +250,8 @@ class ProposalHandoffLoopService:
                 "falling back to holdings/allowlist: %s",
                 exc,
             )
-            return []
-        return [candidate.as_scope() for candidate in candidates]
+            return [], f"screening candidate source failed: {type(exc).__name__}: {exc}"
+        return [candidate.as_scope() for candidate in candidates], None
 
 
 def _candidate_provenance(scope: dict[str, object]) -> CandidateProvenance:
