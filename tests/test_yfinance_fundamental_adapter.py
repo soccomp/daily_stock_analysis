@@ -96,7 +96,7 @@ class TestYfinanceFundamentalAdapter(unittest.TestCase):
         dividends = pd.Series(
             [0.26, 0.26, 0.26, 0.27],
             index=pd.DatetimeIndex(
-                ["2025-08-11", "2025-11-10", "2026-02-09", "2026-05-11"],
+                ["2025-09-11", "2025-11-10", "2026-02-09", "2026-05-11"],
                 tz="America/New_York",
             ),
             name="Dividends",
@@ -142,7 +142,7 @@ class TestYfinanceFundamentalAdapter(unittest.TestCase):
         # is dropped, and TTM silently falls back to the annual-rate estimate — the real
         # bug seen on live US/HK/JP/KR/TW reports (24.0 / "0 次" instead of the true sum).
         idx = pd.DatetimeIndex(
-            ["2025-08-11", "2025-11-10", "2026-02-09", "2026-05-11"],
+            ["2025-09-11", "2025-11-10", "2026-02-09", "2026-05-11"],
             tz="America/New_York",
         )
         dividends_df = pd.DataFrame({"Dividends": [0.26, 0.26, 0.26, 0.27]}, index=idx)
