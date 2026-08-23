@@ -3197,6 +3197,13 @@ class Config:
         """
         if (self.agent_generation_backend or AUTO_AGENT_BACKEND_ID).strip().lower() in GENERATION_ONLY_BACKEND_IDS:
             return False
+        if str(getattr(self, "agent_backend", AUTO_AGENT_BACKEND_ID) or AUTO_AGENT_BACKEND_ID).strip().lower() == "codex_app_server":
+            if self._agent_mode_explicit and not self.agent_mode:
+                return False
+            return (
+                str(getattr(self, "agent_arch", "single") or "single").strip().lower() == "single"
+                and bool(str(getattr(self, "codex_cli_model", "") or "").strip())
+            )
         # Phase 3 no longer lets AGENT_MODE=true bypass tool-route safety.
         if self._agent_mode_explicit:
             if not self.agent_mode:

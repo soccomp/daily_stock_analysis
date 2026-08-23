@@ -85,6 +85,20 @@ class TestAgentConfig(unittest.TestCase):
         config = Config._load_from_env()
         self.assertFalse(config.agent_mode)
 
+    @patch.dict(os.environ, {
+        'AGENT_BACKEND': 'codex_app_server',
+        'AGENT_ARCH': 'single',
+        'GENERATION_BACKEND': 'codex_cli',
+        'CODEX_CLI_MODEL': 'gpt-5.6-luna',
+    }, clear=True)
+    @patch('src.config.load_dotenv')
+    def test_codex_app_server_is_available_without_litellm_or_agent_mode(self, _mock_dotenv):
+        """Codex App Server must not be gated by the legacy LiteLLM Agent model check."""
+        from src.config import Config
+        Config._instance = None
+        config = Config._load_from_env()
+        self.assertTrue(config.is_agent_available())
+
     @patch.dict(os.environ, {'AGENT_SKILLS': ''}, clear=True)
     def test_empty_skills_list(self):
         """Empty AGENT_SKILLS should produce empty list."""
