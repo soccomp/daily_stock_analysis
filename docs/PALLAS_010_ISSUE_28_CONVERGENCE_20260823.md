@@ -55,4 +55,4 @@
 - `compileall`/`py_compile` 与 `git diff --check` 通过。
 - 候选 benchmark 未启动 DSA/Athena 服务，未修改生产目录、数据库、scheduler、proposal/order state、main 或 upstream；没有 proof order、scheduler catch-up、merge 或 PALLAS-011。
 
-最终提交 SHA 以候选分支提交后回填；独立 reviewer 应以候选分支与 GitHub 远端提交为审计对象。
+实现提交为 `d1cf174`，证据文档提交为 `3f57d0e`；独立 reviewer 应以候选分支 handoff 时的 exact `HEAD` 与 GitHub 远端提交为审计对象。
