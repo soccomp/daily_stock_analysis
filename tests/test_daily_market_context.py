@@ -984,6 +984,8 @@ def test_safe_dict_excludes_internal_history_identifiers() -> None:
         "summary": "市场震荡，结构分化。",
         "risk_tags": [],
         "source": "analysis_history",
+        "news_actionability": "NO_NEWS",
+        "news_audit_excluded_count": 0,
     }
 
 

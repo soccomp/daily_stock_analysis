@@ -2624,6 +2624,12 @@ class StockAnalysisPipeline:
             "realtime_quote_raw": self._safe_to_dict(realtime_quote),
             "chip_distribution_raw": self._safe_to_dict(chip_data),
         }
+        price_input_lineage = self._build_price_input_lineage(
+            enhanced_context=enhanced_context,
+            realtime_quote=realtime_quote,
+        )
+        if price_input_lineage is not None:
+            snapshot["price_input_lineage"] = price_input_lineage
         market_structure_context = enhanced_context.get("market_structure_context")
         if isinstance(market_structure_context, dict):
             snapshot["market_structure_context"] = market_structure_context
@@ -2641,6 +2647,72 @@ class StockAnalysisPipeline:
         if self.analysis_skills is not None:
             snapshot["skills"] = list(self.analysis_skills)
         return snapshot
+
+    @staticmethod
+    def _build_price_input_lineage(
+        *,
+        enhanced_context: Dict[str, Any],
+        realtime_quote: Any,
+    ) -> Optional[Dict[str, Any]]:
+        """Persist the real quote input used by the analysis price plan.
+
+        The proposal handoff must not infer price timing from unrelated report
+        timestamps.  A canonical lineage block is therefore emitted only when
+        the provider observation and local retrieval timestamps are both
+        present on the actual quote object.
+        """
+
+        quote = StockAnalysisPipeline._safe_to_dict(realtime_quote)
+        if not isinstance(quote, dict):
+            return None
+        source_event_time = quote.get("provider_timestamp")
+        retrieved_at = quote.get("fetched_at")
+        if not (
+            StockAnalysisPipeline._is_aware_iso_timestamp(source_event_time)
+            and StockAnalysisPipeline._is_aware_iso_timestamp(retrieved_at)
+        ):
+            return None
+
+        symbol = str(quote.get("code") or (enhanced_context or {}).get("code") or "").strip()
+        provider = str(quote.get("source") or "").strip()
+        price = quote.get("price")
+        if not symbol or not provider or price is None:
+            return None
+
+        source_reference = (
+            f"dsa:realtime-quote:{symbol}:{provider}:{source_event_time}"
+        )
+        return {
+            "lineage_role": "RESEARCH_OBSERVATION",
+            "input_kind": "REALTIME_QUOTE",
+            "symbol": symbol,
+            "provider": provider,
+            "source_reference": source_reference,
+            "source_event_time": source_event_time,
+            "retrieved_at": retrieved_at,
+            "observed_at": retrieved_at,
+            "price": price,
+            "quote_identity": {
+                "symbol": symbol,
+                "provider": provider,
+                "provider_timestamp": source_event_time,
+                "price": price,
+            },
+            "completion_status": "INTRADAY_OBSERVED",
+        }
+
+    @staticmethod
+    def _is_aware_iso_timestamp(value: Any) -> bool:
+        if not isinstance(value, str) or not value.strip():
+            return False
+        normalized = value.strip()
+        if normalized.endswith("Z"):
+            normalized = normalized[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return False
+        return parsed.tzinfo is not None and parsed.utcoffset() is not None
 
     def _persist_skill_opinion_samples_after_history_save(
         self,

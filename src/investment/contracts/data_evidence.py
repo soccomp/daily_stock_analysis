@@ -174,6 +174,12 @@ def price_plan_evidence(*, context_snapshot: Any, source_report_id: int, now) ->
             keys=("completion_status", "daily_completion_status"),
         )
         flags.append("DAILY_BAR_COMPLETE" if completion == "CLOSE_CONFIRMED" else "INTRADAY_OBSERVED")
+        lineage_role = _find_text(
+            price_input,
+            keys=("lineage_role", "input_scope"),
+        )
+        if lineage_role == "ORIGINAL_QUANTITATIVE_INPUT":
+            flags.append("ORIGINAL_QUANTITATIVE_INPUT")
         if source_event_time > now:
             available = False
             flags.append("PRICE_PLAN_SOURCE_EVENT_TIME_LATER_THAN_DECISION")
