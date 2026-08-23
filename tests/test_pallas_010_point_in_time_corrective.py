@@ -1,3 +1,4 @@
+import json
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
@@ -7,6 +8,7 @@ import pytest
 from src.core.backtest_engine import BacktestEngine, EvaluationConfig
 from src.investment.contracts.data_evidence import actionable_news_evidence, price_plan_evidence
 from src.market_review_contract import build_market_context
+from src.services.daily_market_context import DailyMarketContextService
 from src.services.screening import candidate_context as candidate_context_module
 from src.services.screening import daily as daily_module
 from src.services.screening import snapshot as snapshot_module
@@ -168,6 +170,150 @@ def test_actual_candidate_context_and_market_context_drop_unknown_or_later_news(
     assert [item["title"] for item in market_context["news"]] == ["before"]
     assert market_context["news_actionability"] == "CUTOFF_FILTERED"
     assert market_context["news_audit_excluded"][0]["title"] == "after"
+
+
+def test_market_context_components_require_causal_provenance_at_explicit_cutoff():
+    cutoff = datetime(2026, 8, 21, 6, 30, tzinfo=timezone.utc)
+    evidence = {
+        component: {
+            "observed_at": datetime(2026, 8, 21, 6, 0, tzinfo=timezone.utc).isoformat(),
+            "reference": f"provider:{component}",
+        }
+        for component in ("indices", "breadth", "sectors", "concepts")
+    }
+    payload = {
+        "kind": "market_review",
+        "region": "cn",
+        "generated_at": cutoff.isoformat(),
+        "indices": [{"change_pct": 1.0}],
+        "breadth": {
+            "up_count": 60,
+            "down_count": 30,
+            "flat_count": 10,
+            "limit_up_count": 6,
+            "limit_down_count": 1,
+        },
+        "sectors": {"top": [{"name": "AI"}], "bottom": []},
+        "concepts": {"top": [{"name": "Robotics"}], "bottom": []},
+        "data_quality": {
+            "indices": "available",
+            "breadth": "available",
+            "sectors": "available",
+            "concepts": "available",
+        },
+        "component_provenance": evidence,
+    }
+
+    validated = build_market_context(payload, task_id="pit-components", as_of=cutoff)
+    assert validated["component_timing_status"] == "PIT_VALIDATED"
+    assert validated["indices"]
+    assert validated["breadth"]
+    assert validated["sector_strength"]["top"]
+    assert validated["concepts"]["top"]
+
+    late = dict(payload)
+    late["component_provenance"] = {
+        **evidence,
+        "sectors": {
+            "observed_at": "2026-08-21T07:05:00+00:00",
+            "reference": "provider:sectors-late",
+        },
+    }
+    filtered = build_market_context(late, task_id="pit-components-late", as_of=cutoff)
+    assert filtered["sector_strength"] == {}
+    assert filtered["component_provenance"]["sectors"]["status"] == "LATER_THAN_CUTOFF_EXCLUDED"
+    assert filtered["market_strength"]["components"]["indices"] is not None
+
+    unknown = dict(payload)
+    unknown.pop("component_provenance")
+    excluded = build_market_context(unknown, task_id="pit-components-unknown", as_of=cutoff)
+    assert excluded["component_timing_status"] == "UNKNOWN_EXCLUDED"
+    assert excluded["indices"] == []
+    assert excluded["breadth"] is None
+    assert excluded["sector_strength"] == {}
+
+
+def test_same_day_market_review_pit_lookup_rejects_later_record_and_uses_earlier_record():
+    cutoff = datetime(2026, 8, 21, 6, 30, tzinfo=timezone.utc)
+
+    def record(created_at, summary):
+        payload = {
+            "kind": "market_review",
+            "region": "cn",
+            "date": "2026-08-21",
+            "sections": [{"key": "overview", "markdown": summary}],
+            "markdown_report": summary,
+        }
+        snapshot = {
+            "report_kind": "market_review",
+            "market_review_region": "cn",
+            "market_review_payload": payload,
+            "report_language": "zh",
+        }
+        return SimpleNamespace(
+            id=created_at.minute,
+            query_id="pit-review",
+            report_type="market_review",
+            analysis_summary=summary,
+            news_content=summary,
+            raw_result=json.dumps({"raw_response": summary}),
+            context_snapshot=json.dumps(snapshot),
+            created_at=created_at,
+        )
+
+    class HistoryDb:
+        def get_analysis_history(self, **_kwargs):
+            return [
+                record(
+                    datetime(2026, 8, 21, 7, 5, tzinfo=timezone.utc),
+                    "15:05 review must not enter the 14:30 decision.",
+                ),
+                record(
+                    datetime(2026, 8, 21, 6, 0, tzinfo=timezone.utc),
+                    "06:00 review is causal for the 06:30 decision.",
+                ),
+            ]
+
+    context = DailyMarketContextService(
+        db_manager=HistoryDb(),
+        today_fn=lambda: date(2026, 8, 21),
+    ).get_context(
+        region="cn",
+        config=SimpleNamespace(report_language="zh"),
+        notifier=SimpleNamespace(),
+        analyzer=None,
+        search_service=None,
+        allow_generate=False,
+        decision_as_of=cutoff,
+    )
+
+    assert context is not None
+    assert context.summary == "06:00 review is causal for the 06:30 decision."
+    assert "15:05" not in context.summary
+    assert context.created_at == datetime(2026, 8, 21, 6, 0, tzinfo=timezone.utc)
+
+    service = DailyMarketContextService(
+        db_manager=HistoryDb(),
+        today_fn=lambda: date(2026, 8, 21),
+    )
+    assert service._build_context_from_payload(
+        region="cn",
+        trade_date=date(2026, 8, 21),
+        payload={
+            "summary": "payload evidence is later",
+            "generated_at": "2026-08-21T07:05:00+00:00",
+        },
+        source="market_review_runtime",
+        created_at=datetime(2026, 8, 21, 6, 0, tzinfo=timezone.utc),
+        decision_as_of=cutoff,
+    ) is None
+    assert service._build_context_from_payload(
+        region="cn",
+        trade_date=date(2026, 8, 21),
+        payload={"summary": "no causal evidence"},
+        source="market_review_runtime",
+        decision_as_of=cutoff,
+    ) is None
 
 
 def test_actual_dsa_provider_and_collector_paths_keep_news_audit_only(monkeypatch):

@@ -47,6 +47,22 @@ _MARKET_REVIEW_LOCK_WAIT_INITIAL_INTERVAL_SECONDS = 0.5
 _MARKET_REVIEW_LOCK_WAIT_MAX_INTERVAL_SECONDS = 5.0
 _MARKET_REVIEW_LOCK_WAIT_BACKOFF_MULTIPLIER = 1.5
 _MARKET_REVIEW_LOCK_WAIT_MAX_ATTEMPTS = 40
+_CAUSAL_TIMESTAMP_KEYS = (
+    "observed_at",
+    "source_event_time",
+    "event_time",
+    "retrieved_at",
+    "fetched_at",
+    "evidence_at",
+    "evidence_timestamp",
+    "evidence_as_of",
+    "evidence_cutoff",
+    "generated_at",
+    "created_at",
+    "as_of",
+    "decision_as_of",
+    "timestamp",
+)
 
 _RISK_PATTERNS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     ("high_risk", ("高风险", "风险偏高", "风险较高", "high risk", "elevated risk")),
@@ -282,9 +298,25 @@ class DailyMarketContextService:
             logger.warning("读取大盘复盘历史失败，跳过市场上下文缓存: %s", exc)
             return None
 
+        newest_context = None
+        newest_created_at = None
         for record in records or []:
             if getattr(record, "report_type", None) != MARKET_REVIEW_REPORT_TYPE:
                 continue
+
+            record_created_at = None
+            if decision_as_of is not None:
+                try:
+                    cutoff = require_decision_cutoff(decision_as_of)
+                    record_created_at = require_decision_cutoff(
+                        getattr(record, "created_at", None),
+                    )
+                except (TypeError, ValueError):
+                    # A PIT history lookup cannot promote a record whose own
+                    # creation/evidence time is absent or not timezone-aware.
+                    continue
+                if record_created_at > cutoff:
+                    continue
 
             snapshot = _loads_mapping(getattr(record, "context_snapshot", None))
             record_region = snapshot.get("market_review_region")
@@ -324,8 +356,12 @@ class DailyMarketContextService:
                 decision_as_of=decision_as_of,
             )
             if context is not None:
-                return context
-        return None
+                if decision_as_of is None:
+                    return context
+                if newest_created_at is None or record_created_at > newest_created_at:
+                    newest_context = context
+                    newest_created_at = record_created_at
+        return newest_context
 
     @staticmethod
     def _is_query_scoped_cache_compatible(
@@ -647,6 +683,12 @@ class DailyMarketContextService:
         query_id: Optional[str] = None,
         decision_as_of: Optional[datetime | str] = None,
     ) -> Optional[DailyMarketContext]:
+        if decision_as_of is not None and not _point_in_time_evidence_is_valid(
+            payload,
+            created_at=created_at,
+            decision_as_of=decision_as_of,
+        ):
+            return None
         normalized_region = _normalize_region(region)
         scoped_payload = _payload_for_region(payload, normalized_region)
         summary = _extract_summary(scoped_payload, fallback_summary)
@@ -794,6 +836,67 @@ def _normalize_context_region(region: str) -> Optional[str]:
     if normalized in _VALID_REGIONS:
         return normalized
     return None
+
+
+def _iter_causal_timestamp_values(payload: Any) -> Iterable[Any]:
+    if not isinstance(payload, Mapping):
+        return
+    for key in _CAUSAL_TIMESTAMP_KEYS:
+        value = payload.get(key)
+        if value is not None and not isinstance(value, (Mapping, list, tuple)):
+            yield value
+    for key in (
+        "market_context",
+        "component_provenance",
+        "component_evidence",
+        "component_timing",
+        "markets",
+    ):
+        nested = payload.get(key)
+        if isinstance(nested, Mapping):
+            if key in {"component_provenance", "component_evidence", "component_timing", "markets"}:
+                children = nested.values()
+            else:
+                children = (nested,)
+            for child in children:
+                for value in _iter_causal_timestamp_values(child):
+                    yield value
+
+
+def _point_in_time_evidence_is_valid(
+    payload: Mapping[str, Any],
+    *,
+    created_at: Optional[datetime],
+    decision_as_of: datetime | str,
+) -> bool:
+    try:
+        cutoff = require_decision_cutoff(decision_as_of)
+    except (TypeError, ValueError):
+        return False
+
+    evidence_found = False
+    if created_at is not None:
+        try:
+            created_cutoff = require_decision_cutoff(created_at)
+        except (TypeError, ValueError):
+            return False
+        evidence_found = True
+        if created_cutoff > cutoff:
+            return False
+
+    for raw_value in _iter_causal_timestamp_values(payload):
+        try:
+            observed_at = require_decision_cutoff(raw_value)
+        except (TypeError, ValueError):
+            return False
+        evidence_found = True
+        if observed_at > cutoff:
+            return False
+
+    # A PIT runtime result with no record timestamp or causal payload time is
+    # not evidence.  It must not be promoted merely because its report text
+    # happens to exist.
+    return evidence_found
 
 
 def _loads_mapping(value: Any) -> Dict[str, Any]:

@@ -17,6 +17,17 @@ from src.services.screening.temporal import (
 
 
 MARKET_CONTEXT_SCHEMA_VERSION = "pallas-009-market-context-v1"
+_MARKET_COMPONENTS = ("indices", "breadth", "sectors", "concepts")
+_COMPONENT_TIMESTAMP_KEYS = (
+    "observed_at",
+    "source_event_time",
+    "event_time",
+    "retrieved_at",
+    "fetched_at",
+    "evidence_at",
+    "evidence_timestamp",
+    "timestamp",
+)
 
 
 def _clamp(value: float, lower: float = -1.0, upper: float = 1.0) -> float:
@@ -66,6 +77,78 @@ def derive_market_strength(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _component_metadata(payload: Mapping[str, Any], component: str) -> Any:
+    for container_name in (
+        "component_provenance",
+        "component_evidence",
+        "component_timing",
+    ):
+        container = payload.get(container_name)
+        if isinstance(container, Mapping) and component in container:
+            return container[component]
+
+    component_payload = payload.get(component)
+    if isinstance(component_payload, Mapping):
+        for key in ("provenance", "evidence", "timing"):
+            if key in component_payload:
+                return component_payload[key]
+    return None
+
+
+def _component_timestamps(value: Any) -> tuple[Any, ...]:
+    if not isinstance(value, Mapping):
+        return ()
+    values = [
+        value[key]
+        for key in _COMPONENT_TIMESTAMP_KEYS
+        if value.get(key) is not None
+    ]
+    nested = value.get("timestamps")
+    if isinstance(nested, (list, tuple)):
+        values.extend(nested)
+    return tuple(values)
+
+
+def _component_pit_evidence(
+    payload: Mapping[str, Any],
+    cutoff: datetime,
+) -> dict[str, dict[str, Any]]:
+    evidence: dict[str, dict[str, Any]] = {}
+    for component in _MARKET_COMPONENTS:
+        metadata = _component_metadata(payload, component)
+        raw_timestamps = _component_timestamps(metadata)
+        if not raw_timestamps:
+            evidence[component] = {
+                "status": "UNKNOWN_EXCLUDED",
+                "reference": None,
+            }
+            continue
+        try:
+            timestamps = tuple(
+                require_decision_cutoff(value) for value in raw_timestamps
+            )
+        except (TypeError, ValueError):
+            evidence[component] = {
+                "status": "UNKNOWN_EXCLUDED",
+                "reference": metadata.get("reference")
+                if isinstance(metadata, Mapping)
+                else None,
+            }
+            continue
+        if any(value > cutoff for value in timestamps):
+            status = "LATER_THAN_CUTOFF_EXCLUDED"
+        else:
+            status = "PIT_VALIDATED"
+        evidence[component] = {
+            "status": status,
+            "observed_at": max(canonical_utc(value) for value in timestamps),
+            "reference": metadata.get("reference")
+            if isinstance(metadata, Mapping)
+            else None,
+        }
+    return evidence
+
+
 def build_market_context(
     payload: Mapping[str, Any],
     *,
@@ -75,7 +158,6 @@ def build_market_context(
 ) -> dict[str, Any]:
     """Build the context consumed by downstream research without order authority."""
     quality = payload.get("data_quality") if isinstance(payload.get("data_quality"), Mapping) else {}
-    concepts = payload.get("concepts") if isinstance(payload.get("concepts"), Mapping) else {}
     source_failures = list(quality.get("source_failures") or [])
     news_cutoff = as_of or payload.get("generated_at")
     news_actionability = "UNKNOWN_EXCLUDED"
@@ -94,10 +176,75 @@ def build_market_context(
             news_audit_excluded = (
                 {"point_in_time_status": "EXCLUDED_UNKNOWN_OR_LATER_THAN_CUTOFF"},
             ) if payload.get("news") else ()
+    component_evidence = {}
+    component_payload = payload
+    if as_of is not None:
+        pit_cutoff = require_decision_cutoff(as_of)
+        component_evidence = _component_pit_evidence(payload, pit_cutoff)
+        component_payload = dict(payload)
+        for component, metadata in component_evidence.items():
+            if metadata["status"] != "PIT_VALIDATED":
+                component_payload.pop(component, None)
+        component_payload["breadth"] = (
+            payload.get("breadth")
+            if component_evidence["breadth"]["status"] == "PIT_VALIDATED"
+            else None
+        )
+        component_payload["indices"] = (
+            payload.get("indices")
+            if component_evidence["indices"]["status"] == "PIT_VALIDATED"
+            else []
+        )
+        component_payload["sectors"] = (
+            payload.get("sectors")
+            if component_evidence["sectors"]["status"] == "PIT_VALIDATED"
+            else {}
+        )
+        component_payload["concepts"] = (
+            payload.get("concepts")
+            if component_evidence["concepts"]["status"] == "PIT_VALIDATED"
+            else {}
+        )
+        component_quality = dict(quality)
+        for component, metadata in component_evidence.items():
+            if metadata["status"] != "PIT_VALIDATED":
+                component_quality[component] = f"{metadata['status'].lower()}"
+        component_payload["data_quality"] = component_quality
+        quality = component_quality
+    elif isinstance(quality, Mapping):
+        component_evidence = {
+            component: {"status": "UNVERIFIED", "reference": None}
+            for component in _MARKET_COMPONENTS
+        }
     required = ("indices", "breadth", "sectors", "concepts")
     statuses = {name: str(quality.get(name) or "unknown") for name in required}
     available = [name for name, status in statuses.items() if status.startswith("available")]
     missing = [name for name, status in statuses.items() if status in {"unknown", "unavailable", "failed"}]
+    if as_of is not None:
+        missing.extend(
+            name for name, metadata in component_evidence.items()
+            if metadata["status"] != "PIT_VALIDATED" and name not in missing
+        )
+        available = [
+            name for name in available
+            if component_evidence[name]["status"] == "PIT_VALIDATED"
+        ]
+    missing = list(dict.fromkeys(missing))
+    component_timing_status = (
+        "PIT_VALIDATED"
+        if as_of is not None and all(
+            metadata["status"] == "PIT_VALIDATED"
+            for metadata in component_evidence.values()
+        )
+        else "PIT_PARTIAL"
+        if as_of is not None and any(
+            metadata["status"] == "PIT_VALIDATED"
+            for metadata in component_evidence.values()
+        )
+        else "UNKNOWN_EXCLUDED"
+        if as_of is not None
+        else "UNVERIFIED"
+    )
     context = {
         "schema_version": MARKET_CONTEXT_SCHEMA_VERSION,
         "context_id": f"market-context:{task_id}",
@@ -113,23 +260,25 @@ def build_market_context(
             "failed": source_failures,
             "status": "complete" if not missing and not source_failures else "degraded",
         },
-        "indices": payload.get("indices") or [],
-        "breadth": payload.get("breadth"),
-        "turnover": (payload.get("breadth") or {}).get("total_amount") if isinstance(payload.get("breadth"), Mapping) else None,
-        "limit_up": (payload.get("breadth") or {}).get("limit_up_count") if isinstance(payload.get("breadth"), Mapping) else None,
-        "limit_down": (payload.get("breadth") or {}).get("limit_down_count") if isinstance(payload.get("breadth"), Mapping) else None,
-        "sector_strength": payload.get("sectors") or {},
+        "indices": component_payload.get("indices") or [],
+        "breadth": component_payload.get("breadth"),
+        "turnover": (component_payload.get("breadth") or {}).get("total_amount") if isinstance(component_payload.get("breadth"), Mapping) else None,
+        "limit_up": (component_payload.get("breadth") or {}).get("limit_up_count") if isinstance(component_payload.get("breadth"), Mapping) else None,
+        "limit_down": (component_payload.get("breadth") or {}).get("limit_down_count") if isinstance(component_payload.get("breadth"), Mapping) else None,
+        "sector_strength": component_payload.get("sectors") or {},
         "concepts": {
-            "data_status": concepts.get("data_status") or statuses["concepts"],
-            "top": concepts.get("top") or [],
-            "bottom": concepts.get("bottom") or [],
+            "data_status": (component_payload.get("concepts") or {}).get("data_status") or statuses["concepts"],
+            "top": (component_payload.get("concepts") or {}).get("top") or [],
+            "bottom": (component_payload.get("concepts") or {}).get("bottom") or [],
         },
         "news": list(news),
         "news_audit_excluded": list(news_audit_excluded),
         "news_actionability": news_actionability,
         "decision_as_of": decision_as_of,
         "data_quality": quality,
-        "market_strength": derive_market_strength(payload),
+        "market_strength": derive_market_strength(component_payload),
+        "component_timing_status": component_timing_status,
+        "component_provenance": component_evidence,
         "provenance": {
             "source": "DSA MarketAnalyzer",
             "source_payload_kind": payload.get("kind", "market_review"),
