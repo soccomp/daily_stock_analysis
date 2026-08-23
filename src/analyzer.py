@@ -3322,6 +3322,10 @@ class GeminiAnalyzer:
         prompt: str,
         max_tokens: int = 2048,
         temperature: float = 0.7,
+        *,
+        output_schema: Optional[Dict[str, Any]] = None,
+        response_validator: Optional[Callable[[str], None]] = None,
+        allow_web_search: bool = False,
     ) -> Optional[str]:
         """Public entry point for free-form text generation.
 
@@ -3338,9 +3342,18 @@ class GeminiAnalyzer:
             Response text, or None if the LLM call fails (error is logged).
         """
         try:
+            generation_config = {"max_tokens": max_tokens, "temperature": temperature}
+            if output_schema is not None:
+                generation_config["output_schema"] = output_schema
+            if allow_web_search:
+                generation_config["allow_web_search"] = True
+            call_kwargs: Dict[str, Any] = {}
+            if response_validator is not None:
+                call_kwargs["response_validator"] = response_validator
             result = self._call_litellm(
                 prompt,
-                generation_config={"max_tokens": max_tokens, "temperature": temperature},
+                generation_config=generation_config,
+                **call_kwargs,
             )
             if isinstance(result, tuple):
                 text, model_used, usage = result
@@ -3545,6 +3558,7 @@ class GeminiAnalyzer:
             generation_config = {
                 "temperature": config.llm_temperature,
                 "max_output_tokens": 8192,
+                "output_schema": self._analysis_output_schema(),
             }
 
             logger.info(f"[LLM调用] 开始调用 {model_name}...")
@@ -4662,6 +4676,173 @@ class GeminiAnalyzer:
             ) from exc
 
         self._validate_analysis_minimal_contract(data)
+
+    @staticmethod
+    def _analysis_output_schema() -> Dict[str, Any]:
+        """Return the strict JSON contract used by the DSA analysis parser.
+
+        Codex structured outputs require every object to declare
+        ``additionalProperties: false`` and every declared property to appear
+        in ``required``.  The schema therefore mirrors the existing dashboard
+        prompt instead of relying on the parser's historical best-effort
+        handling of undeclared fields.  Pipeline guardrail fields that are
+        added after model output remain local-only and are not part of this
+        model response contract.
+        """
+
+        def _object(properties: Dict[str, Any]) -> Dict[str, Any]:
+            return {
+                "type": "object",
+                "properties": properties,
+                "required": list(properties),
+                "additionalProperties": False,
+            }
+
+        text = {"type": "string"}
+        number_or_text = {"type": ["number", "string"]}
+
+        position_advice = _object(
+            {
+                "no_position": text,
+                "has_position": text,
+            }
+        )
+        dashboard = _object(
+            {
+                "core_conclusion": _object(
+                    {
+                        "one_sentence": text,
+                        "signal_type": text,
+                        "time_sensitivity": text,
+                        "position_advice": position_advice,
+                    }
+                ),
+                "data_perspective": _object(
+                    {
+                        "trend_status": _object(
+                            {
+                                "ma_alignment": text,
+                                "is_bullish": {"type": "boolean"},
+                                "trend_score": number_or_text,
+                            }
+                        ),
+                        "price_position": _object(
+                            {
+                                "current_price": number_or_text,
+                                "ma5": number_or_text,
+                                "ma10": number_or_text,
+                                "ma20": number_or_text,
+                                "bias_ma5": number_or_text,
+                                "bias_status": text,
+                                "support_level": number_or_text,
+                                "resistance_level": number_or_text,
+                            }
+                        ),
+                        "volume_analysis": _object(
+                            {
+                                "volume_ratio": number_or_text,
+                                "volume_status": text,
+                                "turnover_rate": number_or_text,
+                                "volume_meaning": text,
+                            }
+                        ),
+                        "chip_structure": _object(
+                            {
+                                "profit_ratio": number_or_text,
+                                "avg_cost": number_or_text,
+                                "concentration": number_or_text,
+                                "chip_health": text,
+                            }
+                        ),
+                    }
+                ),
+                "intelligence": _object(
+                    {
+                        "latest_news": text,
+                        "risk_alerts": {"type": "array", "items": text},
+                        "positive_catalysts": {"type": "array", "items": text},
+                        "earnings_outlook": text,
+                        "sentiment_summary": text,
+                    }
+                ),
+                "battle_plan": _object(
+                    {
+                        "sniper_points": _object(
+                            {
+                                "ideal_buy": text,
+                                "secondary_buy": text,
+                                "stop_loss": text,
+                                "take_profit": text,
+                            }
+                        ),
+                        "position_strategy": _object(
+                            {
+                                "suggested_position": text,
+                                "entry_plan": text,
+                                "risk_control": text,
+                            }
+                        ),
+                        "action_checklist": {"type": "array", "items": text},
+                    }
+                ),
+                "phase_decision": _object(
+                    {
+                        "phase_context": _object({"phase": text}),
+                        "action_window": text,
+                        "immediate_action": text,
+                        "watch_conditions": {"type": "array", "items": text},
+                        "next_check_time": text,
+                        "confidence_reason": text,
+                        "data_limitations": {"type": "array", "items": text},
+                    }
+                ),
+                "signal_attribution": _object(
+                    {
+                        "technical_indicators": number_or_text,
+                        "news_sentiment": number_or_text,
+                        "fundamentals": number_or_text,
+                        "market_conditions": number_or_text,
+                        "strongest_bullish_signal": text,
+                        "strongest_bearish_signal": text,
+                    }
+                ),
+            }
+        )
+
+        properties = {
+            "stock_name": text,
+            "sentiment_score": {"type": "integer"},
+            "trend_prediction": text,
+            "operation_advice": text,
+            "decision_type": {"type": "string", "enum": ["buy", "hold", "sell"]},
+            "action": {
+                "type": "string",
+                "enum": ["buy", "add", "hold", "reduce", "sell", "watch", "avoid", "alert"],
+            },
+            "guardrail_reason": text,
+            "confidence_level": text,
+            "dashboard": dashboard,
+            "analysis_summary": text,
+            "key_points": text,
+            "risk_warning": text,
+            "buy_reason": text,
+            "trend_analysis": text,
+            "short_term_outlook": text,
+            "medium_term_outlook": text,
+            "technical_analysis": text,
+            "ma_analysis": text,
+            "volume_analysis": text,
+            "pattern_analysis": text,
+            "fundamental_analysis": text,
+            "sector_position": text,
+            "company_highlights": text,
+            "news_summary": text,
+            "market_sentiment": text,
+            "hot_topics": text,
+            "search_performed": {"type": "boolean"},
+            "data_sources": text,
+        }
+        return _object(properties)
     
     def _parse_text_response(
         self, 

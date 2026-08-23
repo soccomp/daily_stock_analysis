@@ -19,7 +19,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import ContextVar
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1740,19 +1740,36 @@ def _call_screening_screen(
     with _screening_runtime_env(config, max_results=max_results):
         pipeline_config = ScreeningPipelineConfig.from_env()
         pipeline_context = _build_screening_context(config, max_results=max_results)
+        pipeline_config.generation_backend = getattr(config, "generation_backend", "")
+        pipeline_config.codex_cli_model = getattr(config, "codex_cli_model", "")
+        pipeline_config.codex_cli_reasoning_effort = getattr(config, "codex_cli_reasoning_effort", "")
+        pipeline_config.codex_cli_web_search_enabled = getattr(config, "codex_cli_web_search_enabled", False)
+        pipeline_config.runtime_config = config
+        if str(pipeline_config.generation_backend or "").strip().lower() == "codex_cli":
+            pipeline_config.llm_model = getattr(config, "codex_cli_model", "gpt-5.6-luna") or "gpt-5.6-luna"
+            pipeline_config.llm_fallback_models = []
+            pipeline_config.llm_channels = []
+            pipeline_config.llm_config_path = None
 
     daily_history_fetcher = _build_screening_dsa_daily_history_fetcher()
-    with _screening_litellm_headers(config):
+    is_codex_backend = str(getattr(config, "generation_backend", "") or "").strip().lower() == "codex_cli"
+    header_context = _screening_litellm_headers(config) if not is_codex_backend else nullcontext()
+    with header_context:
+        pipeline_kwargs = {
+            "market": market,
+            "max_output": max_results,
+            "use_llm": True,
+            "selection_seed": selection_seed,
+            "context": pipeline_context,
+            "config": pipeline_config,
+            "progress_callback": progress_callback,
+            "daily_history_fetcher": daily_history_fetcher,
+        }
+        if is_codex_backend:
+            pipeline_kwargs["runtime_config"] = config
         return run_screening_pipeline(
             strategy,
-            market=market,
-            max_output=max_results,
-            use_llm=True,
-            selection_seed=selection_seed,
-            context=pipeline_context,
-            config=pipeline_config,
-            progress_callback=progress_callback,
-            daily_history_fetcher=daily_history_fetcher,
+            **pipeline_kwargs,
         )
 
 

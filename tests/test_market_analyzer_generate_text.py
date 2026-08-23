@@ -232,7 +232,7 @@ class TestAnalyzerGenerateText:
             assert analyzer.get_generation_backend_config_error() is None
             assert analyzer.is_available() is True
 
-    def test_analyze_uses_litellm_fallback_when_codex_cli_config_error_is_fallbackable(self):
+    def test_analyze_fails_closed_when_codex_litellm_fallback_is_configured(self):
         from src.llm.generation_backend import GenerationBackend, GenerationError, GenerationErrorCode
         from src.llm.local_cli_backend import LocalCliGenerationBackend
 
@@ -286,15 +286,15 @@ class TestAnalyzerGenerateText:
              patch.object(analyzer, "_get_skill_prompt_sections", return_value=(None, None, True)), \
              patch.object(analyzer, "_format_prompt", return_value="prompt"), \
              patch.object(analyzer, "_build_market_snapshot", return_value={}):
-            assert analyzer.is_available() is True
+            assert analyzer.is_available() is False
             result = analyzer.analyze({"code": "600519", "stock_name": "贵州茅台"})
 
-        assert result.success is True
-        assert result.analysis_summary == "fallback ok"
-        primary_backend.generate.assert_called()
-        fallback_backend.generate.assert_called()
+        assert result.success is False
+        assert "unsafe_config" in result.error_message
+        primary_backend.generate.assert_not_called()
+        fallback_backend.generate.assert_not_called()
 
-    def test_analyze_preserves_litellm_text_fallback_after_codex_cli_primary_failure(self):
+    def test_analyze_does_not_use_litellm_after_codex_primary_failure(self):
         from src.analyzer import AnalysisResult, _AllModelsFailedError
         from src.llm.generation_backend import GenerationBackend, GenerationError, GenerationErrorCode
 
@@ -356,22 +356,12 @@ class TestAnalyzerGenerateText:
              patch("src.analyzer.persist_llm_usage") as mock_persist:
             result = analyzer.analyze({"code": "600519", "stock_name": "贵州茅台"})
 
-        assert result.analysis_summary == "纯文本兜底摘要"
-        assert result.raw_response == "这不是 JSON，而是 fallback 模型返回的纯文本分析"
-        assert result.model_used == "provider/fallback-model"
-        mock_parse.assert_called_once_with(
-            "这不是 JSON，而是 fallback 模型返回的纯文本分析",
-            "600519",
-            "贵州茅台",
-        )
-        mock_persist.assert_called_once_with(
-            {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
-            "provider/fallback-model",
-            call_type="analysis",
-            stock_code="600519",
-        )
-        primary_backend.generate.assert_called_once()
-        fallback_backend.generate.assert_called_once()
+        assert result.success is False
+        assert "unsafe_config" in result.error_message
+        mock_parse.assert_not_called()
+        mock_persist.assert_not_called()
+        primary_backend.generate.assert_not_called()
+        fallback_backend.generate.assert_not_called()
 
     def test_analyze_does_not_persist_unavailable_usage(self):
         analyzer = self._make_analyzer()
@@ -480,7 +470,7 @@ class TestAnalyzerGenerateText:
         assert callable(backend.generate.call_args.kwargs["response_validator"])
         assert backend.generate.call_args.kwargs["audit_context"] == {"call_type": "analysis"}
 
-    def test_call_litellm_wraps_fallback_generation_error_with_primary_context(self):
+    def test_call_litellm_rejects_codex_fallback_configuration(self):
         from src.llm.generation_backend import GenerationBackend, GenerationError, GenerationErrorCode
 
         analyzer = self._make_analyzer()
@@ -517,13 +507,11 @@ class TestAnalyzerGenerateText:
                 analyzer._call_litellm("prompt", {"max_tokens": 128})
 
         error = exc_info.value
-        assert error.stage == "fallback"
-        assert error.error_code is GenerationErrorCode.INVALID_JSON
-        assert error.details["reason"] == "fallback_backend_failed"
-        assert error.details["primary_error"]["error_code"] == "command_not_found"
-        assert error.details["primary_error"]["details"]["reason"] == "executable_not_found"
-        assert error.details["fallback_error"]["error_code"] == "invalid_json"
-        assert error.details["fallback_error"]["details"]["reason"] == "invalid_json"
+        assert error.stage == "configuration"
+        assert error.error_code is GenerationErrorCode.UNSAFE_CONFIG
+        assert error.details["reason"] == "codex_fallback_forbidden"
+        primary_backend.generate.assert_not_called()
+        fallback_backend.generate.assert_not_called()
 
     def test_call_litellm_rejects_unknown_generation_backend_without_litellm_fallback(self):
         from src.llm.generation_backend import GenerationError

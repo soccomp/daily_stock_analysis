@@ -40,6 +40,7 @@ from src.notification_contracts import (
 from src.services.stock_list_parser import split_stock_list
 from src.llm.backend_registry import (
     AUTO_AGENT_BACKEND_ID,
+    CODEX_CLI_BACKEND_ID,
     GENERATION_ONLY_BACKEND_IDS,
     LOCAL_CLI_GENERATION_BACKEND_IDS,
     LITELLM_BACKEND_ID,
@@ -49,6 +50,9 @@ from src.llm.backend_registry import (
     SUPPORTED_GENERATION_BACKENDS,
 )
 from src.llm.local_cli_backend import (
+    DEFAULT_CODEX_CLI_MODEL,
+    DEFAULT_CODEX_CLI_REASONING_EFFORT,
+    SUPPORTED_CODEX_CLI_REASONING_EFFORTS,
     DEFAULT_GENERATION_BACKEND_MAX_CONCURRENCY,
     DEFAULT_LOCAL_CLI_BACKEND_MAX_CONCURRENCY,
     DEFAULT_LOCAL_CLI_MAX_OUTPUT_BYTES,
@@ -902,6 +906,9 @@ class Config:
     generation_backend_max_output_bytes: int = DEFAULT_LOCAL_CLI_MAX_OUTPUT_BYTES
     generation_backend_max_concurrency: int = DEFAULT_GENERATION_BACKEND_MAX_CONCURRENCY
     local_cli_backend_max_concurrency: int = DEFAULT_LOCAL_CLI_BACKEND_MAX_CONCURRENCY
+    codex_cli_model: str = DEFAULT_CODEX_CLI_MODEL
+    codex_cli_reasoning_effort: str = DEFAULT_CODEX_CLI_REASONING_EFFORT
+    codex_cli_web_search_enabled: bool = False
     opencode_cli_model: str = ""
     # LiteLLM unified model config (provider/model format, e.g. gemini/gemini-3.1-pro-preview)
     litellm_model: str = ""  # Primary model; must include provider prefix when set explicitly
@@ -1655,7 +1662,9 @@ class Config:
         )
         _generation_fallback_raw = os.getenv('GENERATION_FALLBACK_BACKEND')
         if _generation_fallback_raw is None:
-            generation_fallback_backend = LITELLM_BACKEND_ID
+            generation_fallback_backend = (
+                "" if generation_backend == CODEX_CLI_BACKEND_ID else LITELLM_BACKEND_ID
+            )
         else:
             generation_fallback_backend = _generation_fallback_raw.strip().lower()
         agent_generation_backend = (
@@ -1691,6 +1700,17 @@ class Config:
             maximum=MAX_LOCAL_CLI_BACKEND_MAX_CONCURRENCY,
         )
         opencode_cli_model = (os.getenv('OPENCODE_CLI_MODEL', '') or '').strip()
+        codex_cli_model = (
+            os.getenv('CODEX_CLI_MODEL', DEFAULT_CODEX_CLI_MODEL) or DEFAULT_CODEX_CLI_MODEL
+        ).strip()
+        codex_cli_reasoning_effort = (
+            os.getenv('CODEX_CLI_REASONING_EFFORT', DEFAULT_CODEX_CLI_REASONING_EFFORT)
+            or DEFAULT_CODEX_CLI_REASONING_EFFORT
+        ).strip().lower()
+        codex_cli_web_search_enabled = parse_env_bool(
+            os.getenv('CODEX_CLI_WEB_SEARCH_ENABLED'),
+            default=False,
+        )
 
         agent_litellm_model = normalize_agent_litellm_model(
             os.getenv('AGENT_LITELLM_MODEL', ''),
@@ -1845,6 +1865,9 @@ class Config:
             generation_backend_max_output_bytes=generation_backend_max_output_bytes,
             generation_backend_max_concurrency=generation_backend_max_concurrency,
             local_cli_backend_max_concurrency=local_cli_backend_max_concurrency,
+            codex_cli_model=codex_cli_model,
+            codex_cli_reasoning_effort=codex_cli_reasoning_effort,
+            codex_cli_web_search_enabled=codex_cli_web_search_enabled,
             opencode_cli_model=opencode_cli_model,
             litellm_model=litellm_model,
             litellm_fallback_models=litellm_fallback_models,
@@ -3299,6 +3322,16 @@ class Config:
             ))
         if generation_fallback_backend and generation_fallback_backend == generation_backend:
             generation_fallback_backend = ""
+        if generation_backend == CODEX_CLI_BACKEND_ID and generation_fallback_backend:
+            issues.append(ConfigIssue(
+                severity="error",
+                message=(
+                    "Codex/Codex App Server 生产路径禁止 GENERATION_FALLBACK_BACKEND；"
+                    "请留空以保持 ChatGPT OAuth、Luna Max 的 fail-closed 语义。"
+                    f"已配置的值为：{generation_fallback_backend}。"
+                ),
+                field="GENERATION_FALLBACK_BACKEND",
+            ))
         if generation_fallback_backend and generation_fallback_backend != LITELLM_BACKEND_ID:
             issues.append(ConfigIssue(
                 severity="error",
@@ -3374,6 +3407,28 @@ class Config:
                         "不配置时 DSA 将使用 OpenCode 自身默认模型。"
                     ),
                     field="OPENCODE_CLI_MODEL",
+                ))
+
+        if generation_backend == "codex_cli":
+            codex_model = (self.codex_cli_model or "").strip()
+            if not codex_model or any(ch.isspace() for ch in codex_model) or any(
+                marker in codex_model for marker in ("|", ">", "<", ";", "`", "&&", "||", "$")
+            ):
+                issues.append(ConfigIssue(
+                    severity="error",
+                    message="CODEX_CLI_MODEL 必须是非空且不含空白或 shell 元字符的模型名。",
+                    field="CODEX_CLI_MODEL",
+                    code="invalid_codex_model",
+                ))
+            if (self.codex_cli_reasoning_effort or "").strip().lower() not in SUPPORTED_CODEX_CLI_REASONING_EFFORTS:
+                issues.append(ConfigIssue(
+                    severity="error",
+                    message=(
+                        "CODEX_CLI_REASONING_EFFORT 当前支持 "
+                        f"{'、'.join(sorted(SUPPORTED_CODEX_CLI_REASONING_EFFORTS))}。"
+                    ),
+                    field="CODEX_CLI_REASONING_EFFORT",
+                    code="invalid_codex_reasoning_effort",
                 ))
 
         # --- LLM availability ---

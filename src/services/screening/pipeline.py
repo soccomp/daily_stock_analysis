@@ -68,6 +68,7 @@ def screen(
     selection_seed: str = "",
     context: dict[str, object] | None = None,
     config: Config | None = None,
+    runtime_config: object | None = None,
     progress_callback: Callable[[int, str], None] | None = None,
     daily_history_fetcher: Callable[..., pd.DataFrame] | None = None,
 ) -> ScreenResult:
@@ -349,7 +350,12 @@ def screen(
     llm_model_used = ""
     llm_attempted_models: list[str] = []
     llm_failure_reason = ""
-    if use_llm and config.has_llm_config():
+    effective_runtime_config = runtime_config or config
+    if use_llm and (
+        config.has_llm_config()
+        or str(getattr(effective_runtime_config, "generation_backend", "") or "").strip().lower()
+        == "codex_cli"
+    ):
         _emit_progress(progress_callback, 66, "正在执行 LLM 候选重排")
         candidate_context_rows: list[dict[str, object]] = []
         event_source_weights = _event_source_weights(screening.event_profile)
@@ -424,6 +430,8 @@ def screen(
             timeout_sec=config.llm_timeout_sec,
             max_tokens=config.llm_max_tokens,
             degradation=llm_prompt_degradation,
+            generation_backend=getattr(effective_runtime_config, "generation_backend", ""),
+            runtime_config=effective_runtime_config,
         )
         degradation.extend(llm_prompt_degradation)
         picks = llm_result.picks

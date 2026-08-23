@@ -368,6 +368,12 @@ def build_agent_executor(config=None, skills: Optional[List[str]] = None):
         from src.config import get_config
         config = get_config()
 
+    from src.agent.agent_backend import resolve_agent_backend_id
+    if resolve_agent_backend_id(config) == "codex_app_server":
+        # Batch stock analysis must not fall back to the legacy LiteLLM
+        # tool-loop when the production Codex profile is selected.
+        return build_agent_chat_executor(config, skills=skills)
+
     arch = getattr(config, "agent_arch", "single")
 
     from src.agent.llm_adapter import LLMToolAdapter

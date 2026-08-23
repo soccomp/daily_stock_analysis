@@ -138,6 +138,9 @@ class SystemConfigService:
         "GENERATION_BACKEND_MAX_CONCURRENCY",
         "LOCAL_CLI_BACKEND_MAX_CONCURRENCY",
         "OPENCODE_CLI_MODEL",
+        "CODEX_CLI_MODEL",
+        "CODEX_CLI_REASONING_EFFORT",
+        "CODEX_CLI_WEB_SEARCH_ENABLED",
         "LITELLM_CONFIG",
         "LITELLM_MODEL",
         "LITELLM_FALLBACK_MODELS",
@@ -3594,8 +3597,7 @@ class SystemConfigService:
                 ),
                 (
                     "请确认 Codex CLI 已安装到后端 PATH 可见目录；桌面端请完全退出并重开。"
-                    "打开 Codex CLI 交互窗口不会改变已运行后端的 PATH；若找到后仍失败，再检查 Codex CLI 登录态，"
-                    "或将 GENERATION_BACKEND 设回 litellm。"
+                    "打开 Codex CLI 交互窗口不会改变已运行后端的 PATH；若找到后仍失败，再检查 Codex CLI 登录态。"
                     if generation_backend == CODEX_CLI_BACKEND_ID
                     else "请先安装并登录对应 CLI，或将 GENERATION_BACKEND 设回 litellm。"
                 ),
@@ -3640,6 +3642,29 @@ class SystemConfigService:
             effective_map.get("AGENT_GENERATION_BACKEND"),
             default=AUTO_AGENT_BACKEND_ID,
         )
+        agent_ui_backend = normalize_backend_id(
+            effective_map.get("AGENT_BACKEND"),
+            default=AUTO_AGENT_BACKEND_ID,
+        )
+        if agent_ui_backend == "codex_app_server":
+            if primary_check.get("status") == "configured":
+                return self._setup_check(
+                    "llm_agent",
+                    "Agent 渠道",
+                    "agent",
+                    True,
+                    "configured",
+                    "Agent 工具调用使用 Codex App Server；模型为 GPT-5.6 Luna，reasoning_effort=max。",
+                )
+            return self._setup_check(
+                "llm_agent",
+                "Agent 渠道",
+                "agent",
+                True,
+                "needs_action",
+                "Codex App Server Agent 依赖的 Codex generation backend 当前不可用。",
+                "请先修复 Codex CLI PATH/登录状态，再重新检查 Agent 配置。",
+            )
         if agent_backend in GENERATION_ONLY_BACKEND_IDS:
             return self._setup_check(
                 "llm_agent",

@@ -10,6 +10,7 @@ import os
 from dataclasses import dataclass
 
 from src.config import apply_litellm_api_surface
+from src.llm.backend_factory import create_generation_backend
 from src.llm.errors import call_litellm_with_param_recovery
 from src.llm.generation_params import apply_litellm_generation_params
 from src.services.screening.models import Pick
@@ -29,6 +30,56 @@ def _normalize_code(value: object) -> str:
 logger = logging.getLogger(__name__)
 _DEFAULT_RANKING_PROMPT_MAX_CHARS = 24_000
 _PROMPT_TRIM_MARKER = "[prompt_trimmed]"
+_CODEX_RANKING_MODEL = "gpt-5.6-luna"
+_CODEX_RANKING_SCHEMA = {
+    "type": "object",
+    "required": ["market_view", "selection_logic", "portfolio_risk", "ranked"],
+    "properties": {
+        "market_view": {"type": "string"},
+        "selection_logic": {"type": "string"},
+        "portfolio_risk": {"type": "string"},
+        "ranked": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "code",
+                    "llm_score",
+                    "confidence",
+                    "sector",
+                    "theme",
+                    "thesis",
+                    "reason",
+                    "risk",
+                    "catalysts",
+                    "risk_flags",
+                    "tags",
+                    "style_fit",
+                    "watch_items",
+                    "invalidators",
+                ],
+                "properties": {
+                    "code": {"type": "string"},
+                    "llm_score": {"type": "number"},
+                    "confidence": {"type": "number"},
+                    "sector": {"type": "string"},
+                    "theme": {"type": "string"},
+                    "thesis": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "risk": {"type": "string"},
+                    "catalysts": {"type": "array", "items": {"type": "string"}},
+                    "risk_flags": {"type": "array", "items": {"type": "string"}},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "style_fit": {"type": "string"},
+                    "watch_items": {"type": "array", "items": {"type": "string"}},
+                    "invalidators": {"type": "array", "items": {"type": "string"}},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    "additionalProperties": False,
+}
 
 
 @dataclass
@@ -81,6 +132,8 @@ def rank_candidates(
     timeout_sec: float = 60.0,
     max_prompt_chars: int | None = _DEFAULT_RANKING_PROMPT_MAX_CHARS,
     max_tokens: int | None = 2048,
+    generation_backend: str = "",
+    runtime_config: object | None = None,
 ) -> list[Pick]:
     """Use LLM to re-rank candidates and add ranking_reason / risk_summary.
 
@@ -105,6 +158,8 @@ def rank_candidates(
         timeout_sec=timeout_sec,
         max_prompt_chars=max_prompt_chars,
         max_tokens=max_tokens,
+        generation_backend=generation_backend,
+        runtime_config=runtime_config,
     ).picks
 
 
@@ -129,6 +184,8 @@ def rank_candidates_with_metadata(
     max_prompt_chars: int | None = _DEFAULT_RANKING_PROMPT_MAX_CHARS,
     degradation: list[str] | None = None,
     max_tokens: int | None = 2048,
+    generation_backend: str = "",
+    runtime_config: object | None = None,
 ) -> LLMRankingResult:
     """Use LLM to re-rank candidates and return global research metadata."""
     if not candidates:
@@ -142,7 +199,12 @@ def rank_candidates_with_metadata(
         degradation=degradation,
     )
 
-    model_chain = _dedupe([llm_model, *(fallback_models or [])])
+    if str(generation_backend or "").strip().lower() == "codex_cli":
+        # The production Codex profile is a single explicit model. Do not let
+        # screening's legacy model/fallback arguments reintroduce LiteLLM or Qwen.
+        model_chain = [_CODEX_RANKING_MODEL]
+    else:
+        model_chain = _dedupe([llm_model, *(fallback_models or [])])
     attempted_models: list[str] = []
     all_errors: list[str] = []
     last_coverage = 0.0
@@ -175,6 +237,8 @@ def rank_candidates_with_metadata(
                     config_path=config_path,
                     timeout_sec=timeout_sec,
                     max_tokens=max_tokens,
+                    generation_backend=generation_backend,
+                    runtime_config=runtime_config,
                 )
             except Exception as exc:
                 failure_reason = "timeout" if _is_timeout_error(exc) else "call_failed"
@@ -528,8 +592,27 @@ def _call_llm(
     config_path: str = "",
     timeout_sec: float = 60.0,
     max_tokens: int | None = 2048,
+    generation_backend: str = "",
+    runtime_config: object | None = None,
 ) -> str:
     """Call LLM via litellm with fallback models and channel configs."""
+    if str(generation_backend or "").strip().lower() == "codex_cli":
+        from src.config import get_config
+
+        config = runtime_config or get_config()
+        result = create_generation_backend("codex_cli", config=config).generate(
+            prompt,
+            {
+                "max_tokens": max_tokens or 2048,
+                "temperature": temperature,
+                "allow_web_search": False,
+                "output_schema": _CODEX_RANKING_SCHEMA,
+            },
+            response_validator=_validate_codex_ranking_json,
+            audit_context={"call_type": "screening_rank", "web_search_enabled": False},
+        )
+        return result.text
+
     import litellm
 
     if silent:
@@ -588,6 +671,12 @@ def _call_llm(
     if last_error is not None:
         raise last_error
     raise RuntimeError("No LLM model configured")
+
+
+def _validate_codex_ranking_json(text: str) -> None:
+    payload = json.loads((text or "").strip())
+    if not isinstance(payload, dict) or not isinstance(payload.get("ranked"), list):
+        raise ValueError("ranking_schema_failed")
 
 
 def _extract_completion_text(response: object) -> str:

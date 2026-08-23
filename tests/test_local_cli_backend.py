@@ -70,6 +70,24 @@ def _script(tmp_path: Path, source: str) -> str:
     return str(path)
 
 
+def test_dsa_analysis_output_schema_is_strict_at_every_object_level() -> None:
+    schema = GeminiAnalyzer._analysis_output_schema()
+
+    def assert_strict(node: object) -> None:
+        if not isinstance(node, dict):
+            return
+        if node.get("type") == "object":
+            properties = node.get("properties", {})
+            assert node.get("additionalProperties") is False
+            assert set(node.get("required", [])) == set(properties)
+            for property_schema in properties.values():
+                assert_strict(property_schema)
+        elif node.get("type") == "array":
+            assert_strict(node.get("items"))
+
+    assert_strict(schema)
+
+
 def _backend(tmp_path: Path, source: str, **config_overrides) -> LocalCliGenerationBackend:
     preset = LocalCliPreset(
         preset_id="codex_cli",
@@ -100,9 +118,72 @@ print(json.dumps({"prompt": prompt, "cwd": os.getcwd(), "sentiment_score": 70}, 
         "usage_available": False,
         "usage_source": "unavailable",
         "backend": "codex_cli",
+        "provider": "codex_chatgpt_oauth",
+        "model": "gpt-5.6-luna",
+        "reasoning_effort": "max",
+        "web_search_enabled": False,
+        "auth_mode": "codex_managed_chatgpt_oauth",
     }
     assert result.diagnostics["executable"]["basename"] == Path(sys.executable).name
     assert "path" not in result.diagnostics["executable"]
+
+
+def test_real_codex_preset_injects_luna_max_schema_and_usage(tmp_path: Path) -> None:
+    script = tmp_path / "codex"
+    script.write_text(
+        """#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+
+args = sys.argv[1:]
+assert args[args.index('-m') + 1] == 'gpt-5.6-luna'
+assert args[args.index('-c') + 1] == 'model_reasoning_effort=\"max\"'
+assert '--json' in args
+assert '--search' not in args
+schema_path = pathlib.Path(args[args.index('--output-schema') + 1])
+schema = json.loads(schema_path.read_text(encoding='utf-8'))
+assert schema['required'] == ['ok']
+output_path = pathlib.Path(args[args.index('--output-last-message') + 1])
+output_path.write_text(json.dumps({'ok': True}), encoding='utf-8')
+print(json.dumps({'type': 'turn.completed', 'usage': {
+    'input_tokens': 12,
+    'cached_input_tokens': 4,
+    'output_tokens': 7,
+    'reasoning_output_tokens': 5,
+}}))
+""",
+        encoding="utf-8",
+    )
+    script.chmod(0o700)
+    preset = LocalCliPreset(
+        "codex_cli",
+        str(script),
+        ("exec", "--json", "-"),
+        "Mock Codex",
+        output_last_message_arg="--output-last-message",
+        contract_args=("exec", "--json", "--output-last-message"),
+    )
+    backend = LocalCliGenerationBackend(
+        _config(codex_cli_model="gpt-5.6-luna", codex_cli_reasoning_effort="max"),
+        preset=preset,
+    )
+
+    result = backend.generate(
+        "prompt",
+        {"output_schema": {"type": "object", "required": ["ok"]}},
+        response_validator=lambda text: json.loads(text),
+    )
+
+    assert json.loads(result.text) == {"ok": True}
+    assert result.model == "gpt-5.6-luna"
+    assert result.provider == "codex_chatgpt_oauth"
+    assert result.usage["prompt_tokens"] == 12
+    assert result.usage["completion_tokens"] == 7
+    assert result.usage["reasoning_tokens"] == 5
+    assert result.usage["cached_input_tokens"] == 4
+    assert result.diagnostics["reasoning_effort"] == "max"
+    assert result.diagnostics["auth_mode"] == "codex_managed_chatgpt_oauth"
 
 
 def test_codex_preset_reads_output_last_message_instead_of_stdout(tmp_path: Path) -> None:
@@ -144,14 +225,13 @@ print({final_payload!r})
     assert "last_message" not in result.diagnostics["stdout_preview"]
 
 
-def test_codex_preset_pins_noninteractive_approval_policy_before_exec() -> None:
-    assert CODEX_CLI_PRESET.argv[:3] == (
-        "--ask-for-approval",
-        "never",
-        "exec",
-    )
-    assert CODEX_CLI_PRESET.argv[4:6] == ("--sandbox", "read-only")
-    assert CODEX_CLI_PRESET.contract_args[:3] == CODEX_CLI_PRESET.argv[:3]
+def test_codex_preset_pins_noninteractive_read_only_contract() -> None:
+    assert CODEX_CLI_PRESET.argv[:1] == ("exec",)
+    assert "--ask-for-approval" not in CODEX_CLI_PRESET.argv
+    assert CODEX_CLI_PRESET.argv[2:4] == ("--sandbox", "read-only")
+    assert "--ephemeral" in CODEX_CLI_PRESET.argv
+    assert "--json" in CODEX_CLI_PRESET.argv
+    assert CODEX_CLI_PRESET.contract_args[:1] == CODEX_CLI_PRESET.argv[:1]
 
 
 def test_claude_preset_runtime_argv_contains_contract_args(tmp_path: Path) -> None:
@@ -1185,6 +1265,24 @@ raise SystemExit(2)
 
     assert exc_info.value.error_code is GenerationErrorCode.LOGIN_REQUIRED
     assert exc_info.value.details["returncode"] == 2
+
+
+def test_non_zero_exit_maps_quota_exhausted_without_fallback(tmp_path: Path) -> None:
+    backend = _backend(
+        tmp_path,
+        """
+import sys
+print('usage limit reached for this account', file=sys.stderr)
+raise SystemExit(2)
+""",
+    )
+
+    with pytest.raises(GenerationError) as exc_info:
+        backend.generate("prompt", {})
+
+    assert exc_info.value.error_code is GenerationErrorCode.QUOTA_EXHAUSTED
+    assert exc_info.value.fallbackable is False
+    assert exc_info.value.details["reason"] == "quota_exhausted"
 
 
 def test_non_zero_exit_maps_cli_contract_unsupported(tmp_path: Path) -> None:

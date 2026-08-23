@@ -34,6 +34,7 @@ from src.market_context import get_market_role, get_market_guidelines
 from src.market_phase_prompt import format_market_phase_prompt_section
 from src.market_structure_prompt import format_market_structure_prompt_section
 from src.services.daily_market_context import format_daily_market_context_prompt_section
+from src.analyzer import GeminiAnalyzer
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +224,13 @@ LEGACY_DEFAULT_AGENT_SYSTEM_PROMPT = """你是一位专注于趋势交易的{mar
 
 {language_section}
 """
+
+# The agent dashboard and stock-analysis paths share the same strict DSA
+# response contract.  Keeping one source of truth prevents the App Server
+# route from accepting a shape that the persistence/guardrail pipeline cannot
+# consume.
+AGENT_DASHBOARD_OUTPUT_SCHEMA = GeminiAnalyzer._analysis_output_schema()
+
 
 AGENT_SYSTEM_PROMPT = """你是一位{market_role}投资分析 Agent，拥有数据工具和可切换交易技能，负责生成专业的【决策仪表盘】分析报告。
 
@@ -538,6 +546,7 @@ def prepare_agent_chat(
     use_codex_prompt: bool,
     include_provider_trace: bool,
     strict_initial_stock_scope: bool = False,
+    dashboard_mode: bool = False,
 ) -> PreparedAgentChat:
     """Build the existing Chat prompt order without choosing an Agent backend."""
     scope_resolution = resolve_stock_scope(
@@ -555,7 +564,9 @@ def prepare_agent_chat(
         default_skill_policy_section = f"\n{default_skill_policy}\n"
     report_language = normalize_report_language((effective_context or {}).get("report_language", "zh"))
     stock_code = (effective_context or {}).get("stock_code", "")
-    if use_codex_prompt:
+    if dashboard_mode:
+        prompt_template = AGENT_SYSTEM_PROMPT
+    elif use_codex_prompt:
         prompt_template = CODEX_CHAT_SYSTEM_PROMPT
     elif use_legacy_default_prompt:
         prompt_template = LEGACY_DEFAULT_CHAT_SYSTEM_PROMPT
@@ -566,7 +577,7 @@ def prepare_agent_chat(
         market_guidelines=get_market_guidelines(stock_code, report_language),
         default_skill_policy_section=default_skill_policy_section,
         skills_section=skills_section,
-        language_section=_build_language_section(report_language, chat_mode=True),
+        language_section=_build_language_section(report_language, chat_mode=not dashboard_mode),
     )
 
     if include_provider_trace:

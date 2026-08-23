@@ -96,6 +96,36 @@ def resolve_generation_backend_id(config: Any) -> str:
     return backend_id
 
 
+def generation_backend_observability_identity(config: Any) -> tuple[str, str]:
+    """Return the provider/model identity used by run diagnostics before dispatch."""
+    backend_id = resolve_generation_backend_id(config)
+    if backend_id == CODEX_CLI_BACKEND_ID:
+        return (
+            "codex_chatgpt_oauth",
+            str(_read_backend_config_value(config, "codex_cli_model", "gpt-5.6-luna") or "gpt-5.6-luna").strip(),
+        )
+    return (
+        backend_id,
+        str(_read_backend_config_value(config, "litellm_model", "") or "").strip(),
+    )
+
+
+def agent_backend_observability_identity(config: Any) -> tuple[str, str]:
+    """Return the provider/model identity used by Agent diagnostics before dispatch."""
+    backend_id = str(_read_backend_config_value(config, "agent_backend", "auto") or "auto").strip().lower()
+    if backend_id == "codex_app_server":
+        return (
+            "codex_chatgpt_oauth",
+            str(_read_backend_config_value(config, "codex_cli_model", "gpt-5.6-luna") or "gpt-5.6-luna").strip(),
+        )
+    model = str(
+        _read_backend_config_value(config, "agent_litellm_model", "")
+        or _read_backend_config_value(config, "litellm_model", "")
+        or ""
+    ).strip()
+    return ("litellm" if backend_id in {"", "auto"} else backend_id), model
+
+
 def resolve_generation_fallback_backend_id(config: Any) -> Optional[str]:
     """Return the backend-level fallback target, or None for self/no-op."""
     primary = resolve_generation_backend_id(config)
@@ -104,6 +134,24 @@ def resolve_generation_fallback_backend_id(config: Any) -> Optional[str]:
         "generation_fallback_backend",
         None,
     )
+    if primary == CODEX_CLI_BACKEND_ID:
+        fallback = "" if raw_fallback is None else str(raw_fallback).strip().lower()
+        if fallback in {"", primary}:
+            return None
+        raise GenerationError(
+            error_code=GenerationErrorCode.UNSAFE_CONFIG,
+            stage="configuration",
+            retryable=False,
+            fallbackable=False,
+            backend=primary,
+            provider="codex_chatgpt_oauth",
+            details={
+                "field": "GENERATION_FALLBACK_BACKEND",
+                "reason": "codex_fallback_forbidden",
+                "requested_backend": fallback,
+                "allowed_values": [""],
+            },
+        )
     if raw_fallback is None:
         fallback = LITELLM_BACKEND_ID
     else:

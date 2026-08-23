@@ -84,6 +84,10 @@ from src.services.run_diagnostics import (
     reset_run_diagnostic_context,
     sanitize_diagnostic_text,
 )
+from src.llm.backend_registry import (
+    agent_backend_observability_identity,
+    generation_backend_observability_identity,
+)
 from src.services.decision_signal_extractor import (
     extract_and_persist_from_analysis_result,
     resolve_decision_signal_action_fields,
@@ -773,9 +777,11 @@ class StockAnalysisPipeline:
 
             self._emit_progress(64, f"{stock_name}：正在请求 LLM 生成报告")
             llm_started_at = time.monotonic()
+            llm_provider, llm_model = generation_backend_observability_identity(self.config)
             try:
                 record_llm_run_started(
-                    model=getattr(self.config, "litellm_model", None),
+                    provider=llm_provider,
+                    model=llm_model,
                     call_type="analysis",
                 )
                 result = self.analyzer.analyze(
@@ -805,7 +811,8 @@ class StockAnalysisPipeline:
             except Exception as exc:
                 record_llm_run(
                     success=False,
-                    model=getattr(self.config, "litellm_model", None),
+                    provider=llm_provider,
+                    model=llm_model,
                     call_type="analysis",
                     duration_ms=int((time.monotonic() - llm_started_at) * 1000),
                     error_type=type(exc).__name__,
@@ -1465,16 +1472,19 @@ class StockAnalysisPipeline:
             else:
                 message = f"请分析股票 {code} ({stock_name})，并生成决策仪表盘报告。"
             llm_started_at = time.monotonic()
+            agent_provider, agent_model = agent_backend_observability_identity(self.config)
             try:
                 record_llm_run_started(
-                    model=getattr(self.config, "agent_litellm_model", None),
+                    provider=agent_provider,
+                    model=agent_model,
                     call_type="agent_analysis",
                 )
                 agent_result = executor.run(message, context=initial_context)
             except Exception as exc:
                 record_llm_run(
                     success=False,
-                    model=getattr(self.config, "agent_litellm_model", None),
+                    provider=agent_provider,
+                    model=agent_model,
                     call_type="agent_analysis",
                     duration_ms=int((time.monotonic() - llm_started_at) * 1000),
                     error_type=type(exc).__name__,

@@ -255,6 +255,8 @@ class Config:
 
     def has_llm_config(self) -> bool:
         """Return whether any supported LiteLLM configuration is present."""
+        if str(getattr(self, "generation_backend", "") or "").strip().lower() == "codex_cli":
+            return True
         return any([
             bool(self.llm_api_key),
             bool(self.llm_base_url and self.llm_model.startswith("ollama/")),

@@ -139,8 +139,53 @@ def normalize_token_usage_notification(params: dict) -> Optional[dict]:
             usage[target] = value
     reasoning_tokens = last.get("reasoningOutputTokens")
     if isinstance(reasoning_tokens, int) and not isinstance(reasoning_tokens, bool) and reasoning_tokens >= 0:
+        usage["reasoning_tokens"] = reasoning_tokens
         usage["completion_tokens_details"] = {"reasoning_tokens": reasoning_tokens}
+    if usage:
+        usage["provider_usage_json"] = json.dumps(
+            {
+                key: usage[key]
+                for key in (
+                    "prompt_tokens",
+                    "cached_tokens",
+                    "completion_tokens",
+                    "reasoning_tokens",
+                    "total_tokens",
+                )
+                if key in usage
+            },
+            separators=(",", ":"),
+        )
+        usage["provider_usage_schema_name"] = "codex_app_server_token_usage"
+        usage["provider_usage_schema_version"] = "1"
     return usage if "total_tokens" in usage else None
+
+
+def _classify_server_error(error: Any) -> str:
+    """Map server auth/quota errors without exposing their raw payload."""
+    if not isinstance(error, dict):
+        return "protocol_error"
+    text = " ".join(
+        str(error.get(key, ""))
+        for key in ("code", "codexErrorInfo", "message")
+    ).strip().casefold()
+    if any(marker in text for marker in ("unauthorized", "authentication", "sign in required")):
+        return "login_required"
+    if any(
+        marker in text
+        for marker in (
+            "quota",
+            "usage limit",
+            "usagelimit",
+            "usage exhausted",
+            "credits exhausted",
+            "rate limit",
+            "rate_limit",
+            "too many requests",
+        )
+    ):
+        return "quota_exhausted"
+    return "protocol_error"
 
 
 def controlled_environment(source: Optional[Dict[str, str]] = None) -> Dict[str, str]:
@@ -382,7 +427,7 @@ class CodexAppServerTransport:
                 error.get("message", "App Server request failed"),
                 limit=500,
             )
-            raise CodexAppServerError("protocol_error", safe_message)
+            raise CodexAppServerError(_classify_server_error(error), safe_message)
         result = message.get("result")
         if not isinstance(result, dict):
             raise CodexAppServerError(
@@ -481,16 +526,29 @@ class CodexAppServerTransport:
         text: str,
         timeout: Optional[float] = None,
         cancel_event: Optional[threading.Event] = None,
+        *,
+        model: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
+        output_schema: Optional[dict] = None,
     ) -> TurnResult:
+        params = {
+            "threadId": thread_id,
+            "input": [{"type": "text", "text": text}],
+            "approvalPolicy": "never",
+            "environments": [],
+            "permissions": PERMISSION_PROFILE,
+        }
+        if model:
+            params["model"] = model
+        if reasoning_effort:
+            # App Server names the Responses reasoning setting ``effort``;
+            # DSA exposes the stable operator-facing name ``reasoning_effort``.
+            params["effort"] = reasoning_effort
+        if output_schema is not None:
+            params["outputSchema"] = output_schema
         result = self.request(
             "turn/start",
-            {
-                "threadId": thread_id,
-                "input": [{"type": "text", "text": text}],
-                "approvalPolicy": "never",
-                "environments": [],
-                "permissions": PERMISSION_PROFILE,
-            },
+            params,
             timeout=timeout,
         )
         turn = result.get("turn") or {}
@@ -523,12 +581,11 @@ class CodexAppServerTransport:
             )
         if status != "completed":
             error = completed_turn.get("error") or {}
-            info = error.get("codexErrorInfo")
             if status == "interrupted":
                 code = "cancelled"
             else:
-                normalized_info = str(info or "").strip().casefold()
-                code = "login_required" if normalized_info == "unauthorized" else "unknown_backend_error"
+                classified = _classify_server_error(error)
+                code = classified if classified != "protocol_error" else "unknown_backend_error"
             message = redact_diagnostic_value(
                 error.get("message", f"Turn ended with status {status}"),
                 limit=500,

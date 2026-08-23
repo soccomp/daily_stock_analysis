@@ -89,6 +89,7 @@ def test_generation_error_codes_include_phase2_values() -> None:
         "interactive_prompt_required",
         "approval_required",
         "login_required",
+        "quota_exhausted",
         "capability_unsupported",
         "unsafe_config",
         "unknown_backend_error",
@@ -263,11 +264,15 @@ def test_unknown_generation_backend_raises_structured_config_error() -> None:
     ]
 
 
-def test_codex_cli_generation_backend_can_fallback_to_litellm() -> None:
+def test_codex_cli_generation_backend_disallows_litellm_fallback() -> None:
     config = _config(generation_backend="codex_cli", generation_fallback_backend="litellm")
 
     assert resolve_generation_backend_id(config) == "codex_cli"
-    assert resolve_generation_fallback_backend_id(config) == "litellm"
+    with pytest.raises(GenerationError) as exc_info:
+        resolve_generation_fallback_backend_id(config)
+
+    assert exc_info.value.error_code is GenerationErrorCode.UNSAFE_CONFIG
+    assert exc_info.value.details["reason"] == "codex_fallback_forbidden"
 
 
 def test_claude_code_cli_is_supported_generation_backend() -> None:

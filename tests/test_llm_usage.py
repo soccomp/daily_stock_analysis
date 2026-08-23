@@ -1571,6 +1571,28 @@ class TestPersistUsageHelper(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0].total_tokens, 30)
 
+    def test_persist_usage_writes_provider_usage_without_duplicate_provider_argument(self):
+        persist_llm_usage(
+            {
+                "provider": "codex_chatgpt_oauth",
+                "prompt_tokens": 120,
+                "completion_tokens": 8,
+                "total_tokens": 128,
+                "provider_usage_json": '{"input_tokens":120,"output_tokens":8}',
+                "provider_usage_schema_name": "codex_cli_turn_usage",
+                "provider_usage_schema_version": "1",
+            },
+            "gpt-5.6-luna",
+            call_type="analysis",
+            stock_code="600519",
+        )
+        with self.db.session_scope() as session:
+            row = session.query(LLMUsage).one()
+            self.assertEqual(row.provider, "codex_chatgpt_oauth")
+            self.assertEqual(row.provider_usage_schema_name, "codex_cli_turn_usage")
+            self.assertEqual(row.provider_usage_schema_version, "1")
+            self.assertEqual(row.total_tokens, 128)
+
     def test_persist_usage_handles_empty_usage(self):
         # Should not raise even with an empty dict
         persist_llm_usage({}, "unknown", call_type="agent")

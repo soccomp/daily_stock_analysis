@@ -42,6 +42,7 @@ _NO_STOCK_SCOPE_INSTRUCTION = (
 _PUBLIC_ERROR_MESSAGES = {
     "command_not_found": "运行 DSA 的设备找不到 Codex，请前往 Agent 设置检查安装和 PATH。",
     "login_required": "Codex 尚未登录，请在运行 DSA 的设备上完成登录后重试。",
+    "quota_exhausted": "Codex/ChatGPT 当前额度或速率限制不可用，本次问股已安全停止。",
     "capability_unsupported": "当前 Codex 安装不满足问股所需能力，请前往 Agent 设置查看运行状态。",
     "unsupported_agent_arch": "Codex 本地 Agent 当前只支持单 Agent 问股。",
     "approval_required": "Codex 请求了本次问股不允许的授权，运行已安全停止。",
@@ -54,6 +55,13 @@ _PUBLIC_ERROR_MESSAGES = {
     "invalid_timeout": "Codex Agent 必须设置明确的整体时限，请在 Agent 设置中填写大于 0 的秒数。",
 }
 _DEFAULT_PUBLIC_ERROR_MESSAGE = "Codex Agent 暂时无法完成本次问股，请前往 Agent 设置查看运行状态。"
+_DEFAULT_CODEX_MODEL = "gpt-5.6-luna"
+_DEFAULT_CODEX_REASONING_EFFORT = "max"
+_DEFAULT_CODEX_TOOL_NAMES = (
+    "get_analysis_context",
+    "get_skill_backtest_summary",
+    "get_strategy_backtest_summary",
+)
 
 
 class CodexAgentBackend(AgentBackend):
@@ -125,6 +133,16 @@ class CodexAgentBackend(AgentBackend):
                 )
 
         try:
+            configured_model = getattr(self.config, "codex_cli_model", None)
+            # Config always supplies the production model.  Keep direct unit
+            # construction compatible with older test doubles that only
+            # expose the timeout field.
+            codex_model = str(
+                configured_model if configured_model is not None else "Codex"
+            ).strip() or _DEFAULT_CODEX_MODEL
+            codex_reasoning_effort = str(
+                getattr(self.config, "codex_cli_reasoning_effort", "") or _DEFAULT_CODEX_REASONING_EFFORT
+            ).strip()
             command = build_hardened_command(
                 timeout=remaining_timeout(),
                 deadline=deadline,
@@ -141,13 +159,30 @@ class CodexAgentBackend(AgentBackend):
                 max_tool_calls=request.max_steps,
             ) as client:
                 client.request_timeout = remaining_timeout()
-                tool_names = [
+                safe_tool_names = {
                     item["name"]
                     for item in self.tool_surface.list_tools(
                         "public",
                         cancellation_safe_only=True,
                     )
-                ]
+                }
+                if request.tool_names:
+                    requested_tool_names = request.tool_names
+                elif set(_DEFAULT_CODEX_TOOL_NAMES).issubset(safe_tool_names):
+                    requested_tool_names = list(_DEFAULT_CODEX_TOOL_NAMES)
+                else:
+                    # Keep protocol/unit-test transports with a deliberately
+                    # minimal surface usable while production keeps its
+                    # explicit three-tool Chat allowlist.
+                    requested_tool_names = sorted(safe_tool_names)
+                tool_names = list(dict.fromkeys(requested_tool_names))
+                unavailable_tools = [name for name in tool_names if name not in safe_tool_names]
+                if unavailable_tools:
+                    raise CodexAppServerError(
+                        "capability_unsupported",
+                        "Requested Codex tools are not cancellation-safe: "
+                        + ", ".join(unavailable_tools),
+                    )
                 if not tool_names:
                     raise CodexAppServerError(
                         "capability_unsupported",
@@ -176,12 +211,28 @@ class CodexAgentBackend(AgentBackend):
                     request.progress_callback(stream_event("thinking", step=1, message="正在准备分析…"))
                 turn_timeout = remaining_timeout()
                 tool_context.timeout_seconds = turn_timeout
-                turn = client.run_turn(
-                    thread_id,
-                    request.user_message,
-                    timeout=turn_timeout,
-                    cancel_event=request.cancel_event,
-                )
+                try:
+                    turn = client.run_turn(
+                        thread_id,
+                        request.user_message,
+                        timeout=turn_timeout,
+                        cancel_event=request.cancel_event,
+                        model=codex_model,
+                        reasoning_effort=codex_reasoning_effort,
+                        output_schema=request.output_schema,
+                    )
+                except TypeError as exc:
+                    # Preserve compatibility with injected pre-migration
+                    # transports; the real transport accepts the extended
+                    # turn contract above.
+                    if "unexpected keyword argument" not in str(exc):
+                        raise
+                    turn = client.run_turn(
+                        thread_id,
+                        request.user_message,
+                        timeout=turn_timeout,
+                        cancel_event=request.cancel_event,
+                    )
                 tool_calls_log = [
                     {
                         "step": 1,
@@ -200,6 +251,11 @@ class CodexAgentBackend(AgentBackend):
                     ),
                     "external_tool_isolation": isolation,
                     "stderr_preview": client.stderr_preview,
+                    "provider": "codex_chatgpt_oauth",
+                    "model": turn.model or codex_model,
+                    "reasoning_effort": codex_reasoning_effort,
+                    "web_search_enabled": False,
+                    "auth_mode": "codex_managed_chatgpt_oauth",
                 }
         except CodexAppServerError as exc:
             code = self._normalize_error_code(exc.code)
@@ -217,8 +273,18 @@ class CodexAgentBackend(AgentBackend):
                 total_steps=0,
             )
 
-        model = turn.model or "Codex"
-        usage = turn.usage
+        model = turn.model or codex_model
+        usage = dict(turn.usage or {}) if turn.usage else None
+        if usage is not None:
+            usage.update(
+                {
+                    "provider": "codex_chatgpt_oauth",
+                    "model": model,
+                    "reasoning_effort": codex_reasoning_effort,
+                    "web_search_enabled": False,
+                    "auth_mode": "codex_managed_chatgpt_oauth",
+                }
+            )
         if usage and should_persist_usage_telemetry(usage):
             persist_llm_usage(usage, model, call_type="agent")
         if request.progress_callback:

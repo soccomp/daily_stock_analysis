@@ -11,6 +11,7 @@
 """
 
 import logging
+import json
 import re
 import threading
 import time
@@ -27,10 +28,11 @@ from src.search_service import SearchService
 from src.core.market_profile import get_profile, MarketProfile
 from src.core.market_strategy import get_market_strategy_blueprint
 from src.llm.backend_registry import (
+    generation_backend_observability_identity,
     resolve_generation_backend_id,
     resolve_generation_fallback_backend_id,
 )
-from src.llm.generation_backend import GenerationError
+from src.llm.generation_backend import GenerationError, GenerationErrorCode
 from src.schemas.market_light import MARKET_LIGHT_REGIONS, MarketLightSnapshot
 from src.services.run_diagnostics import record_llm_run, record_llm_run_started
 from src.services.intelligence_service import IntelligenceService
@@ -748,6 +750,10 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             大盘复盘报告文本
         """
         backend_error = self._get_analyzer_generation_backend_config_error()
+        try:
+            llm_provider, llm_model = generation_backend_observability_identity(self.config)
+        except GenerationError:
+            llm_provider, llm_model = "unknown", ""
         if backend_error is not None:
             logger.error(
                 "[大盘] %s action=generate_review status=failed error_type=%s error=%s",
@@ -757,8 +763,8 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             )
             record_llm_run(
                 success=False,
-                provider="litellm",
-                model=getattr(self.config, "litellm_model", None),
+                provider=llm_provider,
+                model=llm_model,
                 call_type="market_review",
                 error_type=type(backend_error).__name__,
                 error_message=backend_error,
@@ -774,6 +780,13 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 
         # 构建 Prompt
         prompt = self._build_review_prompt(overview, news)
+        structured_codex = llm_provider == "codex_chatgpt_oauth"
+        if structured_codex:
+            prompt = (
+                f"{prompt}\n\n"
+                "Return one JSON object only with a required string field `report`. "
+                "Put the complete Markdown report in `report`; do not add commentary outside JSON."
+            )
 
         logger.info("[大盘] %s action=generate_review status=start", self._log_context())
         # Use the public generate_text() entry point - never access private analyzer attributes.
@@ -781,18 +794,25 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         try:
             def call_llm():
                 record_llm_run_started(
-                    provider="litellm",
-                    model=getattr(self.config, "litellm_model", None),
+                    provider=llm_provider,
+                    model=llm_model,
                     call_type="market_review",
                 )
-                return self.analyzer.generate_text(prompt, max_tokens=8192, temperature=0.7)
+                return self.analyzer.generate_text(
+                    prompt,
+                    max_tokens=8192,
+                    temperature=0.7,
+                    output_schema=(self._market_review_output_schema() if structured_codex else None),
+                    response_validator=(self._validate_market_review_json if structured_codex else None),
+                    allow_web_search=False,
+                )
 
             review = self._run_stage(75, "LLM_GENERATION", "Generating market review", call_llm)
         except Exception as exc:
             record_llm_run(
                 success=False,
-                provider="litellm",
-                model=getattr(self.config, "litellm_model", None),
+                provider=llm_provider,
+                model=llm_model,
                 call_type="market_review",
                 duration_ms=int((time.perf_counter() - llm_started_at) * 1000),
                 error_type=type(exc).__name__,
@@ -802,13 +822,33 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 
         record_llm_run(
             success=bool(review),
-            provider="litellm",
-            model=getattr(self.config, "litellm_model", None),
+            provider=llm_provider,
+            model=llm_model,
             call_type="market_review",
             duration_ms=int((time.perf_counter() - llm_started_at) * 1000),
             error_type=None if review else "EmptyResponse",
             error_message=None if review else "empty market review response",
         )
+
+        if structured_codex and review:
+            try:
+                review_payload = json.loads(review)
+                review = str(review_payload["report"]).strip()
+            except (TypeError, KeyError, json.JSONDecodeError) as exc:
+                logger.error(
+                    "[大盘] %s action=generate_review status=failed reason=invalid_structured_output error=%s",
+                    self._log_context(),
+                    type(exc).__name__,
+                )
+                raise GenerationError(
+                    error_code=GenerationErrorCode.INVALID_JSON,
+                    stage="validation",
+                    retryable=False,
+                    fallbackable=False,
+                    backend="codex_cli",
+                    provider="codex_chatgpt_oauth",
+                    details={"reason": "market_review_schema_failed"},
+                ) from exc
 
         if review:
             self._emit_progress(84, "PARSING_VALIDATING", "Parsing and validating market review")
@@ -825,6 +865,23 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             self._log_context(),
         )
         return self._generate_template_review(overview, news)
+
+    @staticmethod
+    def _market_review_output_schema() -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "required": ["report"],
+            "properties": {"report": {"type": "string", "minLength": 1}},
+            "additionalProperties": False,
+        }
+
+    @staticmethod
+    def _validate_market_review_json(text: str) -> None:
+        payload = json.loads((text or "").strip())
+        if not isinstance(payload, dict) or not isinstance(payload.get("report"), str):
+            raise ValueError("market_review_schema_failed")
+        if not payload["report"].strip():
+            raise ValueError("market_review_report_empty")
 
     def _get_analyzer_generation_backend_config_error(self) -> Optional[GenerationError]:
         """Return analyzer backend config errors without relying on dynamic mock attributes."""

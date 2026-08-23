@@ -389,13 +389,16 @@ def test_agent_status_exposes_only_compatibility_fields() -> None:
     }
 
 
-def test_agent_models_is_compatible_empty_list_for_codex() -> None:
+def test_agent_models_exposes_codex_production_deployment() -> None:
     with patch("api.v1.endpoints.agent.get_config", return_value=_codex_config()):
         response = asyncio.run(agent_endpoint.get_agent_models())
-    assert response.models == []
+    assert len(response.models) == 1
+    assert response.models[0].model == "gpt-5.6-luna"
+    assert response.models[0].provider == "codex_chatgpt_oauth"
+    assert response.models[0].is_primary is True
 
 
-def test_agent_models_do_not_fall_back_to_litellm_for_codex_or_invalid_backend() -> None:
+def test_agent_models_do_not_fall_back_to_litellm_for_invalid_backend() -> None:
     deployment = {
         "deployment_id": "default-model",
         "model": "openai/model",

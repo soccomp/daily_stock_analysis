@@ -42,6 +42,8 @@ from src.llm.hermes import (
     parse_hermes_channel,
 )
 from src.llm.local_cli_backend import (
+    DEFAULT_CODEX_CLI_MODEL,
+    DEFAULT_CODEX_CLI_REASONING_EFFORT,
     DEFAULT_GENERATION_BACKEND_MAX_CONCURRENCY,
     DEFAULT_LOCAL_CLI_BACKEND_MAX_CONCURRENCY,
     DEFAULT_LOCAL_CLI_MAX_OUTPUT_BYTES,
@@ -392,6 +394,16 @@ class GenerationBackendStatusService:
                 "max_tokens": 128,
                 "temperature": 0,
                 "timeout": request.timeout_seconds,
+                "allow_web_search": False,
+                "output_schema": {
+                    "type": "object",
+                    "required": ["ok", "backend_smoke"],
+                    "properties": {
+                        "ok": {"type": "boolean"},
+                        "backend_smoke": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
             },
             response_validator=self._json_smoke_validator if request.mode == "json" else self._text_smoke_validator,
             audit_context={"call_type": "generation_backend_smoke", "backend": request.backend_id},
@@ -460,7 +472,11 @@ class GenerationBackendStatusService:
         return {
             "backend_id": backend_id,
             "backend_type": backend_type,
-            "provider_id": backend_id,
+            "provider_id": (
+                "codex_chatgpt_oauth"
+                if backend_id == "codex_cli"
+                else backend_id
+            ),
             "available": available,
             "health_status": current_health,
             "supports_json": capabilities.supports_json,
@@ -470,7 +486,7 @@ class GenerationBackendStatusService:
             "is_primary": is_primary,
             "fallback_target": fallback_target,
             "max_concurrency": self._max_concurrency_for_backend(backend_id, config),
-            "usage_available": backend_id == LITELLM_BACKEND_ID,
+            "usage_available": backend_id in {LITELLM_BACKEND_ID, "codex_cli"},
             "last_error_code": _as_error_code(status_error.error_code) if status_error else None,
             "last_error_message": status_error.message if status_error else None,
         }
@@ -711,6 +727,17 @@ class GenerationBackendStatusService:
                 _LOCAL_CLI_NUMERIC_SPECS[3],
             ),
             opencode_cli_model=(self._effective_map.get("OPENCODE_CLI_MODEL") or "").strip(),
+            codex_cli_model=(
+                self._effective_map.get("CODEX_CLI_MODEL") or DEFAULT_CODEX_CLI_MODEL
+            ).strip(),
+            codex_cli_reasoning_effort=(
+                self._effective_map.get("CODEX_CLI_REASONING_EFFORT")
+                or DEFAULT_CODEX_CLI_REASONING_EFFORT
+            ).strip().lower(),
+            codex_cli_web_search_enabled=parse_env_bool(
+                self._effective_map.get("CODEX_CLI_WEB_SEARCH_ENABLED"),
+                default=False,
+            ),
             litellm_model=litellm_model,
             llm_model_list=model_list,
         )
@@ -737,6 +764,9 @@ class GenerationBackendStatusService:
             generation_backend_max_concurrency=config.generation_backend_max_concurrency,
             local_cli_backend_max_concurrency=config.local_cli_backend_max_concurrency,
             opencode_cli_model=config.opencode_cli_model,
+            codex_cli_model=config.codex_cli_model,
+            codex_cli_reasoning_effort=config.codex_cli_reasoning_effort,
+            codex_cli_web_search_enabled=config.codex_cli_web_search_enabled,
             litellm_model=config.litellm_model,
             litellm_fallback_models=self._split_csv(self._effective_map.get("LITELLM_FALLBACK_MODELS") or ""),
             llm_model_list=config.llm_model_list,

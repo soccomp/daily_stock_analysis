@@ -18,6 +18,7 @@ AGENT_BACKEND_ERROR_CODES = frozenset(
     {
         "command_not_found",
         "login_required",
+        "quota_exhausted",
         "capability_unsupported",
         "unsupported_agent_arch",
         "approval_required",
@@ -65,6 +66,8 @@ class AgentRunRequest:
     max_wall_clock_seconds: Optional[float]
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None
     cancel_event: Optional[threading.Event] = None
+    output_schema: Optional[Dict[str, Any]] = None
+    tool_names: Optional[List[str]] = None
 
 
 @dataclass

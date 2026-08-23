@@ -546,6 +546,10 @@ def test_app_server_usage_uses_documented_last_turn_counts_only() -> None:
         "completion_tokens": 30,
         "total_tokens": 120,
         "cached_tokens": 40,
+        "reasoning_tokens": 12,
         "completion_tokens_details": {"reasoning_tokens": 12},
+        "provider_usage_json": '{"prompt_tokens":90,"cached_tokens":40,"completion_tokens":30,"reasoning_tokens":12,"total_tokens":120}',
+        "provider_usage_schema_name": "codex_app_server_token_usage",
+        "provider_usage_schema_version": "1",
     }
     assert normalize_token_usage_notification({"tokenUsage": {"last": {}}}) is None

@@ -20,6 +20,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.config import Config, channel_allows_empty_api_key, get_config
+from src.llm.backend_registry import resolve_generation_backend_id
 from src.llm.hermes import route_has_hermes
 
 logger = logging.getLogger(__name__)
@@ -271,6 +272,11 @@ def _call_litellm_vision(image_b64: str, mime_type: str, api_key: Optional[str] 
     """Extract stock codes from an image using litellm (all providers via OpenAI vision format)."""
     global litellm
     cfg = get_config()
+    if resolve_generation_backend_id(cfg) == "codex_cli":
+        raise ValueError(
+            "CODEX_VISION_UNSUPPORTED: Codex CLI migration is text-only; image extraction is disabled "
+            "to prevent an implicit LiteLLM/API-key route."
+        )
     model = _resolve_vision_model()
     if not model:
         raise ValueError("未配置 Vision API。请设置 LITELLM_MODEL 或相关 API Key。")

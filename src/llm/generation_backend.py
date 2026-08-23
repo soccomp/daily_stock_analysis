@@ -27,6 +27,7 @@ class GenerationErrorCode(str, Enum):
     INTERACTIVE_PROMPT_REQUIRED = "interactive_prompt_required"
     APPROVAL_REQUIRED = "approval_required"
     LOGIN_REQUIRED = "login_required"
+    QUOTA_EXHAUSTED = "quota_exhausted"
     CAPABILITY_UNSUPPORTED = "capability_unsupported"
     UNSAFE_CONFIG = "unsafe_config"
     UNKNOWN_BACKEND_ERROR = "unknown_backend_error"

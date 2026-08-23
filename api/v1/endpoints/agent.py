@@ -126,7 +126,19 @@ async def get_agent_models():
     except AgentBackendConfigError:
         return AgentModelsResponse(models=[])
     if selected_backend == "codex_app_server":
-        return AgentModelsResponse(models=[])
+        if str(getattr(config, "agent_arch", "single") or "single").strip().lower() != "single":
+            return AgentModelsResponse(models=[])
+        return AgentModelsResponse(
+            models=[
+                AgentModelDeployment(
+                    deployment_id="codex_chatgpt_oauth/gpt-5.6-luna",
+                    model="gpt-5.6-luna",
+                    provider="codex_chatgpt_oauth",
+                    source="codex_app_server",
+                    is_primary=True,
+                )
+            ]
+        )
     return AgentModelsResponse(
         models=[AgentModelDeployment(**item) for item in list_agent_model_deployments(config)]
     )
@@ -411,6 +423,31 @@ class ResearchResponse(BaseModel):
     error: Optional[str] = None
 
 
+_CODEX_RESEARCH_TOOL_NAMES = [
+    "get_analysis_context",
+    "get_skill_backtest_summary",
+    "get_strategy_backtest_summary",
+]
+_CODEX_RESEARCH_OUTPUT_SCHEMA = {
+    "type": "object",
+    "required": ["report", "sources"],
+    "properties": {
+        "report": {"type": "string", "minLength": 1},
+        "sources": {"type": "array", "items": {"type": "string"}},
+    },
+    "additionalProperties": False,
+}
+_CODEX_RESEARCH_SYSTEM_SUFFIX = """
+This is a deep-research request. Work in bounded phases: first identify the
+question and stock scope, then call the relevant DSA read-only evidence tools,
+then cross-check the returned evidence and synthesize a concise report. Do not
+invent facts or sources. Return one JSON object only:
+{"report":"...","sources":["source or tool evidence reference", ...]}
+The `sources` list must contain only references present in tool results. Native
+Codex web search is disabled for this DSA task; use only the listed DSA tools.
+""".strip()
+
+
 @router.post("/research", response_model=ResearchResponse)
 async def agent_research(request: ResearchRequest):
     """Run a deep-research query via the ResearchAgent.
@@ -428,6 +465,59 @@ async def agent_research(request: ResearchRequest):
         context = {"stock_code": request.stock_code}
 
     try:
+        from src.agent.agent_backend import resolve_agent_backend_id
+
+        if (
+            resolve_agent_backend_id(config) == "codex_app_server"
+            and hasattr(config, "codex_cli_model")
+        ):
+            executor = _build_executor(config)
+            session_id = f"dsa-research-{uuid.uuid4()}"
+            result = await asyncio.to_thread(
+                executor.chat,
+                message=question,
+                session_id=session_id,
+                context=context,
+                output_schema=_CODEX_RESEARCH_OUTPUT_SCHEMA,
+                tool_names=_CODEX_RESEARCH_TOOL_NAMES,
+                system_prompt_suffix=_CODEX_RESEARCH_SYSTEM_SUFFIX,
+            )
+            if not result.success:
+                return ResearchResponse(
+                    success=False,
+                    content="",
+                    sources=[],
+                    token_usage=result.total_tokens,
+                    error=result.error or result.error_code or "CODEX_RESEARCH_UNAVAILABLE",
+                )
+            try:
+                payload = json.loads(result.content)
+            except (TypeError, json.JSONDecodeError) as exc:
+                logger.error("Codex research returned invalid structured output: %s", type(exc).__name__)
+                return ResearchResponse(
+                    success=False,
+                    content="",
+                    sources=[],
+                    token_usage=result.total_tokens,
+                    error="CODEX_RESEARCH_SCHEMA_INVALID",
+                )
+            report = payload.get("report") if isinstance(payload, dict) else None
+            sources = payload.get("sources") if isinstance(payload, dict) else None
+            if not isinstance(report, str) or not report.strip() or not isinstance(sources, list):
+                return ResearchResponse(
+                    success=False,
+                    content="",
+                    sources=[],
+                    token_usage=result.total_tokens,
+                    error="CODEX_RESEARCH_SCHEMA_INVALID",
+                )
+            return ResearchResponse(
+                success=True,
+                content=report.strip(),
+                sources=[str(item) for item in sources if isinstance(item, str) and item.strip()],
+                token_usage=result.total_tokens,
+            )
+
         from src.agent.research import ResearchAgent
         from src.agent.factory import get_tool_registry
         from src.agent.llm_adapter import LLMToolAdapter

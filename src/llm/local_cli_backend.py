@@ -44,6 +44,9 @@ DEFAULT_LOCAL_CLI_TIMEOUT_SECONDS = 300
 DEFAULT_LOCAL_CLI_MAX_OUTPUT_BYTES = 1024 * 1024
 DEFAULT_GENERATION_BACKEND_MAX_CONCURRENCY = 1
 DEFAULT_LOCAL_CLI_BACKEND_MAX_CONCURRENCY = 1
+DEFAULT_CODEX_CLI_MODEL = "gpt-5.6-luna"
+DEFAULT_CODEX_CLI_REASONING_EFFORT = "max"
+SUPPORTED_CODEX_CLI_REASONING_EFFORTS = frozenset({"none", "low", "medium", "high", "xhigh", "max"})
 MAX_LOCAL_CLI_TIMEOUT_SECONDS = 3600
 MAX_LOCAL_CLI_OUTPUT_BYTES = 32 * 1024 * 1024
 MAX_GENERATION_BACKEND_MAX_CONCURRENCY = 16
@@ -507,8 +510,6 @@ CODEX_CLI_PRESET = LocalCliPreset(
     preset_id=CODEX_CLI_BACKEND_ID,
     executable="codex",
     argv=(
-        "--ask-for-approval",
-        "never",
         "exec",
         "--skip-git-repo-check",
         "--sandbox",
@@ -516,13 +517,12 @@ CODEX_CLI_PRESET = LocalCliPreset(
         "--color",
         "never",
         "--ephemeral",
+        "--json",
         "-",
     ),
     display_name="Codex CLI",
     output_last_message_arg="--output-last-message",
     contract_args=(
-        "--ask-for-approval",
-        "never",
         "exec",
         "--skip-git-repo-check",
         "--sandbox",
@@ -530,6 +530,7 @@ CODEX_CLI_PRESET = LocalCliPreset(
         "--color",
         "never",
         "--ephemeral",
+        "--json",
         "--output-last-message",
     ),
 )
@@ -627,6 +628,58 @@ def build_local_cli_env(source: Optional[Mapping[str, str]] = None) -> Dict[str,
             continue
         child_env[key] = value
     return child_env
+
+
+def _safe_codex_model(config: Any, generation_config: Mapping[str, Any]) -> str:
+    model = str(
+        generation_config.get("model")
+        or getattr(config, "codex_cli_model", "")
+        or DEFAULT_CODEX_CLI_MODEL
+    ).strip()
+    if not model or _first_unsafe_token([model]) or any(ch.isspace() for ch in model):
+        raise ValueError("invalid_codex_cli_model")
+    return model
+
+
+def _safe_codex_reasoning_effort(config: Any, generation_config: Mapping[str, Any]) -> str:
+    effort = str(
+        generation_config.get("reasoning_effort")
+        or getattr(config, "codex_cli_reasoning_effort", "")
+        or DEFAULT_CODEX_CLI_REASONING_EFFORT
+    ).strip().lower()
+    if effort not in SUPPORTED_CODEX_CLI_REASONING_EFFORTS:
+        raise ValueError("invalid_codex_cli_reasoning_effort")
+    return effort
+
+
+def _extract_codex_usage(stdout: str) -> Dict[str, Any]:
+    """Extract the last Codex turn usage event without retaining raw event text."""
+    usage: Dict[str, Any] = {}
+    for line in (stdout or "").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") != "turn.completed" or not isinstance(event.get("usage"), dict):
+            continue
+        raw = event["usage"]
+        field_map = {
+            "prompt_tokens": "input_tokens",
+            "cached_input_tokens": "cached_input_tokens",
+            "output_tokens": "output_tokens",
+            "reasoning_tokens": "reasoning_output_tokens",
+        }
+        for target, source in field_map.items():
+            value = raw.get(source)
+            if isinstance(value, int) and value >= 0:
+                usage[target] = value
+        if "prompt_tokens" in usage and "output_tokens" in usage:
+            usage["total_tokens"] = usage["prompt_tokens"] + usage["output_tokens"]
+        if "prompt_tokens" in usage:
+            usage["input_tokens"] = usage["prompt_tokens"]
+        if "output_tokens" in usage:
+            usage["completion_tokens"] = usage["output_tokens"]
+    return usage
 
 
 def _popen_session_kwargs() -> Dict[str, Any]:
@@ -2133,6 +2186,26 @@ class LocalCliGenerationBackend(GenerationBackend):
             "max_output_bytes": max_output_bytes,
             "concurrency_limit": concurrency_limit,
         }
+        if self._preset.preset_id == CODEX_CLI_BACKEND_ID:
+            try:
+                diagnostics["model"] = _safe_codex_model(self._config, generation_config)
+                diagnostics["reasoning_effort"] = _safe_codex_reasoning_effort(
+                    self._config,
+                    generation_config,
+                )
+            except ValueError as exc:
+                raise self._error(
+                    GenerationErrorCode.UNSAFE_CONFIG,
+                    stage="configuration",
+                    retryable=False,
+                    fallbackable=False,
+                    details={**diagnostics, "reason": str(exc)},
+                ) from exc
+            allow_search = generation_config.get("allow_web_search")
+            if allow_search is None:
+                allow_search = bool(getattr(self._config, "codex_cli_web_search_enabled", False))
+            diagnostics["web_search_enabled"] = bool(allow_search)
+            diagnostics["auth_mode"] = "codex_managed_chatgpt_oauth"
 
         stdout = ""
         stderr = ""
@@ -2156,6 +2229,23 @@ class LocalCliGenerationBackend(GenerationBackend):
                     diagnostics["env_allowlist_names"] = sorted(child_env)
                     diagnostics["runtime_argv_contract_checked"] = True
                     prompt_path = cwd_path / "prompt.txt"
+                    output_schema_path: Optional[Path] = None
+                    output_schema = generation_config.get("output_schema")
+                    if output_schema is not None:
+                        if not isinstance(output_schema, Mapping):
+                            raise self._error(
+                                GenerationErrorCode.UNSAFE_CONFIG,
+                                stage="configuration",
+                                retryable=False,
+                                fallbackable=False,
+                                details={**diagnostics, "reason": "invalid_output_schema"},
+                            )
+                        output_schema_path = cwd_path / "response-schema.json"
+                        output_schema_path.write_text(
+                            json.dumps(dict(output_schema), ensure_ascii=False, separators=(",", ":")),
+                            encoding="utf-8",
+                        )
+                        output_schema_path.chmod(0o600)
                     stdout_path = cwd_path / "stdout.txt"
                     stderr_path = cwd_path / "stderr.txt"
                     prompt_path.write_text(prompt_text, encoding="utf-8")
@@ -2168,6 +2258,8 @@ class LocalCliGenerationBackend(GenerationBackend):
                         argv,
                         cwd,
                         prompt_path=prompt_path,
+                        generation_config=generation_config,
+                        output_schema_path=output_schema_path,
                     )
                     with ExitStack() as stack:
                         if self._preset.prompt_transport == "stdin":
@@ -2476,16 +2568,39 @@ class LocalCliGenerationBackend(GenerationBackend):
                     },
                 ) from exc
 
+        usage = _extract_codex_usage(stdout) if self._preset.preset_id == CODEX_CLI_BACKEND_ID else {}
+        if usage and self._preset.preset_id == CODEX_CLI_BACKEND_ID:
+            usage["provider_usage_json"] = json.dumps(
+                {
+                    key: usage[key]
+                    for key in (
+                        "input_tokens",
+                        "cached_input_tokens",
+                        "output_tokens",
+                        "reasoning_tokens",
+                    )
+                    if key in usage
+                },
+                separators=(",", ":"),
+            )
+            usage["provider_usage_schema_name"] = "codex_cli_turn_usage"
+            usage["provider_usage_schema_version"] = "1"
+        usage.update({
+            "usage_available": self._preset.preset_id == CODEX_CLI_BACKEND_ID and bool(usage),
+            "usage_source": "codex_jsonl_turn_completed" if usage else "unavailable",
+            "backend": self._preset.preset_id,
+            "provider": "codex_chatgpt_oauth" if self._preset.preset_id == CODEX_CLI_BACKEND_ID else self._preset.preset_id,
+            "model": diagnostics.get("model") or self._preset.preset_id,
+            "reasoning_effort": diagnostics.get("reasoning_effort"),
+            "web_search_enabled": diagnostics.get("web_search_enabled", False),
+            "auth_mode": diagnostics.get("auth_mode"),
+        })
         return GenerationResult(
             text=text,
-            model=self._preset.preset_id,
-            provider=self._preset.preset_id,
+            model=str(diagnostics.get("model") or self._preset.preset_id),
+            provider="codex_chatgpt_oauth" if self._preset.preset_id == CODEX_CLI_BACKEND_ID else self._preset.preset_id,
             backend=self.backend_id,
-            usage={
-                "usage_available": False,
-                "usage_source": "unavailable",
-                "backend": self._preset.preset_id,
-            },
+            usage=usage,
             raw=None,
             diagnostics=diagnostics,
         )
@@ -2537,7 +2652,39 @@ class LocalCliGenerationBackend(GenerationBackend):
         cwd: str,
         *,
         prompt_path: Optional[Path] = None,
+        generation_config: Optional[Mapping[str, Any]] = None,
+        output_schema_path: Optional[Path] = None,
     ) -> tuple[list[str], Optional[Path]]:
+        generation_config = generation_config or {}
+        # Unit-test presets use a Python executable as a deterministic stand-in.
+        # Only the real Codex executable accepts Codex-specific model/JSON flags.
+        if (
+            self._preset.preset_id == CODEX_CLI_BACKEND_ID
+            and Path(self._preset.executable).name == "codex"
+        ):
+            try:
+                model = _safe_codex_model(self._config, generation_config)
+                effort = _safe_codex_reasoning_effort(self._config, generation_config)
+            except ValueError as exc:
+                raise self._error(
+                    GenerationErrorCode.UNSAFE_CONFIG,
+                    stage="configuration",
+                    retryable=False,
+                    fallbackable=False,
+                    details={"reason": str(exc)},
+                ) from exc
+            runtime_argv = list(argv)
+            insert_at = runtime_argv.index("exec") + 1 if "exec" in runtime_argv else 0
+            dynamic = ["-m", model, "-c", f'model_reasoning_effort="{effort}"']
+            allow_search = generation_config.get("allow_web_search")
+            if allow_search is None:
+                allow_search = bool(getattr(self._config, "codex_cli_web_search_enabled", False))
+            if allow_search:
+                dynamic.append("--search")
+            if output_schema_path is not None:
+                dynamic.extend(["--output-schema", str(output_schema_path)])
+            runtime_argv = [*runtime_argv[:insert_at], *dynamic, *runtime_argv[insert_at:]]
+            return self._append_output_last_message(runtime_argv, cwd)
         output_arg = self._preset.output_last_message_arg
         if not output_arg:
             runtime_argv = self._replace_runtime_placeholders(list(argv), prompt_path)
@@ -2552,6 +2699,32 @@ class LocalCliGenerationBackend(GenerationBackend):
         else:
             runtime_argv = [*runtime_argv, *injected]
 
+        unsafe = _first_unsafe_token(runtime_argv)
+        if unsafe:
+            raise self._error(
+                GenerationErrorCode.UNSAFE_CONFIG,
+                stage="configuration",
+                retryable=False,
+                fallbackable=False,
+                details={"reason": "shell_metachar", "token_preview": unsafe},
+            )
+        self._validate_runtime_contract_args(runtime_argv)
+        return runtime_argv, last_message_path
+
+    def _append_output_last_message(
+        self,
+        runtime_argv: list[str],
+        cwd: str,
+    ) -> tuple[list[str], Path]:
+        output_arg = self._preset.output_last_message_arg
+        if not output_arg:
+            return runtime_argv, Path(cwd) / "last-message.txt"
+        last_message_path = Path(cwd) / "last-message.txt"
+        injected = [output_arg, str(last_message_path)]
+        if runtime_argv and runtime_argv[-1] == "-":
+            runtime_argv = [*runtime_argv[:-1], *injected, runtime_argv[-1]]
+        else:
+            runtime_argv = [*runtime_argv, *injected]
         unsafe = _first_unsafe_token(runtime_argv)
         if unsafe:
             raise self._error(
@@ -2714,6 +2887,9 @@ class LocalCliGenerationBackend(GenerationBackend):
         elif "login" in combined or "authentication" in combined or "not authenticated" in combined:
             code = GenerationErrorCode.LOGIN_REQUIRED
             reason = "login_required"
+        elif any(marker in combined for marker in ("usage limit", "quota", "credits exhausted", "rate limit exceeded")):
+            code = GenerationErrorCode.QUOTA_EXHAUSTED
+            reason = "quota_exhausted"
         elif "approval" in combined or "approve" in combined or "permission" in combined:
             code = GenerationErrorCode.APPROVAL_REQUIRED
             reason = "approval_required"
@@ -2724,7 +2900,7 @@ class LocalCliGenerationBackend(GenerationBackend):
             code,
             stage="execution",
             retryable=False,
-            fallbackable=True,
+            fallbackable=code not in {GenerationErrorCode.LOGIN_REQUIRED, GenerationErrorCode.QUOTA_EXHAUSTED},
             details={**diagnostics, "reason": reason, "returncode": returncode},
         )
 
