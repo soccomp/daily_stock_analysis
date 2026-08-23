@@ -12,6 +12,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.services.screening.normalize import normalize_code as _normalize_code
+from src.services.screening.temporal import filter_actionable_context_row
 
 _CONTEXT_TRIM_MARKER = "[context_trimmed]"
 _CANDIDATE_CONTEXT_COLUMNS = {
@@ -57,6 +58,7 @@ def build_llm_context(
     event_profile: dict[str, object] | None = None,
     max_chars: int = 4000,
     degradation: list[str] | None = None,
+    decision_as_of=None,
 ) -> str:
     """Build bounded context text for the LLM soft ranker."""
     sections: list[_ContextSection] = []
@@ -106,6 +108,7 @@ def build_llm_context(
     candidate_external_context = _read_candidate_context_files(
         candidate_context_files or [],
         candidate_df,
+        decision_as_of=decision_as_of,
     )
     if candidate_external_context:
         sections.append(_section(
@@ -117,8 +120,14 @@ def build_llm_context(
             line_aware=True,
         ))
 
+    filtered_candidate_context_rows = [
+        filter_actionable_context_row(row, decision_as_of)
+        if decision_as_of is not None
+        else row
+        for row in (candidate_context_rows or [])
+    ]
     collected_candidate_context = _format_candidate_context_rows(
-        candidate_context_rows or [],
+        filtered_candidate_context_rows,
         candidate_df,
     )
     if collected_candidate_context:
@@ -336,6 +345,8 @@ def _read_context_files(paths: list[str | Path]) -> str:
 def _read_candidate_context_files(
     paths: list[str | Path],
     candidate_df: pd.DataFrame | None,
+    *,
+    decision_as_of=None,
 ) -> str:
     if not paths or candidate_df is None or candidate_df.empty or "code" not in candidate_df.columns:
         return ""
@@ -350,6 +361,8 @@ def _read_candidate_context_files(
             raise FileNotFoundError(f"Candidate context file not found: {path}")
         rows = _load_candidate_context_rows(path)
         for row in rows:
+            if decision_as_of is not None:
+                row = filter_actionable_context_row(row, decision_as_of)
             code = _normalize_code(row.get("code", row.get("代码", "")))
             item = _format_candidate_context_row(row, candidate_codes, candidate_names)
             if item:

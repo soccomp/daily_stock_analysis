@@ -9,6 +9,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
+from src.services.screening.temporal import (
+    actionable_news_payload_for_cutoff,
+    canonical_utc,
+    require_decision_cutoff,
+)
+
 
 MARKET_CONTEXT_SCHEMA_VERSION = "pallas-009-market-context-v1"
 
@@ -65,12 +71,29 @@ def build_market_context(
     *,
     task_id: str,
     market_review_id: str | int | None = None,
-    as_of: str | None = None,
+    as_of: str | datetime | None = None,
 ) -> dict[str, Any]:
     """Build the context consumed by downstream research without order authority."""
     quality = payload.get("data_quality") if isinstance(payload.get("data_quality"), Mapping) else {}
     concepts = payload.get("concepts") if isinstance(payload.get("concepts"), Mapping) else {}
     source_failures = list(quality.get("source_failures") or [])
+    news_cutoff = as_of or payload.get("generated_at")
+    news_actionability = "UNKNOWN_EXCLUDED"
+    news: tuple[dict[str, Any], ...] = ()
+    news_audit_excluded: tuple[dict[str, Any], ...] = ()
+    decision_as_of = None
+    if news_cutoff:
+        try:
+            decision_as_of = canonical_utc(require_decision_cutoff(news_cutoff))
+            news, news_audit_excluded = actionable_news_payload_for_cutoff(
+                payload.get("news") or [],
+                decision_as_of,
+            )
+            news_actionability = "CUTOFF_FILTERED"
+        except (TypeError, ValueError):
+            news_audit_excluded = (
+                {"point_in_time_status": "EXCLUDED_UNKNOWN_OR_LATER_THAN_CUTOFF"},
+            ) if payload.get("news") else ()
     required = ("indices", "breadth", "sectors", "concepts")
     statuses = {name: str(quality.get(name) or "unknown") for name in required}
     available = [name for name, status in statuses.items() if status.startswith("available")]
@@ -101,7 +124,10 @@ def build_market_context(
             "top": concepts.get("top") or [],
             "bottom": concepts.get("bottom") or [],
         },
-        "news": payload.get("news") or [],
+        "news": list(news),
+        "news_audit_excluded": list(news_audit_excluded),
+        "news_actionability": news_actionability,
+        "decision_as_of": decision_as_of,
         "data_quality": quality,
         "market_strength": derive_market_strength(payload),
         "provenance": {

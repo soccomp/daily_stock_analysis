@@ -14,6 +14,8 @@ from pathlib import Path
 import pandas as pd
 import requests
 
+from src.services.screening.temporal import filter_actionable_context_row
+
 _NEGATIVE_EVENT_KEYWORDS = {
     "减持": ("减持", "拟减持", "被动减持"),
     "监管": ("处罚", "立案", "监管函", "问询函", "警示函", "调查"),
@@ -58,6 +60,7 @@ def collect_candidate_context(
     cache_dir: str | Path | None = None,
     cache_ttl_hours: int = 24,
     source_weights: dict[str, float] | None = None,
+    decision_as_of: datetime | str | None = None,
 ) -> tuple[list[dict[str, object]], list[str]]:
     """Collect candidate-level context rows keyed by stock code.
 
@@ -127,6 +130,8 @@ def collect_candidate_context(
         row, row_errors = result
         errors.extend(row_errors)
         if row is not None:
+            if decision_as_of is not None:
+                row = filter_actionable_context_row(row, decision_as_of)
             rows.append(row)
     return rows, errors
 

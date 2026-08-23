@@ -39,7 +39,11 @@ from src.services.screening.risk import apply_portfolio_overlay, apply_risk_over
 from src.services.screening.scorer import compute_screen_scores, factor_score_columns
 from src.services.screening.selection_variant import apply_seeded_selection_variant
 from src.services.screening.snapshot import fetch_snapshot_with_fallback
-from src.services.screening.temporal import canonical_utc, require_decision_cutoff
+from src.services.screening.temporal import (
+    authoritative_cn_trading_calendar,
+    canonical_utc,
+    require_decision_cutoff,
+)
 from src.services.screening.strategy import load_all_strategies
 
 logger = logging.getLogger(__name__)
@@ -73,6 +77,8 @@ def screen(
     progress_callback: Callable[[int, str], None] | None = None,
     daily_history_fetcher: Callable[..., pd.DataFrame] | None = None,
     decision_as_of: datetime | str | None = None,
+    trading_calendar=None,
+    clock=None,
 ) -> ScreenResult:
     """Execute stock screening with the given strategy.
 
@@ -110,7 +116,10 @@ def screen(
     """
     if config is None:
         config = Config.from_env()
-    decision_cutoff = require_decision_cutoff(decision_as_of)
+    decision_cutoff = require_decision_cutoff(
+        decision_as_of if decision_as_of is not None else (clock() if callable(clock) else None)
+    )
+    strict_observation = decision_as_of is not None or callable(clock)
 
     if market not in ("cn", "us"):
         raise ValueError(f"Unsupported market: {market!r} (supported: cn, us)")
@@ -145,6 +154,9 @@ def screen(
     daily_requested = config.daily_enrich_enabled if daily_enrich is None else daily_enrich
     daily_limit = daily_enrich_max_candidates or config.daily_enrich_max_candidates
     snapshot_filters = without_daily_filters(screening.hard_filters) if daily_needed else screening.hard_filters
+    effective_trading_calendar = trading_calendar
+    if market == "cn" and (daily_needed or daily_requested) and effective_trading_calendar is None:
+        effective_trading_calendar = authoritative_cn_trading_calendar(decision_cutoff)
 
     # 2. Fetch snapshot
     _emit_progress(progress_callback, 25, "正在读取全市场快照")
@@ -156,6 +168,8 @@ def screen(
         cache_ttl_seconds=config.snapshot_cache_ttl_seconds,
         market=market,
         decision_as_of=decision_cutoff,
+        clock=clock,
+        enforce_observation_cutoff=strict_observation,
     )
     effective_industry_map_files = (
         list(industry_map_files)
@@ -244,6 +258,9 @@ def screen(
                 max_workers=config.daily_fetch_max_workers,
                 history_fetcher=daily_history_fetcher,
                 decision_as_of=decision_cutoff,
+                trading_calendar=effective_trading_calendar,
+                clock=clock,
+                enforce_observation_cutoff=strict_observation,
             )
             daily_enriched = True
             daily_errors = [str(item) for item in enriched.attrs.get("daily_errors", [])]
@@ -342,7 +359,13 @@ def screen(
     # 6.5. Host-provided candidate context, e.g. DSA realtime quote,
     # fundamentals, and news. This runs before LLM ranking so L2 can use it.
     _emit_progress(progress_callback, 52, "正在补充候选行情与基本面")
-    degradation.extend(apply_dsa_provider_context(picks, context))
+    degradation.extend(
+        apply_dsa_provider_context(
+            picks,
+            context,
+            decision_as_of=decision_cutoff,
+        )
+    )
     llm_fallback_picks = [copy.deepcopy(pick) for pick in picks]
 
     # 7. L2 LLM ranking
@@ -390,6 +413,7 @@ def screen(
                 ),
                 cache_ttl_hours=config.llm_candidate_context_cache_ttl_hours,
                 source_weights=event_source_weights,
+                decision_as_of=decision_cutoff,
             )
             degradation.append(
                 f"Candidate context collected rows={len(candidate_context_rows)}"
@@ -413,6 +437,7 @@ def screen(
             event_profile=screening.event_profile,
             max_chars=config.llm_context_max_chars,
             degradation=llm_context_degradation,
+            decision_as_of=decision_cutoff,
         )
         degradation.extend(llm_context_degradation)
         llm_prompt_degradation: list[str] = []

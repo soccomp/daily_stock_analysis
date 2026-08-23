@@ -2515,18 +2515,19 @@ class BacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(result.outcome, "neutral")
         self.assertIsNone(result.direction_correct)
 
-        # Target hits -- day2 high=111 >= take_profit=110
-        self.assertTrue(result.hit_take_profit)
+        # The first T+1 bar used a close fallback because its open is missing.
+        # Its high cannot also be used as a target observation.
+        self.assertFalse(result.hit_take_profit)
         self.assertFalse(result.hit_stop_loss)
-        self.assertEqual(result.first_hit, "take_profit")
-        self.assertEqual(result.first_hit_trading_days, 1)
-        self.assertEqual(result.first_hit_date, date(2024, 1, 2))
+        self.assertEqual(result.first_hit, "neither")
+        self.assertIsNone(result.first_hit_trading_days)
+        self.assertIsNone(result.first_hit_date)
 
         # Simulated execution
         self.assertAlmostEqual(result.simulated_entry_price, 105.0)
-        self.assertAlmostEqual(result.simulated_exit_price, 110.0)
-        self.assertEqual(result.simulated_exit_reason, "take_profit")
-        self.assertAlmostEqual(result.simulated_return_pct, (110.0 - 105.0) / 105.0 * 100)
+        self.assertAlmostEqual(result.simulated_exit_price, 107.0)
+        self.assertEqual(result.simulated_exit_reason, "window_end")
+        self.assertAlmostEqual(result.simulated_return_pct, (107.0 - 105.0) / 105.0 * 100)
 
     def test_summaries_created_after_run(self) -> None:
         """Verify both overall and per-stock BacktestSummary rows are created."""
@@ -2583,7 +2584,7 @@ class BacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(global_summary["total_evaluations"], 1)
         self.assertAlmostEqual(global_summary["win_rate"], 0.5)
         self.assertAlmostEqual(global_summary["direction_accuracy"], 0.5)
-        self.assertAlmostEqual(global_summary["avg_return"], (110.0 - 105.0) / 105.0)
+        self.assertAlmostEqual(global_summary["avg_return"], round((107.0 - 105.0) / 105.0, 6))
 
         self.assertIsNotNone(stock_summary)
         self.assertEqual(stock_summary["code"], "600519")

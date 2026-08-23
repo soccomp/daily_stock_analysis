@@ -147,27 +147,30 @@ def price_plan_evidence(*, context_snapshot: Any, source_report_id: int, now) ->
     time.
     """
 
+    price_input = _dedicated_price_input(context_snapshot)
     source_event_time = _find_aware_timestamp(
-        context_snapshot,
+        price_input,
         keys=("source_event_time", "provider_timestamp", "quote_timestamp", "event_time"),
     )
     retrieved_at = _find_aware_timestamp(
-        context_snapshot,
+        price_input,
         keys=("retrieved_at", "fetched_at", "realtime_fetched_at"),
     ) or now
-    provider = _find_text(context_snapshot, keys=("provider", "source")) or "DSA_ANALYSIS_CONTEXT"
+    provider = _find_text(price_input, keys=("provider", "source")) or "DSA_ANALYSIS_CONTEXT"
     source_reference = _find_text(
-        context_snapshot,
+        price_input,
         keys=("source_reference", "quote_reference", "reference"),
     ) or f"dsa-price-plan:{source_report_id}"
     cutoff = now
     flags: list[str] = []
+    if not price_input:
+        flags.append("PRICE_PLAN_DEDICATED_INPUT_MISSING")
     available = source_event_time is not None
     if source_event_time is None:
         flags.append("PRICE_PLAN_SOURCE_EVENT_TIME_MISSING")
     else:
         completion = _find_text(
-            context_snapshot,
+            price_input,
             keys=("completion_status", "daily_completion_status"),
         )
         flags.append("DAILY_BAR_COMPLETE" if completion == "CLOSE_CONFIRMED" else "INTRADAY_OBSERVED")
@@ -189,6 +192,23 @@ def price_plan_evidence(*, context_snapshot: Any, source_report_id: int, now) ->
         availability_status="AVAILABLE" if available else "UNKNOWN",
         quality_flags=tuple(dict.fromkeys(flags)),
     )
+
+
+def _dedicated_price_input(context_snapshot: Any) -> Mapping[str, Any]:
+    """Select only the canonical price-input lineage block.
+
+    A report may contain many unrelated event timestamps.  Recursing through
+    the whole report can accidentally promote one of them into price evidence,
+    so only explicitly named price blocks are eligible here.
+    """
+
+    if not isinstance(context_snapshot, Mapping):
+        return {}
+    for key in ("price_plan", "price_input_lineage", "quote", "daily_bar"):
+        value = context_snapshot.get(key)
+        if isinstance(value, Mapping):
+            return value
+    return {}
 
 
 def actionable_news_evidence(

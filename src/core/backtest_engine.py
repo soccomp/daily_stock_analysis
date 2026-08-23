@@ -166,6 +166,7 @@ class BacktestEngine:
         stop_loss: Optional[float],
         take_profit: Optional[float],
         config: EvaluationConfig,
+        target_bars: Sequence[DailyBarLike] | None = None,
     ) -> Dict[str, Any]:
         """Evaluate one historical analysis against forward daily bars.
 
@@ -220,6 +221,7 @@ class BacktestEngine:
             neutral_band_pct=config.neutral_band_pct,
         )
 
+        target_window_bars = list(target_bars) if target_bars is not None else window_bars
         (
             hit_stop_loss,
             hit_take_profit,
@@ -232,7 +234,7 @@ class BacktestEngine:
             position=position,
             stop_loss=stop_loss,
             take_profit=take_profit,
-            window_bars=window_bars,
+            window_bars=target_window_bars,
             end_close=end_close,
         )
 
@@ -325,6 +327,7 @@ class BacktestEngine:
             stop_loss=stop_loss,
             take_profit=take_profit,
             config=config,
+            target_bars=forward_bars[1:] if entry_timing == "NEXT_ELIGIBLE_BAR_CLOSE_FALLBACK" else forward_bars,
         )
         result["entry_date"] = entry_date
         result["entry_timing"] = entry_timing

@@ -14,6 +14,7 @@ import logging
 from typing import Any, Callable
 
 from src.services.screening.models import Pick
+from src.services.screening.temporal import filter_actionable_context_row
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ def apply_dsa_provider_context(
     context: dict[str, Any] | None,
     *,
     max_candidates: int | None = None,
+    decision_as_of=None,
 ) -> list[str]:
     """Attach DSA context to top candidates before LLM ranking."""
     provider = _extract_provider_context(context)
@@ -42,7 +44,11 @@ def apply_dsa_provider_context(
             payload = _fetch_candidate_context(provider, pick)
             if not payload:
                 continue
-            normalized = _normalize_candidate_payload(payload, pick)
+            normalized = _normalize_candidate_payload(
+                payload,
+                pick,
+                decision_as_of=decision_as_of,
+            )
             if not normalized:
                 continue
             pick.dsa_context = normalized["context"]
@@ -131,7 +137,7 @@ def _call_news_provider(provider: Any, pick: Pick) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {"success": False, "results": []}
 
 
-def _normalize_candidate_payload(payload: dict[str, Any], pick: Pick) -> dict[str, Any]:
+def _normalize_candidate_payload(payload: dict[str, Any], pick: Pick, *, decision_as_of=None) -> dict[str, Any]:
     full_payload = payload
     context = payload.get("dsa_context") if isinstance(payload.get("dsa_context"), dict) else payload
     if not isinstance(context, dict):
@@ -147,6 +153,16 @@ def _normalize_candidate_payload(payload: dict[str, Any], pick: Pick) -> dict[st
         summary = _build_dsa_summary(pick, context, news)
 
     normalized_context = dict(context)
+    if decision_as_of is not None:
+        filtered_context = filter_actionable_context_row(
+            {**normalized_context, "news": news},
+            decision_as_of,
+        )
+        excluded = filtered_context.pop("news_audit_excluded", [])
+        news = [item for item in filtered_context.pop("news", []) if isinstance(item, dict)]
+        normalized_context = filtered_context
+        if excluded:
+            normalized_context["news_audit_excluded"] = excluded
     normalized_context.setdefault("enriched", _is_enriched_context(normalized_context, news))
     if full_payload is not context and "dsa_context" in full_payload:
         normalized_context.setdefault("source_payload", "dsa_candidate_context")

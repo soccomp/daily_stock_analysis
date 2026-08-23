@@ -85,6 +85,8 @@ def enrich_daily_features(
     history_fetcher: Callable[..., pd.DataFrame] | None = None,
     decision_as_of: datetime | str | None = None,
     trading_calendar=None,
+    clock=None,
+    enforce_observation_cutoff: bool | None = None,
 ) -> pd.DataFrame:
     """Attach daily technical features to the first ``max_rows`` candidates.
 
@@ -104,6 +106,11 @@ def enrich_daily_features(
     daily_source_health: dict[str, object] = {}
     success_count = 0
     fetch_history = history_fetcher or fetch_daily_history
+    strict_observation = (
+        decision_as_of is not None
+        if enforce_observation_cutoff is None
+        else bool(enforce_observation_cutoff)
+    )
     cutoff = require_decision_cutoff(decision_as_of)
     selected_index = list(result.index[:max_rows])
     fetch_requests: list[tuple[object, str]] = []
@@ -117,15 +124,23 @@ def enrich_daily_features(
     def fetch_one(request: tuple[object, str]) -> tuple[object, dict[str, object], str | None, dict[str, object]]:
         idx, code = request
         try:
+            fetch_kwargs = {
+                "lookback_days": lookback_days,
+                "source": source,
+                "retries": fetch_retries,
+                "cache_dir": cache_dir,
+                "cache_ttl_seconds": cache_ttl_seconds,
+                "decision_as_of": cutoff,
+                "trading_calendar": trading_calendar,
+            }
+            if fetch_history is fetch_daily_history:
+                fetch_kwargs.update(
+                    clock=clock,
+                    enforce_observation_cutoff=strict_observation,
+                )
             hist = fetch_history(
                 code,
-                lookback_days=lookback_days,
-                source=source,
-                retries=fetch_retries,
-                cache_dir=cache_dir,
-                cache_ttl_seconds=cache_ttl_seconds,
-                decision_as_of=cutoff,
-                trading_calendar=trading_calendar,
+                **fetch_kwargs,
             )
             features = compute_daily_features(hist)
             features["daily_source"] = str(hist.attrs.get("daily_source", ""))
@@ -198,6 +213,8 @@ def fetch_daily_history(
     cache_ttl_seconds: float | None = None,
     decision_as_of: datetime | str | None = None,
     trading_calendar=None,
+    clock=None,
+    enforce_observation_cutoff: bool | None = None,
 ) -> pd.DataFrame:
     """Fetch daily history for one stock code.
 
@@ -211,6 +228,11 @@ def fetch_daily_history(
     """
     normalized_code = _normalize_daily_code(code)
     normalized_lookback_days = int(lookback_days)
+    strict_observation = (
+        decision_as_of is not None
+        if enforce_observation_cutoff is None
+        else bool(enforce_observation_cutoff)
+    )
     cutoff = require_decision_cutoff(decision_as_of)
     src = _normalize_daily_source(source)
     if src == "auto":
@@ -301,7 +323,12 @@ def fetch_daily_history(
                         normalized_code,
                         lookback_days=normalized_lookback_days,
                     )
-                _record_source_success(current, rows=len(result))
+                observed_at = _capture_provider_observation(clock)
+                if strict_observation and observed_at > cutoff:
+                    raise RuntimeError(
+                        "daily provider observation is after decision cutoff: "
+                        f"{canonical_utc(observed_at)} > {canonical_utc(cutoff)}"
+                    )
                 result.attrs["daily_source"] = current
                 result.attrs["daily_requested_source"] = src
                 result.attrs["daily_source_order"] = list(sources)
@@ -309,7 +336,10 @@ def fetch_daily_history(
                 result.attrs["source_errors"] = list(errors)
                 result.attrs["daily_source_health"] = _daily_source_health_snapshot(sources)
                 result = annotate_completed_daily_bars(
-                    result, cutoff, trading_calendar=trading_calendar,
+                    result,
+                    cutoff,
+                    trading_calendar=trading_calendar,
+                    observed_at=observed_at,
                 )
                 if result.empty or result.attrs.get("daily_completion_status") != CLOSE_CONFIRMED:
                     raise RuntimeError(
@@ -317,7 +347,8 @@ def fetch_daily_history(
                     )
                 result.attrs["decision_as_of"] = canonical_utc(cutoff)
                 result.attrs["source_reference"] = f"dsa:{current}:daily:{normalized_code}"
-                result.attrs["source_observed_at"] = result.attrs.get("decision_as_of")
+                result.attrs["source_observed_at"] = canonical_utc(observed_at)
+                _record_source_success(current, rows=len(result))
                 if cache_path is not None:
                     _write_daily_history_cache(
                         cache_path,
@@ -359,6 +390,11 @@ def fetch_daily_history(
     raise RuntimeError(
         f"daily history fetch failed for {normalized_code}: {'; '.join(errors)}"
     )
+
+
+def _capture_provider_observation(clock=None) -> datetime:
+    value = clock() if callable(clock) else datetime.now().astimezone()
+    return require_decision_cutoff(value)
 
 
 def _normalize_daily_code(value: object) -> str:

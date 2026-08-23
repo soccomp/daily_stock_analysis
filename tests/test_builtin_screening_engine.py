@@ -2,6 +2,7 @@
 """Regression contracts for the DSA-owned screening implementation."""
 
 import os
+from datetime import date
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -183,7 +184,11 @@ def test_pipeline_passes_daily_history_cache_settings_to_enrichment(monkeypatch)
         lambda df, _screening: df.assign(screen_score=88.0),
     )
     monkeypatch.setattr(screening_pipeline, "enrich_daily_features", fake_enrich_daily_features)
-    monkeypatch.setattr(screening_pipeline, "apply_dsa_provider_context", lambda picks, _context: [])
+    monkeypatch.setattr(
+        screening_pipeline,
+        "apply_dsa_provider_context",
+        lambda picks, _context, **_kwargs: [],
+    )
     monkeypatch.setattr(screening_pipeline, "apply_risk_overlay", lambda picks, **kwargs: (picks, []))
     monkeypatch.setattr(screening_pipeline, "apply_portfolio_overlay", lambda picks, **kwargs: (picks, []))
     monkeypatch.setattr(screening_pipeline, "run_post_analyzers", lambda picks, **kwargs: (picks, []))
@@ -199,6 +204,7 @@ def test_pipeline_passes_daily_history_cache_settings_to_enrichment(monkeypatch)
     assert captured["cache_dir"] == Path("/tmp/daily-history-cache")
     assert captured["cache_ttl_seconds"] == 6 * 60 * 60
     assert captured["history_fetcher"] is history_fetcher
+    assert date(2026, 8, 21) in captured["trading_calendar"]
     assert result.daily_enriched is True
 
 
@@ -418,7 +424,11 @@ def test_pipeline_uses_ranker_success_flag_instead_of_partial_llm_scores(monkeyp
         "compute_screen_scores",
         lambda df, _screening: df.assign(screen_score=88.0),
     )
-    monkeypatch.setattr(screening_pipeline, "apply_dsa_provider_context", lambda picks, _context: [])
+    monkeypatch.setattr(
+        screening_pipeline,
+        "apply_dsa_provider_context",
+        lambda picks, _context, **_kwargs: [],
+    )
     monkeypatch.setattr(screening_pipeline, "rank_candidates_with_metadata", fake_ranker)
     monkeypatch.setattr(screening_pipeline, "apply_risk_overlay", lambda picks, **kwargs: (picks, []))
     monkeypatch.setattr(screening_pipeline, "apply_portfolio_overlay", lambda picks, **kwargs: (picks, []))
@@ -488,7 +498,11 @@ def test_default_scorecard_scores_full_pool_before_seeded_rotation(monkeypatch) 
         "compute_screen_scores",
         lambda df, _screening: df.assign(screen_score=df["raw_score"]),
     )
-    monkeypatch.setattr(screening_pipeline, "apply_dsa_provider_context", lambda picks, _context: [])
+    monkeypatch.setattr(
+        screening_pipeline,
+        "apply_dsa_provider_context",
+        lambda picks, _context, **_kwargs: [],
+    )
     monkeypatch.setattr(screening_pipeline, "apply_seeded_selection_variant", capture_variant)
     monkeypatch.setattr(screening_pipeline.uuid, "uuid4", lambda: SimpleNamespace(hex=next(run_ids)))
 

@@ -23,6 +23,11 @@ from src.services.run_diagnostics import (
     reset_run_diagnostic_context,
 )
 from src.storage import DatabaseManager
+from src.services.screening.temporal import (
+    actionable_news_payload_for_cutoff,
+    canonical_utc,
+    require_decision_cutoff,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +77,9 @@ class DailyMarketContext:
     history_id: Optional[int] = None
     query_id: Optional[str] = None
     full_report: Optional[str] = None
+    decision_as_of: Optional[str] = None
+    news_actionability: str = "NO_NEWS"
+    news_audit_excluded_count: int = 0
 
     def to_safe_dict(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -83,6 +91,10 @@ class DailyMarketContext:
         }
         if self.position_cap:
             payload["position_cap"] = self.position_cap
+        if self.decision_as_of:
+            payload["decision_as_of"] = self.decision_as_of
+        payload["news_actionability"] = self.news_actionability
+        payload["news_audit_excluded_count"] = self.news_audit_excluded_count
         return payload
 
 
@@ -114,6 +126,7 @@ class DailyMarketContextService:
         target_date: Optional[date] = None,
         current_query_id: Optional[str] = None,
         require_query_id_match: bool = False,
+        decision_as_of: Optional[datetime | str] = None,
     ) -> Optional[DailyMarketContext]:
         normalized_region = _normalize_context_region(region)
         if normalized_region is None:
@@ -130,6 +143,7 @@ class DailyMarketContextService:
             current_query_id=current_query_id,
             require_query_id_match=require_query_id_match,
             report_language=report_language,
+            decision_as_of=decision_as_of,
         )
 
         if force_refresh:
@@ -152,13 +166,15 @@ class DailyMarketContextService:
             if cached is not None:
                 self._cache.pop(cache_key, None)
 
-            runtime_context = self._load_current_query_runtime_cache(
-                context_date=context_date,
-                region=normalized_region,
-                current_query_id=current_query_id,
-                require_query_id_match=require_query_id_match,
-                report_language=report_language,
-            )
+            runtime_context = None
+            if decision_as_of is None:
+                runtime_context = self._load_current_query_runtime_cache(
+                    context_date=context_date,
+                    region=normalized_region,
+                    current_query_id=current_query_id,
+                    require_query_id_match=require_query_id_match,
+                    report_language=report_language,
+                )
             if runtime_context is not None:
                 return runtime_context
 
@@ -168,6 +184,7 @@ class DailyMarketContextService:
                 current_query_id=current_query_id,
                 require_query_id_match=require_query_id_match,
                 report_language=report_language,
+                decision_as_of=decision_as_of,
             )
             if history_context is not None:
                 self._cache[cache_key] = history_context
@@ -185,6 +202,7 @@ class DailyMarketContextService:
                         current_query_id=current_query_id,
                         require_query_id_match=require_query_id_match,
                         report_language=report_language,
+                        decision_as_of=decision_as_of,
                     )
                     if history_context is not None:
                         self._cache[cache_key] = history_context
@@ -201,13 +219,15 @@ class DailyMarketContextService:
                     return cached
                 if cached is not None:
                     self._cache.pop(cache_key, None)
-                runtime_context = self._load_current_query_runtime_cache(
-                    context_date=context_date,
-                    region=normalized_region,
-                    current_query_id=current_query_id,
-                    require_query_id_match=require_query_id_match,
-                    report_language=report_language,
-                )
+                runtime_context = None
+                if decision_as_of is None:
+                    runtime_context = self._load_current_query_runtime_cache(
+                        context_date=context_date,
+                        region=normalized_region,
+                        current_query_id=current_query_id,
+                        require_query_id_match=require_query_id_match,
+                        report_language=report_language,
+                    )
                 if runtime_context is not None:
                     return runtime_context
                 history_context = self._load_same_day_history(
@@ -216,6 +236,7 @@ class DailyMarketContextService:
                     current_query_id=current_query_id,
                     require_query_id_match=require_query_id_match,
                     report_language=report_language,
+                    decision_as_of=decision_as_of,
                 )
                 if history_context is not None:
                     self._cache[cache_key] = history_context
@@ -231,6 +252,7 @@ class DailyMarketContextService:
                 persist_market_review_history=persist_market_review_history,
                 current_query_id=current_query_id,
                 require_query_id_match=require_query_id_match,
+                decision_as_of=decision_as_of,
             )
             if generated is not None:
                 self._cache[cache_key] = generated
@@ -244,6 +266,7 @@ class DailyMarketContextService:
         current_query_id: Optional[str] = None,
         require_query_id_match: bool = False,
         report_language: str = "zh",
+        decision_as_of: Optional[datetime | str] = None,
     ) -> Optional[DailyMarketContext]:
         try:
             history_days = _history_lookup_days(
@@ -298,6 +321,7 @@ class DailyMarketContextService:
                 created_at=getattr(record, "created_at", None),
                 history_id=getattr(record, "id", None),
                 query_id=getattr(record, "query_id", None),
+                decision_as_of=decision_as_of,
             )
             if context is not None:
                 return context
@@ -328,19 +352,27 @@ class DailyMarketContextService:
         current_query_id: Optional[str] = None,
         require_query_id_match: bool = False,
         report_language: str = "zh",
+        decision_as_of: Optional[datetime | str] = None,
     ) -> Tuple[Any, ...]:
         if (
             require_query_id_match
             and isinstance(current_query_id, str)
             and current_query_id.strip()
         ):
-            return (
+            base_key = (
                 context_date,
                 region,
                 normalize_report_language(report_language),
                 current_query_id.strip(),
             )
-        return (context_date, region, normalize_report_language(report_language))
+        else:
+            base_key = (context_date, region, normalize_report_language(report_language))
+        if decision_as_of is None:
+            return base_key
+        try:
+            return (*base_key, canonical_utc(require_decision_cutoff(decision_as_of)))
+        except (TypeError, ValueError):
+            return (*base_key, str(decision_as_of))
 
     def _load_current_query_runtime_cache(
         self,
@@ -395,6 +427,7 @@ class DailyMarketContextService:
         current_query_id: Optional[str] = None,
         require_query_id_match: bool = False,
         lock_token: Optional[Any] = None,
+        decision_as_of: Optional[datetime | str] = None,
     ) -> Optional[DailyMarketContext]:
         owns_lock = lock_token is None
         if lock_token is None:
@@ -406,6 +439,7 @@ class DailyMarketContextService:
             current_query_id=current_query_id,
             require_query_id_match=require_query_id_match,
             report_language=report_language,
+            decision_as_of=decision_as_of,
         )
 
         if lock_token is None:
@@ -423,6 +457,7 @@ class DailyMarketContextService:
                 analyzer=analyzer,
                 search_service=search_service,
                 persist_market_review_history=persist_market_review_history,
+                decision_as_of=decision_as_of,
             )
 
         caller_query_id = (
@@ -480,6 +515,7 @@ class DailyMarketContextService:
                 fallback_summary=fallback_summary,
                 fallback_full_report=fallback_summary,
                 query_id=caller_query_id,
+                decision_as_of=decision_as_of,
             )
         except Exception as exc:
             logger.warning(
@@ -508,6 +544,7 @@ class DailyMarketContextService:
         analyzer: Any = None,
         search_service: Any = None,
         persist_market_review_history: bool = True,
+        decision_as_of: Optional[datetime | str] = None,
     ) -> Optional[DailyMarketContext]:
         wait_interval = _MARKET_REVIEW_LOCK_WAIT_INITIAL_INTERVAL_SECONDS
         for attempt in range(_MARKET_REVIEW_LOCK_WAIT_MAX_ATTEMPTS):
@@ -517,6 +554,7 @@ class DailyMarketContextService:
                 current_query_id=current_query_id,
                 require_query_id_match=require_query_id_match,
                 report_language=report_language,
+                decision_as_of=decision_as_of,
             )
             if context is not None:
                 self._cache[cache_key] = context
@@ -531,6 +569,7 @@ class DailyMarketContextService:
                         current_query_id=current_query_id,
                         require_query_id_match=require_query_id_match,
                         report_language=report_language,
+                        decision_as_of=decision_as_of,
                     )
                     if context is not None:
                         self._cache[cache_key] = context
@@ -546,6 +585,7 @@ class DailyMarketContextService:
                         current_query_id=current_query_id,
                         require_query_id_match=require_query_id_match,
                         lock_token=lock_token,
+                        decision_as_of=decision_as_of,
                     )
                     if generated is not None:
                         self._cache[cache_key] = generated
@@ -605,6 +645,7 @@ class DailyMarketContextService:
         created_at: Optional[datetime] = None,
         history_id: Optional[int] = None,
         query_id: Optional[str] = None,
+        decision_as_of: Optional[datetime | str] = None,
     ) -> Optional[DailyMarketContext]:
         normalized_region = _normalize_region(region)
         scoped_payload = _payload_for_region(payload, normalized_region)
@@ -618,6 +659,38 @@ class DailyMarketContextService:
             scoped_payload=scoped_payload,
             fallback_full_report=fallback_full_report,
         )
+        timing_payload = (
+            scoped_payload.get("market_context")
+            if isinstance(scoped_payload.get("market_context"), Mapping)
+            else scoped_payload
+        )
+        raw_news = scoped_payload.get("news")
+        if raw_news is None and isinstance(timing_payload, Mapping):
+            raw_news = timing_payload.get("news")
+        cutoff_value = (
+            decision_as_of
+            or (timing_payload.get("decision_as_of") if isinstance(timing_payload, Mapping) else None)
+            or (timing_payload.get("as_of") if isinstance(timing_payload, Mapping) else None)
+        )
+        news_actionability = "NO_NEWS"
+        excluded_count = 0
+        canonical_cutoff = None
+        if raw_news:
+            try:
+                canonical_cutoff = canonical_utc(require_decision_cutoff(cutoff_value))
+                _eligible_news, excluded_news = actionable_news_payload_for_cutoff(
+                    raw_news,
+                    canonical_cutoff,
+                )
+                news_actionability = "CUTOFF_FILTERED"
+                excluded_count = len(excluded_news)
+            except (TypeError, ValueError):
+                news_actionability = "UNKNOWN_EXCLUDED"
+                excluded_count = len(raw_news) if isinstance(raw_news, (list, tuple)) else 1
+        elif isinstance(timing_payload, Mapping):
+            news_actionability = str(timing_payload.get("news_actionability") or "NO_NEWS")
+            excluded_count = int(timing_payload.get("news_audit_excluded_count") or len(timing_payload.get("news_audit_excluded") or []))
+            canonical_cutoff = timing_payload.get("decision_as_of")
         return DailyMarketContext(
             region=normalized_region,
             trade_date=trade_date,
@@ -629,6 +702,9 @@ class DailyMarketContextService:
             history_id=history_id if isinstance(history_id, int) else None,
             query_id=query_id if isinstance(query_id, str) and query_id else None,
             full_report=full_report,
+            decision_as_of=canonical_cutoff,
+            news_actionability=news_actionability,
+            news_audit_excluded_count=excluded_count,
         )
 
 

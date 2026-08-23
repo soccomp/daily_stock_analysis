@@ -484,9 +484,12 @@ class StockAnalysisPipeline:
                     market,
                     current_time=current_time,
                 )
+            daily_market_context_kwargs = {"target_date": daily_market_target_date}
+            if current_time is not None:
+                daily_market_context_kwargs["decision_as_of"] = current_time
             daily_market_context = self._load_daily_market_context(
                 market,
-                target_date=daily_market_target_date,
+                **daily_market_context_kwargs,
             )
 
             self._emit_progress(18, f"{code}：正在获取行情与筹码数据")
@@ -1886,6 +1889,7 @@ class StockAnalysisPipeline:
         *,
         force_refresh: bool = False,
         target_date: Optional[date] = None,
+        decision_as_of: Optional[datetime] = None,
     ) -> Optional[DailyMarketContext]:
         """Load/generate today's market context when market review is explicitly enabled."""
         if getattr(self, "daily_market_context_enabled", True) is not True:
@@ -1914,6 +1918,8 @@ class StockAnalysisPipeline:
                 "allow_generate": getattr(self, "daily_market_context_allow_generate", True),
                 "target_date": target_date,
             }
+            if decision_as_of is not None:
+                get_context_kwargs["decision_as_of"] = decision_as_of
             current_query_id = getattr(self, "query_id", None)
             if isinstance(current_query_id, str) and current_query_id.strip():
                 get_context_kwargs["current_query_id"] = current_query_id

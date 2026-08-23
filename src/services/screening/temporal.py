@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
@@ -68,6 +68,42 @@ def _calendar_contains(calendar: Iterable[Any] | None, day: date) -> bool | None
         return False
 
 
+def authoritative_cn_trading_calendar(
+    decision_as_of: datetime | str,
+    *,
+    lookback_days: int = 370,
+) -> frozenset[date]:
+    """Return the strict XSHG session set used by the CN PIT production path.
+
+    A missing or unusable exchange-calendar dependency is a hard failure.  A
+    weekday heuristic is not sufficient to establish that a daily bar belongs
+    to an actual mainland China trading session.
+    """
+
+    cutoff = require_decision_cutoff(decision_as_of)
+    try:
+        import exchange_calendars as xcals
+    except Exception as exc:  # noqa: BLE001 - PIT must fail closed.
+        raise RuntimeError("CN authoritative trading calendar unavailable") from exc
+
+    local_day = cutoff.astimezone(EXCHANGE_TIMEZONE).date()
+    start_day = local_day - timedelta(days=max(int(lookback_days), 1))
+    try:
+        calendar = xcals.get_calendar("XSHG")
+        sessions = calendar.sessions_in_range(start_day, local_day)
+    except Exception as exc:  # noqa: BLE001 - PIT must fail closed.
+        raise RuntimeError("CN authoritative trading calendar query failed") from exc
+
+    days = frozenset(
+        item.date() if hasattr(item, "date") else parse_trade_date(item)
+        for item in sessions
+    )
+    days = frozenset(day for day in days if day is not None)
+    if not days:
+        raise RuntimeError("CN authoritative trading calendar returned no sessions")
+    return days
+
+
 def daily_completion(
     trade_date: Any,
     decision_as_of: datetime | str,
@@ -98,6 +134,7 @@ def annotate_completed_daily_bars(
     decision_as_of: datetime | str,
     *,
     trading_calendar: Iterable[Any] | None = None,
+    observed_at: datetime | str | None = None,
 ) -> pd.DataFrame:
     """Preserve source metadata and remove current partial bars from features."""
 
@@ -127,6 +164,11 @@ def annotate_completed_daily_bars(
     result["bar_completion_status"] = [status for status, _basis in statuses]
     result["bar_completion_basis"] = [basis for _status, basis in statuses]
     result["bar_source_event_time"] = result.get("source_event_time", pd.Series(index=result.index, dtype="object"))
+    observed = canonical_utc(observed_at) if observed_at is not None else None
+    if "retrieved_at" not in result.columns and observed is not None:
+        result["retrieved_at"] = observed
+    if "observed_at" not in result.columns and observed is not None:
+        result["observed_at"] = observed
     result["bar_observed_at"] = result.get(
         "observed_at",
         result.get("retrieved_at", pd.Series(index=result.index, dtype="object")),
@@ -157,7 +199,7 @@ def annotate_completed_daily_bars(
         "latest_completed_trade_date": latest.isoformat() if latest is not None else None,
         "excluded_partial_trade_dates": excluded,
         "source_time_status": source_time_status,
-        "source_observed_at": result.attrs.get("source_observed_at"),
+        "source_observed_at": observed or result.attrs.get("source_observed_at"),
     })
     return eligible
 
@@ -186,3 +228,60 @@ def actionable_news_for_cutoff(
         item["publication_time"] = published_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
         included.append(item)
     return tuple(included), tuple(excluded)
+
+
+def actionable_news_payload_for_cutoff(
+    payload: Any,
+    decision_as_of: datetime | str,
+) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
+    """Filter a provider/news payload while retaining excluded audit records."""
+
+    if isinstance(payload, Mapping):
+        raw_items = payload.get("results")
+        if not isinstance(raw_items, list):
+            raw_items = [payload] if any(
+                key in payload
+                for key in ("title", "headline", "content", "published_at", "published_date", "publication_time")
+            ) else []
+    elif isinstance(payload, (list, tuple)):
+        raw_items = list(payload)
+    elif payload not in (None, ""):
+        raw_items = [{"text": str(payload)}]
+    else:
+        raw_items = []
+
+    mappings = [item for item in raw_items if isinstance(item, Mapping)]
+    excluded = [
+        {"text": str(item), "point_in_time_status": "EXCLUDED_UNKNOWN_OR_LATER_THAN_CUTOFF"}
+        for item in raw_items
+        if not isinstance(item, Mapping)
+    ]
+    included, timed_excluded = actionable_news_for_cutoff(mappings, decision_as_of)
+    return included, tuple([*excluded, *timed_excluded])
+
+
+def filter_actionable_context_row(
+    row: Mapping[str, Any],
+    decision_as_of: datetime | str,
+) -> dict[str, Any]:
+    """Remove unknown/later news from one LLM-context row.
+
+    Quote/fund-flow and other non-news fields remain untouched.  Excluded news
+    is retained only in an audit field that is not rendered into the LLM
+    prompt.
+    """
+
+    result = dict(row)
+    excluded: list[dict[str, Any]] = []
+    for field in ("news", "announcement", "announcements"):
+        if field not in result:
+            continue
+        included, rejected = actionable_news_payload_for_cutoff(result.get(field), decision_as_of)
+        if included:
+            result[field] = list(included)
+        else:
+            result.pop(field, None)
+        excluded.extend({"field": field, **item} for item in rejected)
+    if excluded:
+        result["news_audit_excluded"] = excluded
+    return result

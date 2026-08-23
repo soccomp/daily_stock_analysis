@@ -72,9 +72,16 @@ def fetch_snapshot_with_fallback(
     cache_ttl_seconds: float = 0.0,
     market: str = "cn",
     decision_as_of: datetime | str | None = None,
+    clock=None,
+    enforce_observation_cutoff: bool | None = None,
 ) -> pd.DataFrame:
     """Try live sources, optionally falling back to the last-good snapshot."""
     cutoff = require_decision_cutoff(decision_as_of)
+    strict_observation = (
+        decision_as_of is not None
+        if enforce_observation_cutoff is None
+        else bool(enforce_observation_cutoff)
+    )
     if market == "us":
         return _fetch_us_snapshot_with_fallback(required_columns)
 
@@ -101,6 +108,7 @@ def fetch_snapshot_with_fallback(
             continue
         try:
             df = fetch_cn_snapshot(source)
+            observed_at = _capture_provider_observation(clock)
             if not df.empty:
                 missing = _missing_required_columns(df, required)
                 if missing:
@@ -109,7 +117,11 @@ def fetch_snapshot_with_fallback(
                     _record_source_failure(source, error)
                     continue
                 df = _annotate_snapshot_temporal_metadata(
-                    df, source=source, decision_as_of=cutoff,
+                    df,
+                    source=source,
+                    decision_as_of=cutoff,
+                    observed_at=observed_at,
+                    enforce_observation_cutoff=strict_observation,
                 )
                 df.attrs.setdefault("snapshot_source", source)
                 df.attrs["source_errors"] = list(errors)
@@ -150,11 +162,20 @@ def _annotate_snapshot_temporal_metadata(
     *,
     source: str,
     decision_as_of: datetime,
+    observed_at: datetime | str,
+    enforce_observation_cutoff: bool = False,
 ) -> pd.DataFrame:
     """Keep observation/provenance separate from cache creation time."""
 
     result = frame.copy()
+    observed = require_decision_cutoff(observed_at)
+    if enforce_observation_cutoff and observed > decision_as_of:
+        raise RuntimeError(
+            "snapshot provider observation is after decision cutoff: "
+            f"{canonical_utc(observed)} > {canonical_utc(decision_as_of)}"
+        )
     cutoff = canonical_utc(decision_as_of)
+    observed_text = canonical_utc(observed)
     source_reference = f"dsa:{source}:snapshot:{cutoff}"
     event_column = next(
         (name for name in ("source_event_time", "provider_timestamp", "event_time", "timestamp") if name in result.columns),
@@ -163,19 +184,24 @@ def _annotate_snapshot_temporal_metadata(
     if "source_reference" not in result.columns:
         result["source_reference"] = source_reference
     if "retrieved_at" not in result.columns:
-        result["retrieved_at"] = cutoff
+        result["retrieved_at"] = observed_text
     if "observed_at" not in result.columns:
-        result["observed_at"] = cutoff
+        result["observed_at"] = observed_text
     if "decision_cutoff" not in result.columns:
         result["decision_cutoff"] = cutoff
     if "source_event_time" not in result.columns:
         result["source_event_time"] = result[event_column] if event_column else None
     result.attrs["source_reference"] = source_reference
-    result.attrs["source_observed_at"] = cutoff
+    result.attrs["source_observed_at"] = observed_text
     result.attrs["decision_cutoff"] = cutoff
     result.attrs["source_event_time_status"] = "KNOWN" if event_column else "UNKNOWN"
     result.attrs["causal_status"] = "OBSERVATION_TIMESTAMPED"
     return result
+
+
+def _capture_provider_observation(clock=None) -> str:
+    value = clock() if callable(clock) else datetime.now(timezone.utc)
+    return canonical_utc(require_decision_cutoff(value))
 
 
 def _fetch_us_snapshot_with_fallback(
