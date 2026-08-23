@@ -849,6 +849,26 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                     provider="codex_chatgpt_oauth",
                     details={"reason": "market_review_schema_failed"},
                 ) from exc
+            try:
+                from src.services.codex_health import (
+                    PALLAS_RESEARCH_CONTRACT_ID,
+                    record_codex_generation_observation,
+                )
+
+                record_codex_generation_observation(
+                    success=True,
+                    latency_ms=int((time.perf_counter() - llm_started_at) * 1000),
+                    reachable=True,
+                    model=llm_model,
+                    provider=llm_provider,
+                    backend="codex_cli",
+                    schema_valid=True,
+                    usage_available=False,
+                    health_qualifying=True,
+                    health_contract=PALLAS_RESEARCH_CONTRACT_ID,
+                )
+            except Exception:
+                pass
 
         if review:
             self._emit_progress(84, "PARSING_VALIDATING", "Parsing and validating market review")

@@ -250,7 +250,7 @@ const fieldDescriptionMap: Record<string, string> = {
   GENERATION_FALLBACK_BACKEND: '本地 CLI 生成失败后的处理方式：禁用表示直接报错，默认模型配置表示再尝试普通模型。',
   OPENCODE_CLI_MODEL: 'OpenCode CLI 的可选模型覆盖；留空时使用本机 OpenCode 默认模型。认证和模型可用性由本机 OpenCode 配置负责。',
   CODEX_CLI_MODEL: 'Codex CLI 使用的精确模型；生产迁移默认 gpt-5.6-luna，认证由本机 ChatGPT OAuth/Codex CLI 管理。',
-  CODEX_CLI_REASONING_EFFORT: 'Codex CLI 推理强度；收敛默认 xhigh，支持 none、low、medium、high、xhigh、max。',
+  CODEX_CLI_REASONING_EFFORT: 'Codex CLI 推理强度；Owner observation-period 默认 max，支持 none、low、medium、high、xhigh、max。',
   CODEX_CLI_WEB_SEARCH_ENABLED: '是否显式启用 Codex CLI 原生联网搜索；生产默认关闭，DSA 继续使用自有数据和新闻工具。',
   GENERATION_BACKEND_TIMEOUT_SECONDS: '单次生成最多等待多少秒，默认 300；主要用于本地 CLI 这类命令行方式。',
   GENERATION_BACKEND_MAX_OUTPUT_BYTES: '单次本地命令行生成可读取的输出大小上限，默认 1048576 字节。',

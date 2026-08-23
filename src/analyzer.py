@@ -3568,6 +3568,7 @@ class GeminiAnalyzer:
             current_prompt = prompt
             retry_count = 0
             max_retries = config.report_integrity_retry if config.report_integrity_enabled else 0
+            health_contract_valid = False
 
             while True:
                 start_time = time.time()
@@ -3623,6 +3624,7 @@ class GeminiAnalyzer:
 
                 # 内容完整性校验（可选）
                 if not config.report_integrity_enabled:
+                    health_contract_valid = True
                     break
                 require_phase_decision = isinstance(context.get("market_phase_context"), dict)
                 pass_integrity, missing_fields = self._check_content_integrity(
@@ -3630,6 +3632,7 @@ class GeminiAnalyzer:
                     require_phase_decision=require_phase_decision,
                 )
                 if pass_integrity:
+                    health_contract_valid = True
                     break
                 if retry_count < max_retries:
                     current_prompt = self._build_integrity_retry_prompt(
@@ -3655,10 +3658,34 @@ class GeminiAnalyzer:
                         "[LLM完整性] 必填字段缺失 %s，已占位补全，不阻塞流程",
                         missing_fields,
                     )
+                    health_contract_valid = False
                     break
 
             if should_persist_usage_telemetry(llm_usage):
                 persist_llm_usage(llm_usage, model_used, call_type="analysis", stock_code=code)
+
+            if backend_id == "codex_cli" and health_contract_valid:
+                try:
+                    from src.services.codex_health import (
+                        PALLAS_RESEARCH_CONTRACT_ID,
+                        record_codex_generation_observation,
+                    )
+
+                    record_codex_generation_observation(
+                        success=True,
+                        latency_ms=int(elapsed * 1000),
+                        reachable=True,
+                        model=model_used,
+                        provider=(llm_usage or {}).get("provider") or "codex_chatgpt_oauth",
+                        backend=backend_id,
+                        schema_valid=True,
+                        usage_available=bool((llm_usage or {}).get("usage_available")),
+                        context_tokens=(llm_usage or {}).get("input_tokens"),
+                        health_qualifying=True,
+                        health_contract=PALLAS_RESEARCH_CONTRACT_ID,
+                    )
+                except Exception:
+                    pass
 
             logger.info(f"[LLM解析] {name}({code}) 分析完成: {result.trend_prediction}, 评分 {result.sentiment_score}")
 

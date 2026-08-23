@@ -120,7 +120,7 @@ print(json.dumps({"prompt": prompt, "cwd": os.getcwd(), "sentiment_score": 70}, 
         "backend": "codex_cli",
         "provider": "codex_chatgpt_oauth",
         "model": "gpt-5.6-luna",
-        "reasoning_effort": "xhigh",
+        "reasoning_effort": "max",
         "web_search_enabled": False,
         "auth_mode": "codex_managed_chatgpt_oauth",
     }

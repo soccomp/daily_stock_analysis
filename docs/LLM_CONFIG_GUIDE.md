@@ -35,7 +35,7 @@ Generation backend 是普通分析、大盘复盘和 `generate_text()` 的外层
 GENERATION_BACKEND=codex_cli
 GENERATION_FALLBACK_BACKEND=
 CODEX_CLI_MODEL=gpt-5.6-luna
-CODEX_CLI_REASONING_EFFORT=xhigh
+CODEX_CLI_REASONING_EFFORT=max
 CODEX_CLI_WEB_SEARCH_ENABLED=false
 GENERATION_BACKEND_TIMEOUT_SECONDS=300
 GENERATION_BACKEND_MAX_OUTPUT_BYTES=1048576
@@ -50,12 +50,12 @@ AGENT_GENERATION_BACKEND=auto
 ```
 
 - `GENERATION_BACKEND=litellm|codex_cli|claude_code_cli|opencode_cli`。本地 CLI backend 是 generation backend，不是 LiteLLM provider；不要写 `LITELLM_MODEL=codex_cli/...`、`LITELLM_MODEL=claude_code_cli/...` 或 `LITELLM_MODEL=opencode_cli/...`。
-- Pallas 的 Codex convergence profile 使用 `GENERATION_BACKEND=codex_cli`、`GENERATION_FALLBACK_BACKEND=`、`CODEX_CLI_MODEL=gpt-5.6-luna` 和 `CODEX_CLI_REASONING_EFFORT=xhigh`。Codex 自己管理 ChatGPT OAuth；DSA 不读取、刷新或记录 OAuth token，也不把 OAuth 凭据送入 LiteLLM/OpenAI API。失败时必须保留 `login_required` / `quota_exhausted` 等明确状态，不能静默切换 provider 或本地模型。
+- Pallas 的 Codex production/observation-period profile 使用 `GENERATION_BACKEND=codex_cli`、`GENERATION_FALLBACK_BACKEND=`、`CODEX_CLI_MODEL=gpt-5.6-luna` 和 `CODEX_CLI_REASONING_EFFORT=max`。xhigh/high/medium 只作为后续优化 benchmark evidence，不改变本轮默认值。Codex 自己管理 ChatGPT OAuth；DSA 不读取、刷新或记录 OAuth token，也不把 OAuth 凭据送入 LiteLLM/OpenAI API。失败时必须保留 `login_required` / `quota_exhausted` 等明确状态，不能静默切换 provider 或本地模型。
 - `CODEX_CLI_WEB_SEARCH_ENABLED=false` 是安全默认值。只有明确属于 live research 的任务才可在单次 generation config 中传 `allow_web_search=true`；closed-evidence 任务不会追加 Codex `--search`。
 - `GENERATION_BACKEND=opencode_cli` 时默认不传 `--model`，由本机 OpenCode 使用自身默认模型配置；`OPENCODE_CLI_MODEL` 只是可选覆盖值，配置时才作为单个 `--model` 参数传给 OpenCode。provider 认证、账号和模型可用性由本机 OpenCode 自身配置负责；DSA 不接管这些配置。
 - 通用 legacy 路径中，未配置 `GENERATION_FALLBACK_BACKEND` 时仍可使用历史默认值；本地 `.env` 显式空值 `GENERATION_FALLBACK_BACKEND=` 表示禁用 backend-level fallback。Pallas 的 `codex_cli` primary 对任何非空 fallback 都 fail-closed，不接受切换到 LiteLLM、Qwen/oMLX 或其他 provider。
 - `GENERATION_BACKEND=codex_cli|claude_code_cli` 且没有 Gemini/OpenAI/Anthropic/DeepSeek API Key 时，普通分析和大盘复盘仍会尝试本地 CLI backend；如果对应 executable 不存在，会返回结构化 `command_not_found`，不会报“API Key 未配置”。
-- 当前 `codex_cli` preset 使用 `codex exec --skip-git-repo-check --sandbox read-only --color never --ephemeral --json --output-last-message <temp-file> -`，模型和 `model_reasoning_effort="xhigh"` 由受控 runtime 参数注入；不再使用已被当前 CLI 移除的 `--ask-for-approval`。DSA 从临时文件读取最终响应，stdout 重复内容不参与主分析 JSON 解析。当前本机真实验证版本为 `codex-cli 0.149.0-alpha.4.1`；版本契约不兼容时返回结构化错误，Pallas 不自动切换 provider。
+- 当前 `codex_cli` preset 使用 `codex exec --skip-git-repo-check --sandbox read-only --color never --ephemeral --json --output-last-message <temp-file> -`，生产默认以 `model_reasoning_effort="max"` 由受控 runtime 参数注入；不再使用已被当前 CLI 移除的 `--ask-for-approval`。DSA 从临时文件读取最终响应，stdout 重复内容不参与主分析 JSON 解析。当前本机真实验证版本为 `codex-cli 0.149.0-alpha.4.1`；版本契约不兼容时返回结构化错误，Pallas 不自动切换 provider。
 - 当前 `claude_code_cli` preset 使用 `claude --safe-mode --tools "" --disallowedTools "mcp__*" --strict-mcp-config --no-session-persistence --output-format json -p <static instruction>`，完整 DSA prompt 通过 stdin 传入。DSA 只从 Claude JSON envelope 的 `result/success` 最终字段提取文本；如果后续启用 `--json-schema`，schema mode 必须提取 `structured_output`，并且仍会继续经过 DSA 现有 JSON validator、minimal parser contract、`_parse_response()`、integrity retry、placeholder fill 和 usage telemetry。参数依据见 [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)；本 PR smoke 验证版本为 `claude 2.1.177 (Claude Code)`，不声明更宽最低版本。
 - 当前 `opencode_cli` preset 使用 `opencode --pure run --format json [--model <OPENCODE_CLI_MODEL>] <static instruction> --file <temp prompt file>`；只有显式配置 `OPENCODE_CLI_MODEL` 时才追加 `--model`，完整 DSA prompt 写入权限受控的临时文件，不进入 argv。DSA 只解析 OpenCode JSON event 输出中无工具事件的 `text` 内容，并要求正常 `step_finish`；出现 `tool_use`、`error`、`question`、`permission` 等事件会结构化失败。参数依据见 [OpenCode CLI reference](https://opencode.ai/docs/cli)，项目配置合并语义见 [OpenCode config reference](https://opencode.ai/docs/config)；本 PR smoke 验证版本为 `opencode 1.17.11`，不声明更宽最低版本。
 - 本地 CLI backend 不支持 streaming。请求 stream 时会自动降级为 non-stream，不会因此返回 `capability_unsupported`。

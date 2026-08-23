@@ -3654,7 +3654,7 @@ class SystemConfigService:
                     "agent",
                     True,
                     "configured",
-                    "Agent 工具调用使用 Codex App Server；模型为 GPT-5.6 Luna，reasoning_effort=xhigh。",
+                    "Agent 工具调用使用 Codex App Server；模型为 GPT-5.6 Luna，reasoning_effort=max。",
                 )
             return self._setup_check(
                 "llm_agent",

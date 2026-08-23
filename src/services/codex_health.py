@@ -14,6 +14,7 @@ from typing import Any, Dict, Iterable, Mapping, Optional
 CODEX_DEPENDENCY_ID = "codex-luna"
 CODEX_PROVIDER_ID = "codex_chatgpt_oauth"
 DEFAULT_CODEX_MODEL = "gpt-5.6-luna"
+PALLAS_RESEARCH_CONTRACT_ID = "pallas-production-structured-research-v1"
 DEFAULT_CODEX_GENERATION_TTL_SECONDS = 900
 DEFAULT_CODEX_TIMEOUT_SECONDS = 300
 HEALTHY_LATENCY_MARGIN_RATIO = 0.75
@@ -252,6 +253,34 @@ def summarize_generation_metrics(
     }
 
 
+def is_health_qualifying_generation(
+    *,
+    success: bool,
+    model: Optional[str],
+    provider: Optional[str],
+    backend: Optional[str],
+    schema_valid: Optional[bool],
+    health_qualifying: bool,
+    health_contract: Optional[str],
+) -> bool:
+    """Return whether a completed call may heal canonical research health.
+
+    Ordinary Chat/Agent text and backend smoke calls remain useful telemetry,
+    but only an explicit Pallas production contract with an actually validated
+    structured response may refresh the autonomous-research generation layer.
+    """
+    expected_model = _configured_model()
+    return bool(
+        success
+        and health_qualifying
+        and schema_valid is True
+        and str(model or "").strip() == expected_model
+        and str(provider or "").strip() == CODEX_PROVIDER_ID
+        and str(backend or "").strip() in {"codex_cli", "codex_app_server"}
+        and health_contract == PALLAS_RESEARCH_CONTRACT_ID
+    )
+
+
 def record_codex_generation_observation(
     *,
     success: bool,
@@ -265,19 +294,47 @@ def record_codex_generation_observation(
     schema_valid: Optional[bool] = None,
     usage_available: Optional[bool] = None,
     context_tokens: Optional[int] = None,
+    health_qualifying: bool = False,
+    health_contract: Optional[str] = None,
 ) -> None:
-    """Persist one real CLI/App Server generation without affecting execution."""
+    """Persist one real generation without letting unrelated Chat heal research.
+
+    Failure observations always reach the canonical generation layer. A
+    successful observation must carry explicit evidence from an authoritative
+    Pallas structured/research caller; otherwise it is telemetry only and is
+    intentionally ignored by the readiness store.
+    """
     try:
         from src.services.dependency_health import get_dependency_health_store
 
         effective_model = str(model or os.getenv("CODEX_CLI_MODEL") or DEFAULT_CODEX_MODEL).strip()
         effective_provider = str(provider or CODEX_PROVIDER_ID).strip()
+        qualifies = is_health_qualifying_generation(
+            success=bool(success),
+            model=model,
+            provider=provider,
+            backend=backend,
+            schema_valid=schema_valid,
+            health_qualifying=health_qualifying,
+            health_contract=health_contract,
+        )
+        if success and not health_qualifying:
+            # Normal Chat, Agent, ranking, and smoke calls may still emit
+            # usage/run telemetry, but they cannot replace a failed research
+            # generation observation with a fresh HEALTHY row.
+            return
+        if success and not qualifies:
+            success = False
+            failure_class = failure_class or "NON_QUALIFYING_GENERATION"
+            error = error or "Codex generation did not satisfy the Pallas research contract"
         metadata = {
             "model": effective_model,
             "provider": effective_provider,
             "backend": backend or "codex_cli",
             "schema_valid": schema_valid,
             "structured_output_valid": schema_valid,
+            "health_qualifying": bool(health_qualifying),
+            "health_contract": health_contract,
             "usage_available": usage_available,
             "context_tokens": context_tokens,
             "auth_mode": "codex_managed_chatgpt_oauth",
@@ -318,6 +375,8 @@ __all__ = [
     "CODEX_DEPENDENCY_ID",
     "CODEX_PROVIDER_ID",
     "DEFAULT_CODEX_MODEL",
+    "PALLAS_RESEARCH_CONTRACT_ID",
+    "is_health_qualifying_generation",
     "probe_codex_identity",
     "record_codex_generation_observation",
     "summarize_generation_metrics",

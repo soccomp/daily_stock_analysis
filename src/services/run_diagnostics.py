@@ -973,43 +973,6 @@ def record_llm_run(
     error_message: Optional[Any] = None,
 ) -> None:
     """Append an LLM call result to the active context without affecting callers."""
-    try:
-        from src.services.dependency_health import get_dependency_health_store
-
-        provider_name = (provider or "").lower()
-        model_name = (model or "").lower()
-        is_codex = (
-            provider_name in {"codex_chatgpt_oauth", "codex_app_server", "codex_cli"}
-            or "luna" in model_name
-        )
-        if is_codex:
-            get_dependency_health_store().record_result(
-                "codex-luna",
-                category="LLM_RESEARCH",
-                role="PRIMARY",
-                priority=1,
-                endpoint="codex://chatgpt-oauth",
-                success=bool(success),
-                reachable=True,
-                usable=bool(success),
-                records=1 if success else 0,
-                latency_ms=duration_ms,
-                failure_class_name=error_type,
-                error=error_message,
-                metadata={
-                    "model": model,
-                    "provider": provider or "codex_chatgpt_oauth",
-                    "backend": provider_name or "codex_cli",
-                    "call_type": call_type,
-                    "tokens": tokens,
-                },
-                observation_kind="generation",
-                freshness_ttl_seconds=int(
-                    os.getenv("DSA_CODEX_GENERATION_HEALTH_TTL_SECONDS", "900")
-                ),
-            )
-    except Exception:  # pragma: no cover - diagnostics must not affect callers
-        pass
     context = get_current_diagnostic_context()
     if context is None:
         return

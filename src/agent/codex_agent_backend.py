@@ -56,7 +56,7 @@ _PUBLIC_ERROR_MESSAGES = {
 }
 _DEFAULT_PUBLIC_ERROR_MESSAGE = "Codex Agent 暂时无法完成本次问股，请前往 Agent 设置查看运行状态。"
 _DEFAULT_CODEX_MODEL = "gpt-5.6-luna"
-_DEFAULT_CODEX_REASONING_EFFORT = "xhigh"
+_DEFAULT_CODEX_REASONING_EFFORT = "max"
 _DEFAULT_CODEX_TOOL_NAMES = (
     "get_analysis_context",
     "get_skill_backtest_summary",
@@ -325,6 +325,7 @@ class CodexAgentBackend(AgentBackend):
             schema_valid=bool(request.output_schema) if turn.final_text else False,
             usage_available=bool(usage and usage.get("total_tokens") is not None),
             context_tokens=(usage or {}).get("input_tokens") if usage else None,
+            health_qualifying=False,
         )
         if request.progress_callback:
             request.progress_callback(stream_event("generating", step=1, message="正在整理分析结果…"))

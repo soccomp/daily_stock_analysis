@@ -91,11 +91,11 @@ const settingsHelpZhCN: SettingsHelpMap = {
   'settings.ai_model.CODEX_CLI_REASONING_EFFORT': {
     title: 'Codex 推理强度',
     showFieldKey: true,
-    summary: '指定 Codex CLI 的 reasoning effort；收敛默认值为 xhigh。',
+    summary: '指定 Codex CLI 的 reasoning effort；Owner observation-period 默认值为 max。',
     usage: '通常保持 max。只有在明确验证了时延和质量权衡后才调整。',
     valueNotes: ['支持 none、low、medium、high、xhigh、max。'],
     impact: ['影响 Codex 生成质量、推理用量和响应时延。'],
-    examples: ['CODEX_CLI_REASONING_EFFORT=xhigh'],
+    examples: ['CODEX_CLI_REASONING_EFFORT=max'],
   },
   'settings.ai_model.CODEX_CLI_WEB_SEARCH_ENABLED': {
     title: 'Codex 原生联网搜索',
@@ -1349,11 +1349,11 @@ const settingsHelpEnUS: SettingsHelpMap = {
   'settings.ai_model.CODEX_CLI_REASONING_EFFORT': {
     title: 'Codex Reasoning Effort',
     showFieldKey: true,
-    summary: 'Selects Codex CLI reasoning effort; the convergence default is xhigh.',
+    summary: 'Selects Codex CLI reasoning effort; the Owner observation-period default is max.',
     usage: 'Usually keep max. Change it only after validating the latency and quality tradeoff.',
     valueNotes: ['Supported values are none, low, medium, high, xhigh, and max.'],
     impact: ['Affects Codex quality, reasoning usage, and response latency.'],
-    examples: ['CODEX_CLI_REASONING_EFFORT=xhigh'],
+    examples: ['CODEX_CLI_REASONING_EFFORT=max'],
   },
   'settings.ai_model.CODEX_CLI_WEB_SEARCH_ENABLED': {
     title: 'Codex Native Web Search',

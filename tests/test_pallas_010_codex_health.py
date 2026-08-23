@@ -4,7 +4,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from api.v1.endpoints.agent import _canonical_codex_tool_sources
-from src.services.codex_health import probe_codex_identity, summarize_generation_metrics
+from src.services.codex_health import (
+    PALLAS_RESEARCH_CONTRACT_ID,
+    probe_codex_identity,
+    record_codex_generation_observation,
+    summarize_generation_metrics,
+)
 from src.services.dependency_health import DependencyHealthStore, configured_dependency_inventory
 
 
@@ -121,11 +126,14 @@ def test_research_endpoint_returns_only_canonical_successful_tool_refs():
 
     with patch("api.v1.endpoints.agent.get_config", return_value=config), patch(
         "api.v1.endpoints.agent._build_executor", return_value=executor
-    ):
+    ), patch("src.services.codex_health.record_codex_generation_observation") as record:
         response = asyncio.run(agent_research(ResearchRequest(question="research")))
 
     assert response.success is True
     assert response.sources == ["tool:get_analysis_context"]
+    record.assert_called_once()
+    assert record.call_args.kwargs["health_qualifying"] is True
+    assert record.call_args.kwargs["schema_valid"] is True
 
 
 def test_research_endpoint_fails_closed_when_sources_are_ungrounded():
@@ -191,9 +199,18 @@ def test_dependency_inventory_names_codex_luna_as_the_only_llm_primary(monkeypat
     ]
 
 
-def test_run_diagnostics_maps_codex_generation_to_codex_luna_health(monkeypatch, tmp_path):
+def test_non_qualifying_codex_chat_cannot_heal_failed_generation(monkeypatch, tmp_path):
     store = DependencyHealthStore(tmp_path / "diagnostics-health.json")
     monkeypatch.setattr("src.services.dependency_health.get_dependency_health_store", lambda: store)
+    store.record_result(
+        "codex-luna",
+        category="LLM_RESEARCH",
+        success=False,
+        reachable=True,
+        usable=False,
+        failure_class_name="TIMEOUT",
+        observation_kind="generation",
+    )
     store.record_result(
         "codex-luna",
         category="LLM_RESEARCH",
@@ -214,9 +231,76 @@ def test_run_diagnostics_maps_codex_generation_to_codex_luna_health(monkeypatch,
         tokens=27672,
         call_type="market_review",
     )
+    record_codex_generation_observation(
+        success=True,
+        latency_ms=500,
+        model="gpt-5.6-luna",
+        provider="codex_chatgpt_oauth",
+        backend="codex_app_server",
+        schema_valid=False,
+        health_qualifying=False,
+    )
 
     row = store.snapshot()["dependencies"]["codex-luna"]
-    assert row["status"] == "HEALTHY"
+    assert row["status"] == "FAILED"
+    assert row["generation_status"] == "FAILED"
+    assert store.snapshot()["readiness"]["AUTONOMOUS_SIMULATION_READINESS"] == "BLOCKED"
+
+
+def test_qualifying_structured_pallas_generation_can_recover_health(monkeypatch, tmp_path):
+    store = DependencyHealthStore(tmp_path / "qualifying-health.json", transition_cooldown_seconds=0)
+    monkeypatch.setattr("src.services.dependency_health.get_dependency_health_store", lambda: store)
+    monkeypatch.setenv("CODEX_CLI_MODEL", "gpt-5.6-luna")
+    store.record_result(
+        "codex-luna", category="LLM_RESEARCH", success=False, reachable=True,
+        usable=False, failure_class_name="TIMEOUT", observation_kind="generation",
+    )
+    store.record_result(
+        "codex-luna", category="LLM_RESEARCH", success=True, reachable=True,
+        usable=True, records=1, observation_kind="identity",
+    )
+
+    record_codex_generation_observation(
+        success=True,
+        latency_ms=120000,
+        model="gpt-5.6-luna",
+        provider="codex_chatgpt_oauth",
+        backend="codex_cli",
+        schema_valid=True,
+        usage_available=True,
+        health_qualifying=True,
+        health_contract=PALLAS_RESEARCH_CONTRACT_ID,
+    )
+
+    row = store.snapshot()["dependencies"]["codex-luna"]
     assert row["generation_status"] == "HEALTHY"
-    assert row["metadata"]["provider"] == "codex_chatgpt_oauth"
-    assert "codex_chatgpt_oauth" not in store.snapshot()["dependencies"]
+    assert row["status"] == "HEALTHY"
+
+
+def test_requested_schema_without_valid_contract_cannot_heal_health(monkeypatch, tmp_path):
+    store = DependencyHealthStore(tmp_path / "invalid-contract-health.json", transition_cooldown_seconds=0)
+    monkeypatch.setattr("src.services.dependency_health.get_dependency_health_store", lambda: store)
+    monkeypatch.setenv("CODEX_CLI_MODEL", "gpt-5.6-luna")
+    store.record_result(
+        "codex-luna", category="LLM_RESEARCH", success=False, reachable=True,
+        usable=False, failure_class_name="SCHEMA_VALIDATION_FAILED", observation_kind="generation",
+    )
+    store.record_result(
+        "codex-luna", category="LLM_RESEARCH", success=True, reachable=True,
+        usable=True, records=1, observation_kind="identity",
+    )
+
+    record_codex_generation_observation(
+        success=True,
+        latency_ms=120000,
+        model="gpt-5.6-luna",
+        provider="codex_chatgpt_oauth",
+        backend="codex_app_server",
+        schema_valid=False,
+        health_qualifying=True,
+        health_contract=PALLAS_RESEARCH_CONTRACT_ID,
+    )
+
+    row = store.snapshot()["dependencies"]["codex-luna"]
+    assert row["generation_status"] == "FAILED"
+    assert row["status"] == "FAILED"

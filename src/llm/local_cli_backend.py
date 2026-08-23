@@ -45,7 +45,7 @@ DEFAULT_LOCAL_CLI_MAX_OUTPUT_BYTES = 1024 * 1024
 DEFAULT_GENERATION_BACKEND_MAX_CONCURRENCY = 1
 DEFAULT_LOCAL_CLI_BACKEND_MAX_CONCURRENCY = 1
 DEFAULT_CODEX_CLI_MODEL = "gpt-5.6-luna"
-DEFAULT_CODEX_CLI_REASONING_EFFORT = "xhigh"
+DEFAULT_CODEX_CLI_REASONING_EFFORT = "max"
 SUPPORTED_CODEX_CLI_REASONING_EFFORTS = frozenset({"none", "low", "medium", "high", "xhigh", "max"})
 MAX_LOCAL_CLI_TIMEOUT_SECONDS = 3600
 MAX_LOCAL_CLI_OUTPUT_BYTES = 32 * 1024 * 1024
@@ -2223,6 +2223,7 @@ class LocalCliGenerationBackend(GenerationBackend):
             schema_valid=(response_validator is not None or generation_config.get("output_schema") is not None),
             usage_available=bool(usage.get("usage_available")),
             context_tokens=_optional_int(usage.get("input_tokens")),
+            health_qualifying=False,
         )
         return result
 

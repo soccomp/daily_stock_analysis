@@ -507,6 +507,33 @@ def _record_codex_research_contract_failure(result: Any, failure_class: str) -> 
         return
 
 
+def _record_codex_research_contract_success(result: Any) -> None:
+    """Heal canonical research health only after the endpoint contract passes."""
+    try:
+        from src.services.codex_health import (
+            PALLAS_RESEARCH_CONTRACT_ID,
+            record_codex_generation_observation,
+        )
+
+        diagnostics = getattr(result, "diagnostics", {}) or {}
+        usage = getattr(result, "usage", {}) or {}
+        record_codex_generation_observation(
+            success=True,
+            latency_ms=int(diagnostics.get("latency_ms") or 0),
+            reachable=True,
+            model=getattr(result, "model", None),
+            provider=getattr(result, "provider", None) or "codex_chatgpt_oauth",
+            backend=getattr(result, "backend", None) or "codex_app_server",
+            schema_valid=True,
+            usage_available=bool(usage.get("total_tokens") is not None),
+            context_tokens=usage.get("input_tokens"),
+            health_qualifying=True,
+            health_contract=PALLAS_RESEARCH_CONTRACT_ID,
+        )
+    except Exception:
+        return
+
+
 @router.post("/research", response_model=ResearchResponse)
 async def agent_research(request: ResearchRequest):
     """Run a deep-research query via the ResearchAgent.
@@ -582,6 +609,7 @@ async def agent_research(request: ResearchRequest):
                     token_usage=result.total_tokens,
                     error="CODEX_RESEARCH_SOURCE_EVIDENCE_UNGROUNDED",
                 )
+            _record_codex_research_contract_success(result)
             return ResearchResponse(
                 success=True,
                 content=report.strip(),
