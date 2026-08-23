@@ -189,6 +189,7 @@ class AgentChatExecutor:
             backend=backend_result.backend,
             error_code=backend_result.error_code,
             usage=backend_result.usage,
+            diagnostics=backend_result.diagnostics,
         )
 
         if result.success:

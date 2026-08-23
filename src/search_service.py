@@ -4687,96 +4687,137 @@ class SearchService:
             provider_max_results,
         )
         
-        # 轮流使用不同的搜索引擎
-        provider_index = 0
-        
         for dim in search_dimensions:
             if search_count >= max_searches:
                 break
-            
-            # 选择搜索引擎（轮流使用）
+
+            # Every intelligence dimension follows the same canonical chain:
+            # Bocha primary, configured SearXNG fallback, then optional
+            # auxiliaries.  Round-robin selection could let an auxiliary
+            # outrank SearXNG on the next dimension.
             available_providers = [p for p in self._providers if p.is_available]
             if not available_providers:
                 break
-            
-            provider = available_providers[provider_index % len(available_providers)]
-            provider_index += 1
-            
+
             request_days = (
                 self.ANALYTICAL_INTEL_LOOKBACK_DAYS
                 if dim['name'] in self.ANALYTICAL_INTEL_DIMENSIONS
                 else search_days
             )
 
-            logger.info(
-                "[情报搜索] %s: 使用 %s，请求窗口: 近%s天",
-                dim['desc'],
-                provider.name,
-                request_days,
-            )
+            selected_response: Optional[SearchResponse] = None
+            previous_provider: Optional[str] = None
+            for provider in available_providers:
+                logger.info(
+                    "[情报搜索] %s: 使用 %s，请求窗口: 近%s天",
+                    dim['desc'],
+                    provider.name,
+                    request_days,
+                )
+                started_at = time.monotonic()
+                fallback_from = previous_provider
+                try:
+                    if isinstance(provider, TavilySearchProvider) and dim.get('tavily_topic'):
+                        response = provider.search(
+                            dim['query'],
+                            max_results=provider_max_results,
+                            days=request_days,
+                            topic=dim['tavily_topic'],
+                        )
+                    else:
+                        response = provider.search(
+                            dim['query'],
+                            max_results=provider_max_results,
+                            days=request_days,
+                        )
+                except Exception as exc:
+                    self._record_provider_health(
+                        provider,
+                        latency_ms=self._elapsed_ms(started_at),
+                        failure_class=type(exc).__name__,
+                        error=exc,
+                        fallback_from=fallback_from,
+                        usable=False,
+                        record_count=0,
+                    )
+                    previous_provider = provider.name
+                    continue
 
-            if isinstance(provider, TavilySearchProvider) and dim.get('tavily_topic'):
-                response = provider.search(
-                    dim['query'],
+                if dim['strict_freshness']:
+                    filtered_response = self._filter_news_response(
+                        response,
+                        search_days=search_days,
+                        max_results=provider_max_results,
+                        log_scope=f"{stock_code}:{provider.name}:{dim['name']}",
+                    )
+                elif dim['name'] in self.ANALYTICAL_INTEL_DIMENSIONS:
+                    filtered_response = self._filter_news_response(
+                        response,
+                        search_days=self.ANALYTICAL_INTEL_LOOKBACK_DAYS,
+                        max_results=provider_max_results,
+                        keep_unknown=True,
+                        log_scope=f"{stock_code}:{provider.name}:{dim['name']}",
+                    )
+                else:
+                    filtered_response = self._normalize_and_limit_response(
+                        response,
+                        max_results=provider_max_results,
+                    )
+                filtered_response = self._rank_news_response(
+                    filtered_response,
+                    stock_code=stock_code,
+                    stock_name=stock_name,
+                    prefer_chinese=self._should_prefer_chinese_news(stock_code, stock_name),
                     max_results=provider_max_results,
-                    days=request_days,
-                    topic=dim['tavily_topic'],
+                    log_scope=f"{stock_code}:{provider.name}:{dim['name']}:rank",
                 )
-            else:
-                response = provider.search(
-                    dim['query'],
-                    max_results=provider_max_results,
-                    days=request_days,
+                filtered_response = self._filter_ranked_news_for_context(
+                    filtered_response,
+                    log_scope=f"{stock_code}:{provider.name}:{dim['name']}:admission",
                 )
-            if dim['strict_freshness']:
-                filtered_response = self._filter_news_response(
-                    response,
-                    search_days=search_days,
-                    max_results=provider_max_results,
-                    log_scope=f"{stock_code}:{provider.name}:{dim['name']}",
+                filtered_response = self._limit_search_response(
+                    filtered_response,
+                    max_results=target_per_dimension,
                 )
-            elif dim['name'] in self.ANALYTICAL_INTEL_DIMENSIONS:
-                filtered_response = self._filter_news_response(
-                    response,
-                    search_days=self.ANALYTICAL_INTEL_LOOKBACK_DAYS,
-                    max_results=provider_max_results,
-                    keep_unknown=True,
-                    log_scope=f"{stock_code}:{provider.name}:{dim['name']}",
+                self._mark_fallback(filtered_response, fallback_from)
+                self._record_provider_health(
+                    provider,
+                    response=filtered_response,
+                    latency_ms=self._elapsed_ms(started_at),
+                    fallback_from=fallback_from,
+                    usable=bool(filtered_response.results),
+                    record_count=len(filtered_response.results or []),
                 )
-            else:
-                filtered_response = self._normalize_and_limit_response(
-                    response,
-                    max_results=provider_max_results,
-                )
-            filtered_response = self._rank_news_response(
-                filtered_response,
-                stock_code=stock_code,
-                stock_name=stock_name,
-                prefer_chinese=self._should_prefer_chinese_news(stock_code, stock_name),
-                max_results=provider_max_results,
-                log_scope=f"{stock_code}:{provider.name}:{dim['name']}:rank",
+                previous_provider = provider.name
+                if filtered_response.success and filtered_response.results:
+                    selected_response = filtered_response
+                    break
+                if response.success:
+                    logger.info(
+                        "[情报搜索] %s: 原始=%s条, 过滤后=%s条，继续 canonical fallback",
+                        dim['desc'],
+                        len(response.results),
+                        len(filtered_response.results),
+                    )
+
+            results[dim['name']] = selected_response or SearchResponse(
+                query=dim['query'],
+                results=[],
+                provider="None",
+                success=False,
+                error_message="所有搜索引擎都不可用或过滤后无有效情报",
             )
-            filtered_response = self._filter_ranked_news_for_context(
-                filtered_response,
-                log_scope=f"{stock_code}:{provider.name}:{dim['name']}:admission",
-            )
-            filtered_response = self._limit_search_response(
-                filtered_response,
-                max_results=target_per_dimension,
-            )
-            results[dim['name']] = filtered_response
             search_count += 1
-            
-            if response.success:
+            if selected_response and selected_response.success:
                 logger.info(
                     "[情报搜索] %s: 原始=%s条, 过滤后=%s条",
                     dim['desc'],
-                    len(response.results),
-                    len(filtered_response.results),
+                    len(selected_response.results),
+                    len(selected_response.results),
                 )
             else:
-                logger.warning(f"[情报搜索] {dim['desc']}: 搜索失败 - {response.error_message}")
-            
+                logger.warning("[情报搜索] %s: canonical chain failed", dim['desc'])
+
             # 短暂延迟避免请求过快
             time.sleep(0.5)
         

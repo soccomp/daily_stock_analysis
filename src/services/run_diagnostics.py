@@ -978,25 +978,36 @@ def record_llm_run(
 
         provider_name = (provider or "").lower()
         model_name = (model or "").lower()
-        dependency_id = "qwen-omlx" if provider_name in {"omlx", "qwen", "openai"} or "qwen" in model_name or "omlx" in model_name else (provider or "llm").lower()
-        get_dependency_health_store().record_result(
-            dependency_id,
-            category="LLM_RESEARCH",
-            role="PRIMARY",
-            success=bool(success),
-            reachable=True,
-            usable=bool(success and duration_ms is not None and int(duration_ms) < 30_000),
-            records=1 if success else 0,
-            latency_ms=duration_ms,
-            failure_class_name=error_type,
-            error=error_message,
-            metadata={"model": model, "call_type": call_type, "tokens": tokens},
-            observation_kind="generation" if dependency_id == "qwen-omlx" else None,
-            freshness_ttl_seconds=(
-                int(os.getenv("DSA_QWEN_GENERATION_HEALTH_TTL_SECONDS", "900"))
-                if dependency_id == "qwen-omlx" else None
-            ),
+        is_codex = (
+            provider_name in {"codex_chatgpt_oauth", "codex_app_server", "codex_cli"}
+            or "luna" in model_name
         )
+        if is_codex:
+            get_dependency_health_store().record_result(
+                "codex-luna",
+                category="LLM_RESEARCH",
+                role="PRIMARY",
+                priority=1,
+                endpoint="codex://chatgpt-oauth",
+                success=bool(success),
+                reachable=True,
+                usable=bool(success),
+                records=1 if success else 0,
+                latency_ms=duration_ms,
+                failure_class_name=error_type,
+                error=error_message,
+                metadata={
+                    "model": model,
+                    "provider": provider or "codex_chatgpt_oauth",
+                    "backend": provider_name or "codex_cli",
+                    "call_type": call_type,
+                    "tokens": tokens,
+                },
+                observation_kind="generation",
+                freshness_ttl_seconds=int(
+                    os.getenv("DSA_CODEX_GENERATION_HEALTH_TTL_SECONDS", "900")
+                ),
+            )
     except Exception:  # pragma: no cover - diagnostics must not affect callers
         pass
     context = get_current_diagnostic_context()

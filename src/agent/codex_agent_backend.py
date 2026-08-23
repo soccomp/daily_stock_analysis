@@ -56,7 +56,7 @@ _PUBLIC_ERROR_MESSAGES = {
 }
 _DEFAULT_PUBLIC_ERROR_MESSAGE = "Codex Agent 暂时无法完成本次问股，请前往 Agent 设置查看运行状态。"
 _DEFAULT_CODEX_MODEL = "gpt-5.6-luna"
-_DEFAULT_CODEX_REASONING_EFFORT = "max"
+_DEFAULT_CODEX_REASONING_EFFORT = "xhigh"
 _DEFAULT_CODEX_TOOL_NAMES = (
     "get_analysis_context",
     "get_skill_backtest_summary",
@@ -81,6 +81,7 @@ class CodexAgentBackend(AgentBackend):
         self.transport_factory = transport_factory
 
     def run(self, request: AgentRunRequest) -> AgentRunResult:
+        started = time.monotonic()
         timeout = request.max_wall_clock_seconds
         if timeout is None:
             timeout = float(getattr(self.config, "agent_orchestrator_timeout_s", 0))
@@ -257,8 +258,21 @@ class CodexAgentBackend(AgentBackend):
                     "web_search_enabled": False,
                     "auth_mode": "codex_managed_chatgpt_oauth",
                 }
+                diagnostics["latency_ms"] = max(0, int((time.monotonic() - started) * 1000))
         except CodexAppServerError as exc:
             code = self._normalize_error_code(exc.code)
+            self._record_codex_health(
+                success=False,
+                latency_ms=max(0, int((time.monotonic() - started) * 1000)),
+                reachable=code != "command_not_found",
+                model=locals().get("codex_model"),
+                provider="codex_chatgpt_oauth",
+                backend=self.backend_id,
+                failure_class=code,
+                error=str(exc),
+                schema_valid=False,
+                usage_available=False,
+            )
             return self._error_result(
                 request,
                 code,
@@ -266,6 +280,18 @@ class CodexAgentBackend(AgentBackend):
                 total_steps=1 if exc.turn_started else 0,
             )
         except OSError:
+            self._record_codex_health(
+                success=False,
+                latency_ms=max(0, int((time.monotonic() - started) * 1000)),
+                reachable=False,
+                model=locals().get("codex_model"),
+                provider="codex_chatgpt_oauth",
+                backend=self.backend_id,
+                failure_class="COMMAND_NOT_FOUND",
+                error="Codex App Server could not be started",
+                schema_valid=False,
+                usage_available=False,
+            )
             return self._error_result(
                 request,
                 "unknown_backend_error",
@@ -287,6 +313,19 @@ class CodexAgentBackend(AgentBackend):
             )
         if usage and should_persist_usage_telemetry(usage):
             persist_llm_usage(usage, model, call_type="agent")
+        self._record_codex_health(
+            success=bool(turn.final_text),
+            latency_ms=max(0, int((time.monotonic() - started) * 1000)),
+            reachable=True,
+            model=model,
+            provider="codex_chatgpt_oauth",
+            backend=self.backend_id,
+            failure_class=None if turn.final_text else "EMPTY_OUTPUT",
+            error=None if turn.final_text else "Codex returned an empty final answer",
+            schema_valid=bool(request.output_schema) if turn.final_text else False,
+            usage_available=bool(usage and usage.get("total_tokens") is not None),
+            context_tokens=(usage or {}).get("input_tokens") if usage else None,
+        )
         if request.progress_callback:
             request.progress_callback(stream_event("generating", step=1, message="正在整理分析结果…"))
         messages = [
@@ -307,6 +346,15 @@ class CodexAgentBackend(AgentBackend):
             messages=messages,
             total_steps=1,
         )
+
+    @staticmethod
+    def _record_codex_health(**kwargs: Any) -> None:
+        try:
+            from src.services.codex_health import record_codex_generation_observation
+
+            record_codex_generation_observation(**kwargs)
+        except Exception:
+            return
 
     @staticmethod
     def _normalize_error_code(code: str) -> str:

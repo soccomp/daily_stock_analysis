@@ -1,7 +1,7 @@
 """Persistent, read-only dependency health for the Pallas-010 runtime.
 
 The store is deliberately separate from the investment/runtime scheduler.  It
-records observations made by real callers (news providers and the local LLM)
+records observations made by real callers (news providers and Codex/Luna)
 and exposes a small, restart-safe snapshot for the Cockpit.  It never submits
 orders, creates proposals, or changes provider configuration.
 """
@@ -39,7 +39,7 @@ CRITICAL_CATEGORIES = (
 
 _DEFAULT_PATH = Path(__file__).resolve().parents[2] / "runtime" / "dependency_health.json"
 _DEFAULT_INTERVAL_SECONDS = 300
-_DEFAULT_QWEN_GENERATION_TTL_SECONDS = 900
+_DEFAULT_LLM_GENERATION_TTL_SECONDS = 900
 _MAX_TRANSITIONS = 300
 _MAX_ALERTS = 300
 
@@ -157,14 +157,14 @@ def _category_status(items: Iterable[Mapping[str, Any]]) -> str:
     return UNKNOWN
 
 
-def _qwen_combined_status(row: Mapping[str, Any]) -> str:
-    """Combine Qwen identity and generation without allowing metadata to heal generation."""
+def _llm_combined_status(row: Mapping[str, Any]) -> str:
+    """Combine identity and generation without allowing metadata to heal generation."""
     if row.get("configured") is False or row.get("enabled") is False:
         return DISABLED
     identity = row.get("identity")
     generation = row.get("generation")
     if not isinstance(identity, Mapping):
-        return str((generation or {}).get("status") or row.get("status") or UNKNOWN)
+        return UNKNOWN
     identity_status = str(identity.get("status") or UNKNOWN)
     if identity_status != HEALTHY:
         return identity_status
@@ -178,7 +178,7 @@ def _qwen_combined_status(row: Mapping[str, Any]) -> str:
     return generation_status
 
 
-def _qwen_observation_layer(
+def _llm_observation_layer(
     current: Mapping[str, Any],
     previous: Mapping[str, Any],
     *,
@@ -393,11 +393,11 @@ class DependencyHealthStore:
                     **_safe_metadata(metadata),
                 },
             }
-            if dependency_id == "qwen-omlx" and observation_kind in {"identity", "generation"}:
+            if dependency_id in {"codex-luna", "qwen-omlx"} and observation_kind in {"identity", "generation"}:
                 for other_kind in ("identity", "generation"):
                     if other_kind != observation_kind and isinstance(previous.get(other_kind), Mapping):
                         current[other_kind] = dict(previous[other_kind])
-                current[observation_kind] = _qwen_observation_layer(
+                current[observation_kind] = _llm_observation_layer(
                     current,
                     previous,
                     observation_kind=observation_kind,
@@ -405,15 +405,18 @@ class DependencyHealthStore:
                         freshness_ttl_seconds
                         if freshness_ttl_seconds is not None
                         else int(os.getenv(
-                            "DSA_QWEN_GENERATION_HEALTH_TTL_SECONDS",
-                            str(_DEFAULT_QWEN_GENERATION_TTL_SECONDS),
+                            "DSA_CODEX_GENERATION_HEALTH_TTL_SECONDS",
+                            os.getenv(
+                                "DSA_QWEN_GENERATION_HEALTH_TTL_SECONDS",
+                                str(_DEFAULT_LLM_GENERATION_TTL_SECONDS),
+                            ),
                         ))
                     ),
                 )
                 current["identity_status"] = (current.get("identity") or {}).get("status")
                 current["generation_status"] = (current.get("generation") or {}).get("status")
                 current["generation_freshness_expires_at"] = (current.get("generation") or {}).get("freshness_expires_at")
-                current["status"] = _qwen_combined_status(current)
+                current["status"] = _llm_combined_status(current)
                 current["usable"] = current["status"] == HEALTHY
                 identity_layer = current.get("identity") or previous.get("identity") or {}
                 current["reachable"] = identity_layer.get("reachable", current.get("reachable"))
@@ -433,18 +436,22 @@ class DependencyHealthStore:
             return dict(current)
 
     def _rebuild_categories_locked(self) -> None:
-        qwen = self._document.get("dependencies", {}).get("qwen-omlx")
-        if isinstance(qwen, dict) and ("identity" in qwen or "generation" in qwen):
-            combined = _qwen_combined_status(qwen)
-            qwen["status"] = combined
-            qwen["usable"] = combined == HEALTHY
-            qwen["identity_status"] = (qwen.get("identity") or {}).get("status")
-            qwen["generation_status"] = (qwen.get("generation") or {}).get("status")
-            qwen["generation_freshness_expires_at"] = (qwen.get("generation") or {}).get("freshness_expires_at")
+        llm = self._document.get("dependencies", {}).get("codex-luna")
+        if isinstance(llm, dict) and ("identity" in llm or "generation" in llm):
+            combined = _llm_combined_status(llm)
+            llm["status"] = combined
+            llm["usable"] = combined == HEALTHY
+            llm["identity_status"] = (llm.get("identity") or {}).get("status")
+            llm["generation_status"] = (llm.get("generation") or {}).get("status")
+            llm["generation_freshness_expires_at"] = (llm.get("generation") or {}).get("freshness_expires_at")
             if combined == STALE:
-                qwen["failure_class"] = "GENERATION_HEALTH_EXPIRED"
+                llm["failure_class"] = "GENERATION_HEALTH_EXPIRED"
         grouped: Dict[str, list[Mapping[str, Any]]] = {}
         for row in self._document.get("dependencies", {}).values():
+            if row.get("dependency_id") == "qwen-omlx" and row.get("category") == "LLM_RESEARCH":
+                # Preserve old local-Qwen evidence on disk without allowing a
+                # dormant/local provider to make Codex/Luna research ready.
+                continue
             grouped.setdefault(str(row.get("category") or "UNKNOWN"), []).append(row)
         categories: Dict[str, Any] = {}
         for category, rows in grouped.items():
@@ -475,8 +482,15 @@ class DependencyHealthStore:
                 blocked.append(category)
                 reasons.append(f"{category}:{status}")
             elif status == DEGRADED:
-                degraded.append(category)
-                reasons.append(f"{category}:{status}")
+                if category == "LLM_RESEARCH":
+                    # A model generation that is reachable but not usable is
+                    # still unsafe for autonomous research.  Only a fresh,
+                    # successful Codex/Luna generation may clear this gate.
+                    blocked.append(category)
+                    reasons.append(f"{category}:{status}")
+                else:
+                    degraded.append(category)
+                    reasons.append(f"{category}:{status}")
         news = categories.get("NEWS_SEARCH")
         advisories = []
         if news and news.get("status") not in {HEALTHY, DISABLED}:
@@ -562,7 +576,20 @@ def configured_dependency_inventory() -> list[Dict[str, Any]]:
         pass
     searx_urls = [item.strip() for item in os.getenv("SEARXNG_BASE_URLS", "").split(",") if item.strip()]
     inventory: list[Dict[str, Any]] = [
-        {"dependency_id": "qwen-omlx", "category": "LLM_RESEARCH", "configured": _env_configured("LLM_OMLX_BASE_URL"), "enabled": os.getenv("LLM_OMLX_ENABLED", "true").lower() != "false", "role": "PRIMARY", "priority": 1, "endpoint": os.getenv("LLM_OMLX_BASE_URL")},
+        {
+            "dependency_id": "codex-luna",
+            "category": "LLM_RESEARCH",
+            "configured": os.getenv("GENERATION_BACKEND", "").strip().lower() == "codex_cli"
+            or os.getenv("AGENT_BACKEND", "").strip().lower() == "codex_app_server",
+            "enabled": os.getenv("GENERATION_BACKEND", "").strip().lower() == "codex_cli"
+            or os.getenv("AGENT_BACKEND", "").strip().lower() == "codex_app_server",
+            "role": "PRIMARY",
+            "priority": 1,
+            "endpoint": "codex://chatgpt-oauth",
+            "model": os.getenv("CODEX_CLI_MODEL", "gpt-5.6-luna"),
+            "provider": "codex_chatgpt_oauth",
+            "auth_mode": "codex_managed_chatgpt_oauth",
+        },
         {"dependency_id": "bocha", "category": "NEWS_SEARCH", "configured": _env_configured("BOCHA_API_KEYS"), "enabled": _env_configured("BOCHA_API_KEYS"), "role": "PRIMARY", "priority": 1, "endpoint": "https://api.bocha.cn/v1/web-search"},
         {"dependency_id": "searxng", "category": "NEWS_SEARCH", "configured": bool(searx_urls), "enabled": bool(searx_urls), "role": "FALLBACK", "priority": 2, "endpoint": searx_urls[0] if searx_urls else None},
         {"dependency_id": "searxng-public-discovery", "category": "NEWS_SEARCH", "configured": os.getenv("SEARXNG_PUBLIC_INSTANCES_ENABLED", "false").lower() == "true", "enabled": os.getenv("SEARXNG_PUBLIC_INSTANCES_ENABLED", "false").lower() == "true", "role": "AUXILIARY", "priority": 99, "endpoint": "https://searx.space/data/instances.json"},
@@ -606,11 +633,11 @@ class DependencyHealthMonitor:
     def once(self) -> Dict[str, Any]:
         self.store.record_inventory(configured_dependency_inventory())
         try:
-            from src.services.qwen_health import probe_qwen_identity
+            from src.services.codex_health import probe_codex_identity
 
-            identity = probe_qwen_identity()
+            identity = probe_codex_identity()
             self.store.record_result(
-                "qwen-omlx",
+                "codex-luna",
                 category="LLM_RESEARCH",
                 configured=identity.get("configured", False),
                 enabled=identity.get("enabled", False),
@@ -620,7 +647,9 @@ class DependencyHealthMonitor:
                 success=identity.get("success"),
                 reachable=identity.get("reachable"),
                 usable=identity.get("usable"),
-                records=int(identity.get("loaded_count") or 0),
+                # Identity is a successful executable/login/model observation;
+                # it does not expose a loaded-record count like a data source.
+                records=1 if identity.get("success") is True else 0,
                 empty_valid=False,
                 latency_ms=identity.get("latency_ms"),
                 failure_class_name=identity.get("failure_class"),
@@ -630,7 +659,7 @@ class DependencyHealthMonitor:
             )
         except Exception as exc:  # pragma: no cover - defensive monitor boundary
             self.store.record_result(
-                "qwen-omlx",
+                "codex-luna",
                 category="LLM_RESEARCH",
                 configured=True,
                 enabled=True,

@@ -81,3 +81,47 @@ def test_public_searxng_discovery_requires_explicit_opt_in():
         provider.name == "SearXNG" and getattr(provider, "_use_public_instances", False)
         for provider in SearchService(searxng_public_instances_enabled=True)._providers
     )
+
+
+def test_comprehensive_intel_keeps_bocha_ahead_of_searxng(monkeypatch, tmp_path):
+    service = SearchService(
+        bocha_keys=["redacted-test-key"],
+        searxng_base_urls=["http://127.0.0.1:18080"],
+        dependency_health_store=DependencyHealthStore(tmp_path / "health.json"),
+    )
+    bocha, searxng = service._providers[:2]
+    bocha.search = MagicMock(return_value=_response("Bocha"))
+    searxng.search = MagicMock()
+    monkeypatch.setattr("src.search_service.time.sleep", lambda *_args: None)
+    monkeypatch.setattr(service, "_filter_news_response", lambda response, **_kwargs: response)
+    monkeypatch.setattr(service, "_rank_news_response", lambda response, **_kwargs: response)
+    monkeypatch.setattr(service, "_filter_ranked_news_for_context", lambda response, **_kwargs: response)
+
+    result = service.search_comprehensive_intel("600519", "贵州茅台", max_searches=1)
+
+    assert result["latest_news"].provider == "Bocha"
+    assert result["latest_news"].fallback_used is False
+    searxng.search.assert_not_called()
+
+
+def test_comprehensive_intel_uses_searxng_only_after_bocha_fails(monkeypatch, tmp_path):
+    service = SearchService(
+        bocha_keys=["redacted-test-key"],
+        searxng_base_urls=["http://127.0.0.1:18080"],
+        dependency_health_store=DependencyHealthStore(tmp_path / "health.json"),
+    )
+    bocha, searxng = service._providers[:2]
+    bocha.search = MagicMock(return_value=_response("Bocha", success=False))
+    searxng.search = MagicMock(return_value=_response("SearXNG"))
+    monkeypatch.setattr("src.search_service.time.sleep", lambda *_args: None)
+    monkeypatch.setattr(service, "_filter_news_response", lambda response, **_kwargs: response)
+    monkeypatch.setattr(service, "_rank_news_response", lambda response, **_kwargs: response)
+    monkeypatch.setattr(service, "_filter_ranked_news_for_context", lambda response, **_kwargs: response)
+
+    result = service.search_comprehensive_intel("600519", "贵州茅台", max_searches=1)
+
+    assert result["latest_news"].provider == "SearXNG"
+    assert result["latest_news"].fallback_used is True
+    assert result["latest_news"].fallback_from == "Bocha"
+    assert bocha.search.call_count == 1
+    assert searxng.search.call_count == 1

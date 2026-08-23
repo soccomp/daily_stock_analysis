@@ -60,6 +60,7 @@ class AgentResult:
     backend: str = ""
     error_code: Optional[str] = None
     usage: Optional[Dict[str, Any]] = None
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
 
 
 # ============================================================

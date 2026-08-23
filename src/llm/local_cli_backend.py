@@ -45,12 +45,23 @@ DEFAULT_LOCAL_CLI_MAX_OUTPUT_BYTES = 1024 * 1024
 DEFAULT_GENERATION_BACKEND_MAX_CONCURRENCY = 1
 DEFAULT_LOCAL_CLI_BACKEND_MAX_CONCURRENCY = 1
 DEFAULT_CODEX_CLI_MODEL = "gpt-5.6-luna"
-DEFAULT_CODEX_CLI_REASONING_EFFORT = "max"
+DEFAULT_CODEX_CLI_REASONING_EFFORT = "xhigh"
 SUPPORTED_CODEX_CLI_REASONING_EFFORTS = frozenset({"none", "low", "medium", "high", "xhigh", "max"})
 MAX_LOCAL_CLI_TIMEOUT_SECONDS = 3600
 MAX_LOCAL_CLI_OUTPUT_BYTES = 32 * 1024 * 1024
 MAX_GENERATION_BACKEND_MAX_CONCURRENCY = 16
 MAX_LOCAL_CLI_BACKEND_MAX_CONCURRENCY = 4
+
+
+def _elapsed_ms(started: float) -> int:
+    return max(0, int((time.monotonic() - started) * 1000))
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 _PREVIEW_LIMIT = 800
 _FINAL_MESSAGE_OMITTED_PREVIEW = "<final-message omitted from stdout preview>"
@@ -2146,6 +2157,86 @@ class LocalCliGenerationBackend(GenerationBackend):
         return None
 
     def generate(
+        self,
+        prompt: str,
+        generation_config: Dict[str, Any],
+        *,
+        system_prompt: Optional[str] = None,
+        stream: bool = False,
+        stream_progress_callback: Optional[Callable[[int], None]] = None,
+        response_validator: Optional[Callable[[str], None]] = None,
+        audit_context: Optional[Dict[str, Any]] = None,
+    ) -> GenerationResult:
+        """Generate and persist one Codex/Luna health observation.
+
+        The health write is best effort and is deliberately outside the
+        generation contract: a persistence problem must never change the
+        model result or turn a read-only research request into an action.
+        """
+        started = time.monotonic()
+        try:
+            result = self._generate(
+                prompt,
+                generation_config,
+                system_prompt=system_prompt,
+                stream=stream,
+                stream_progress_callback=stream_progress_callback,
+                response_validator=response_validator,
+                audit_context=audit_context,
+            )
+        except GenerationError as exc:
+            self._record_codex_health(
+                success=False,
+                latency_ms=_elapsed_ms(started),
+                reachable=exc.error_code not in {
+                    GenerationErrorCode.COMMAND_NOT_FOUND,
+                    GenerationErrorCode.COMMAND_NOT_EXECUTABLE,
+                },
+                model=exc.details.get("model") if isinstance(exc.details, Mapping) else None,
+                provider="codex_chatgpt_oauth",
+                failure_class=exc.error_code.value,
+                error=exc.message,
+                schema_valid=False,
+                usage_available=False,
+            )
+            raise
+        except Exception as exc:
+            self._record_codex_health(
+                success=False,
+                latency_ms=_elapsed_ms(started),
+                failure_class=type(exc).__name__,
+                error=str(exc),
+                schema_valid=False,
+                usage_available=False,
+            )
+            raise
+
+        latency_ms = _elapsed_ms(started)
+        result.diagnostics.setdefault("latency_ms", latency_ms)
+        usage = result.usage if isinstance(result.usage, Mapping) else {}
+        self._record_codex_health(
+            success=True,
+            latency_ms=latency_ms,
+            model=result.model,
+            provider=result.provider,
+            backend=result.backend,
+            schema_valid=(response_validator is not None or generation_config.get("output_schema") is not None),
+            usage_available=bool(usage.get("usage_available")),
+            context_tokens=_optional_int(usage.get("input_tokens")),
+        )
+        return result
+
+    def _record_codex_health(self, **kwargs: Any) -> None:
+        if self._preset.preset_id != CODEX_CLI_BACKEND_ID:
+            return
+        try:
+            from src.services.codex_health import record_codex_generation_observation
+
+            record_codex_generation_observation(**kwargs)
+        except Exception:
+            return
+
+    def _generate(
         self,
         prompt: str,
         generation_config: Dict[str, Any],

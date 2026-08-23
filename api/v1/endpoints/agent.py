@@ -128,12 +128,16 @@ async def get_agent_models():
     if selected_backend == "codex_app_server":
         if str(getattr(config, "agent_arch", "single") or "single").strip().lower() != "single":
             return AgentModelsResponse(models=[])
+        codex_model = str(
+            getattr(config, "codex_cli_model", None) or "gpt-5.6-luna"
+        ).strip() or "gpt-5.6-luna"
+        codex_provider = "codex_chatgpt_oauth"
         return AgentModelsResponse(
             models=[
                 AgentModelDeployment(
-                    deployment_id="codex_chatgpt_oauth/gpt-5.6-luna",
-                    model="gpt-5.6-luna",
-                    provider="codex_chatgpt_oauth",
+                    deployment_id=f"{codex_provider}/{codex_model}",
+                    model=codex_model,
+                    provider=codex_provider,
                     source="codex_app_server",
                     is_primary=True,
                 )
@@ -448,6 +452,61 @@ Codex web search is disabled for this DSA task; use only the listed DSA tools.
 """.strip()
 
 
+def _canonical_codex_tool_sources(sources: Any, tool_calls_log: Any) -> List[str]:
+    """Return only evidence references backed by successful DSA tool calls.
+
+    The model may describe a tool result, but it cannot create a new source
+    authority.  The returned references are reconstructed from the execution
+    trace so a source list cannot make an ungrounded answer look researched.
+    """
+    successful_tools: List[str] = []
+    for item in tool_calls_log if isinstance(tool_calls_log, list) else []:
+        if not isinstance(item, dict) or item.get("success") is not True:
+            continue
+        tool = str(item.get("tool") or "").strip()
+        if tool and tool not in successful_tools:
+            successful_tools.append(tool)
+    source_texts = [
+        str(item).strip().casefold()
+        for item in sources
+        if isinstance(item, str) and item.strip()
+    ] if isinstance(sources, list) else []
+    if not successful_tools or not source_texts:
+        return []
+    if any(
+        not any(tool.casefold() in source for tool in successful_tools)
+        for source in source_texts
+    ):
+        return []
+    return [
+        f"tool:{tool}"
+        for tool in successful_tools
+        if any(tool.casefold() in source for source in source_texts)
+    ]
+
+
+def _record_codex_research_contract_failure(result: Any, failure_class: str) -> None:
+    try:
+        from src.services.codex_health import record_codex_generation_observation
+
+        diagnostics = getattr(result, "diagnostics", {}) or {}
+        usage = getattr(result, "usage", {}) or {}
+        record_codex_generation_observation(
+            success=False,
+            latency_ms=int(diagnostics.get("latency_ms") or 0),
+            reachable=True,
+            model=getattr(result, "model", None),
+            provider=getattr(result, "provider", None) or "codex_chatgpt_oauth",
+            backend=getattr(result, "backend", None) or "codex_app_server",
+            failure_class=failure_class,
+            error=failure_class,
+            schema_valid=False,
+            usage_available=bool(usage.get("total_tokens") is not None),
+        )
+    except Exception:
+        return
+
+
 @router.post("/research", response_model=ResearchResponse)
 async def agent_research(request: ResearchRequest):
     """Run a deep-research query via the ResearchAgent.
@@ -494,6 +553,7 @@ async def agent_research(request: ResearchRequest):
                 payload = json.loads(result.content)
             except (TypeError, json.JSONDecodeError) as exc:
                 logger.error("Codex research returned invalid structured output: %s", type(exc).__name__)
+                _record_codex_research_contract_failure(result, "SCHEMA_INVALID")
                 return ResearchResponse(
                     success=False,
                     content="",
@@ -504,6 +564,7 @@ async def agent_research(request: ResearchRequest):
             report = payload.get("report") if isinstance(payload, dict) else None
             sources = payload.get("sources") if isinstance(payload, dict) else None
             if not isinstance(report, str) or not report.strip() or not isinstance(sources, list):
+                _record_codex_research_contract_failure(result, "SCHEMA_INVALID")
                 return ResearchResponse(
                     success=False,
                     content="",
@@ -511,10 +572,20 @@ async def agent_research(request: ResearchRequest):
                     token_usage=result.total_tokens,
                     error="CODEX_RESEARCH_SCHEMA_INVALID",
                 )
+            canonical_sources = _canonical_codex_tool_sources(sources, result.tool_calls_log)
+            if not canonical_sources:
+                _record_codex_research_contract_failure(result, "SOURCE_EVIDENCE_UNGROUNDED")
+                return ResearchResponse(
+                    success=False,
+                    content="",
+                    sources=[],
+                    token_usage=result.total_tokens,
+                    error="CODEX_RESEARCH_SOURCE_EVIDENCE_UNGROUNDED",
+                )
             return ResearchResponse(
                 success=True,
                 content=report.strip(),
-                sources=[str(item) for item in sources if isinstance(item, str) and item.strip()],
+                sources=canonical_sources,
                 token_usage=result.total_tokens,
             )
 
