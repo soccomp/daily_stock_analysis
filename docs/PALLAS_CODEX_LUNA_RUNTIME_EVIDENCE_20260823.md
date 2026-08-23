@@ -68,6 +68,14 @@ LLM 运行耗时约 239,782ms。报告保留了 `non_trading` 阶段和数据质
 该条记录证明 Codex JSONL `turn.completed.usage` 可以进入本地 `llm_usage`，不
 等于付费账单、额度批准或长期可用性证明。
 
+## Research Agent smoke
+
+最新服务重启后，`POST /api/v1/agent/research` 返回 `success=true`、`error=null`。
+请求明确要求不调用外部网络；Agent 通过受限的 DSA evidence tool 返回：当前没有
+可用的整体策略回测汇总，因此不能编造收益率、胜率、样本数或风险指标。该响应的
+`sources` 数为 `1`，`token_usage` 为 `12310`；这只证明 Agent 门禁、结构化响应和
+只读证据路径已贯通，不代表已有回测结果或交易可用性。
+
 ## 失败与修复记录
 
 1. 第一次真实任务：当前 Codex CLI 不再接受旧的 `--ask-for-approval` 参数；已从
