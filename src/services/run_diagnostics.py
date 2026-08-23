@@ -9,6 +9,7 @@ diagnostic store is introduced.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import uuid
 from collections.abc import Mapping
@@ -881,6 +882,37 @@ def record_provider_run(
     record_count: Optional[int] = None,
 ) -> None:
     """Append a provider attempt to the active context without affecting callers."""
+    try:
+        from src.services.dependency_health import get_dependency_health_store
+
+        category = "NEWS_SEARCH" if data_type == "news_search" else "MARKET_DATA" if "market" in data_type or "snapshot" in data_type else "EXTERNAL_DEPENDENCY"
+        provider_name = str(provider).lower()
+        role = "PRIMARY" if provider_name in {"bocha", "tushare", "tencent", "qwen-omlx"} else "FALLBACK" if provider_name in {"searxng", "sina", "efinance", "akshare", "akshare_em", "eastmoney"} else "AUXILIARY"
+        qwen_generation_usable = (
+            provider_name != "qwen-omlx"
+            or (latency_ms is not None and int(latency_ms) < 30_000)
+        )
+        get_dependency_health_store().record_result(
+            provider_name,
+            category=category,
+            role=role,
+            success=bool(success),
+            reachable=bool(success),
+            usable=bool(success and (record_count is None or record_count > 0) and qwen_generation_usable),
+            records=max(0, int(record_count or 0)),
+            latency_ms=latency_ms,
+            failure_class_name=error_type,
+            error=error_message,
+            fallback_from=fallback_from,
+            fallback_to=fallback_to,
+            observation_kind="generation" if provider_name == "qwen-omlx" else None,
+            freshness_ttl_seconds=(
+                int(os.getenv("DSA_QWEN_GENERATION_HEALTH_TTL_SECONDS", "900"))
+                if provider_name == "qwen-omlx" else None
+            ),
+        )
+    except Exception:  # pragma: no cover - diagnostics must not affect callers
+        pass
     context = get_current_diagnostic_context()
     if context is None:
         return
@@ -941,6 +973,32 @@ def record_llm_run(
     error_message: Optional[Any] = None,
 ) -> None:
     """Append an LLM call result to the active context without affecting callers."""
+    try:
+        from src.services.dependency_health import get_dependency_health_store
+
+        provider_name = (provider or "").lower()
+        model_name = (model or "").lower()
+        dependency_id = "qwen-omlx" if provider_name in {"omlx", "qwen", "openai"} or "qwen" in model_name or "omlx" in model_name else (provider or "llm").lower()
+        get_dependency_health_store().record_result(
+            dependency_id,
+            category="LLM_RESEARCH",
+            role="PRIMARY",
+            success=bool(success),
+            reachable=True,
+            usable=bool(success and duration_ms is not None and int(duration_ms) < 30_000),
+            records=1 if success else 0,
+            latency_ms=duration_ms,
+            failure_class_name=error_type,
+            error=error_message,
+            metadata={"model": model, "call_type": call_type, "tokens": tokens},
+            observation_kind="generation" if dependency_id == "qwen-omlx" else None,
+            freshness_ttl_seconds=(
+                int(os.getenv("DSA_QWEN_GENERATION_HEALTH_TTL_SECONDS", "900"))
+                if dependency_id == "qwen-omlx" else None
+            ),
+        )
+    except Exception:  # pragma: no cover - diagnostics must not affect callers
+        pass
     context = get_current_diagnostic_context()
     if context is None:
         return

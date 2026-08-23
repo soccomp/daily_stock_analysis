@@ -441,7 +441,7 @@ class TestAnspireSearchService(unittest.TestCase):
         self.assertEqual(len(anspire_providers), 0)
     
     def test_search_service_priority(self):
-        """测试 Anspire 优先级"""
+        """Bocha/SearXNG canonical chain outranks auxiliary Anspire."""
         service = SearchService(
             anspire_keys=["anspire_key"],
             bocha_keys=["bocha_key"],
@@ -451,7 +451,8 @@ class TestAnspireSearchService(unittest.TestCase):
             news_strategy_profile="short"
         )
         
-        self.assertIsInstance(service._providers[0], AnspireSearchProvider)
+        self.assertEqual(service._providers[0].name, "Bocha")
+        self.assertEqual(service._providers[-1].name, "Anspire")
 
 
 class TestAnspireIntegration(unittest.TestCase):

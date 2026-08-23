@@ -20,6 +20,7 @@ from api.v1.endpoints import (
     backtest,
     decision_scorecards,
     decision_signals,
+    dependency_health,
     health,
     history,
     intelligence,
@@ -127,4 +128,10 @@ router.include_router(
 router.include_router(
     health.router,
     tags=["Health"]
+)
+
+router.include_router(
+    dependency_health.router,
+    prefix="/dependencies",
+    tags=["DependencyHealth"],
 )

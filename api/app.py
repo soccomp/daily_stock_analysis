@@ -170,6 +170,7 @@ from api.v1.schemas.common import HealthResponse
 from src.auth import is_auth_enabled
 from src.data.stock_index_loader import find_existing_stock_index_path
 from src.services.system_config_service import SystemConfigService
+from src.services.dependency_health import DependencyHealthMonitor
 from src.services.runtime_scheduler import (
     CLI_SCHEDULER_OWNER_ENV,
     RUNTIME_SCHEDULER_ARGS_ENV,
@@ -238,6 +239,9 @@ def _load_runtime_scheduler_args() -> dict:
 @asynccontextmanager
 async def app_lifespan(app: FastAPI):
     """Initialize and release shared services for the app lifecycle."""
+    dependency_monitor = DependencyHealthMonitor()
+    app.state.dependency_health_monitor = dependency_monitor
+    dependency_monitor.start()
     runtime_owns_schedule = os.getenv(CLI_SCHEDULER_OWNER_ENV, "").strip().lower() not in {
         "1",
         "true",
@@ -301,6 +305,9 @@ async def app_lifespan(app: FastAPI):
     try:
         yield
     finally:
+        dependency_monitor.stop()
+        if hasattr(app.state, "dependency_health_monitor"):
+            delattr(app.state, "dependency_health_monitor")
         refresh_task = getattr(app.state, "stock_index_refresh_task", None)
         if refresh_task is not None and not refresh_task.done():
             refresh_task.cancel()
