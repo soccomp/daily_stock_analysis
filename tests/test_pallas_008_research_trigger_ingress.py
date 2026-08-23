@@ -11,6 +11,7 @@ import pytest
 from api.v1.endpoints import single_brain_m2
 from src.analyzer import AnalysisResult
 from src.investment.contracts.research_trigger import ResearchTrigger
+from src.investment.contracts.strategy_evidence import build_pallas008_strategy_evidence
 from src.investment.m2.research_trigger import ResearchTriggerCoordinator
 from src.investment.m2.orchestration import AnalysisCompletion
 from src.investment.proposal.builder import InvestmentProposalBuilder
@@ -48,21 +49,26 @@ def _trigger():
         dedup_key="PALLAS-008:MANUAL_OWNER_REVIEW:2026-08-22:600002",
         policy_version="pallas-004-research-trigger-v1",
         evidence_refs=("market-candidate:600002", "market-reference:benchmark:P008"),
-        strategy_evidence={
-            "strategy_id": "PALLAS-008-A-SHARE-AUTONOMOUS-V1",
-            "strategy_version": "1.0",
-            "ranking_method": "PALLAS_008_QUANTITATIVE_EVIDENCE",
-            "ranking_score": "0.800000",
-            "discovery_rank": 1,
-            "ranking_components": {
+        strategy_evidence=build_pallas008_strategy_evidence(
+            strategy_id="PALLAS-008-A-SHARE-AUTONOMOUS-V1",
+            strategy_version="1.0",
+            ranking_method="PALLAS_008_QUANTITATIVE_EVIDENCE",
+            ranking_score="0.800000",
+            discovery_rank=1,
+            ranking_components={
                 "momentum_20": "0.800000",
                 "momentum_60": "0.800000",
                 "trend_strength": "0.800000",
                 "liquidity_ratio": "0.800000",
                 "market_strength": "0.800000",
             },
-            "market_strength_raw": "0.030000",
-        },
+            market_strength_raw="0.030000",
+            latest_completed_trade_date="2026-08-21",
+            decision_cutoff=NOW,
+            completion_status="CLOSE_CONFIRMED",
+            completion_basis="PRIOR_PROVIDER_RETURNED_SESSION",
+            quantitative_input_reference="akshare:daily:600002:20260821",
+        ),
     )
 
 

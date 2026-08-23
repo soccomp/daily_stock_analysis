@@ -540,6 +540,8 @@ class BacktestResult(Base):
 
     # 价格与收益
     start_price = Column(Float)
+    entry_date = Column(Date)
+    entry_timing = Column(String(32))
     end_close = Column(Float)
     max_high = Column(Float)
     min_low = Column(Float)
@@ -1673,6 +1675,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             self._ensure_llm_usage_telemetry_columns()
             self._ensure_decision_signal_profile_schema()
             self._ensure_research_trigger_strategy_evidence_schema()
+            self._ensure_backtest_entry_lineage_schema()
             self._ensure_intelligence_item_scope_values()
             self._ensure_schema_migration_record()
             self._ensure_intelligence_items_unique_index()
@@ -1734,6 +1737,24 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             connection.exec_driver_sql(
                 f"ALTER TABLE {table_name} ADD COLUMN strategy_evidence_json TEXT"
             )
+
+    def _ensure_backtest_entry_lineage_schema(self) -> None:
+        """Add nullable entry lineage to existing backtest databases."""
+
+        table_name = BacktestResult.__tablename__
+        inspector = inspect(self._engine)
+        if not inspector.has_table(table_name):
+            return
+        columns = {column["name"] for column in inspector.get_columns(table_name)}
+        missing = []
+        if "entry_date" not in columns:
+            missing.append("ALTER TABLE backtest_results ADD COLUMN entry_date DATE")
+        if "entry_timing" not in columns:
+            missing.append("ALTER TABLE backtest_results ADD COLUMN entry_timing VARCHAR(32)")
+        if missing:
+            with self._engine.begin() as connection:
+                for statement in missing:
+                    connection.exec_driver_sql(statement)
 
     def _ensure_decision_signal_profile_schema(self) -> None:
         """Add and backfill nullable decision_profile for existing SQLite DBs."""

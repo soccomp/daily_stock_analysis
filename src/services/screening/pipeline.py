@@ -39,6 +39,7 @@ from src.services.screening.risk import apply_portfolio_overlay, apply_risk_over
 from src.services.screening.scorer import compute_screen_scores, factor_score_columns
 from src.services.screening.selection_variant import apply_seeded_selection_variant
 from src.services.screening.snapshot import fetch_snapshot_with_fallback
+from src.services.screening.temporal import canonical_utc, require_decision_cutoff
 from src.services.screening.strategy import load_all_strategies
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,7 @@ def screen(
     runtime_config: object | None = None,
     progress_callback: Callable[[int, str], None] | None = None,
     daily_history_fetcher: Callable[..., pd.DataFrame] | None = None,
+    decision_as_of: datetime | str | None = None,
 ) -> ScreenResult:
     """Execute stock screening with the given strategy.
 
@@ -108,6 +110,7 @@ def screen(
     """
     if config is None:
         config = Config.from_env()
+    decision_cutoff = require_decision_cutoff(decision_as_of)
 
     if market not in ("cn", "us"):
         raise ValueError(f"Unsupported market: {market!r} (supported: cn, us)")
@@ -152,6 +155,7 @@ def screen(
         fallback_max_age_hours=config.snapshot_fallback_max_age_hours,
         cache_ttl_seconds=config.snapshot_cache_ttl_seconds,
         market=market,
+        decision_as_of=decision_cutoff,
     )
     effective_industry_map_files = (
         list(industry_map_files)
@@ -239,6 +243,7 @@ def screen(
                 cache_ttl_seconds=config.daily_history_cache_ttl_hours * 3600,
                 max_workers=config.daily_fetch_max_workers,
                 history_fetcher=daily_history_fetcher,
+                decision_as_of=decision_cutoff,
             )
             daily_enriched = True
             daily_errors = [str(item) for item in enriched.attrs.get("daily_errors", [])]
@@ -563,6 +568,7 @@ def screen(
         result_variant_applied=selection_variant.applied,
         result_variant_pool_size=selection_variant.pool_size,
         result_variant_rotated_slots=selection_variant.rotated_slots,
+        decision_cutoff=canonical_utc(decision_cutoff),
     )
 
 
@@ -635,6 +641,14 @@ def _df_to_picks(df: pd.DataFrame) -> list[Pick]:
             daily_quality_score=_safe_float(row.get("daily_quality_score")),
             daily_quality_flags=_safe_text(row.get("daily_quality_flags")),
             daily_source=_safe_text(row.get("daily_source")),
+            latest_completed_trade_date=_safe_text(row.get("daily_latest_completed_trade_date")),
+            decision_cutoff=_safe_text(row.get("daily_decision_cutoff")),
+            completion_status=_safe_text(row.get("daily_completion_status")),
+            completion_basis=_safe_text(row.get("daily_completion_basis")),
+            quantitative_input_reference=_safe_text(row.get("daily_source_reference")),
+            intraday_prefilter_observed_at=None,
+            intraday_prefilter_reference=None,
+            evidence_hash=None,
             factor_scores=factor_scores,
         ))
     return picks

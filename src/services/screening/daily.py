@@ -19,6 +19,13 @@ import pandas as pd
 import requests
 
 from src.services.screening.source_guard import call_with_timeout, parse_source_timeout_seconds
+from src.services.screening.temporal import (
+    CLOSE_CONFIRMED,
+    UNKNOWN,
+    annotate_completed_daily_bars,
+    canonical_utc,
+    require_decision_cutoff,
+)
 
 _DAILY_FEATURE_DEFAULTS = {
     "daily_data_points": pd.NA,
@@ -45,9 +52,15 @@ _DAILY_FEATURE_DEFAULTS = {
     "daily_quality_score": pd.NA,
     "daily_quality_flags": "",
     "daily_source": "",
+    "daily_latest_completed_trade_date": None,
+    "daily_completion_status": UNKNOWN,
+    "daily_completion_basis": "",
+    "daily_decision_cutoff": "",
+    "daily_source_reference": "",
+    "daily_observed_at": "",
 }
 _DAILY_ENRICH_MAX_WORKERS = 1
-_DAILY_HISTORY_CACHE_VERSION = 1
+_DAILY_HISTORY_CACHE_VERSION = 2
 _DAILY_HISTORY_CACHE_TTL_SECONDS = 24 * 60 * 60
 _SOURCE_HEALTH_FAILURE_THRESHOLD = 3
 _SOURCE_HEALTH_COOLDOWN_SECONDS = 5 * 60
@@ -70,6 +83,8 @@ def enrich_daily_features(
     cache_ttl_seconds: float | None = None,
     max_workers: int | None = None,
     history_fetcher: Callable[..., pd.DataFrame] | None = None,
+    decision_as_of: datetime | str | None = None,
+    trading_calendar=None,
 ) -> pd.DataFrame:
     """Attach daily technical features to the first ``max_rows`` candidates.
 
@@ -89,6 +104,7 @@ def enrich_daily_features(
     daily_source_health: dict[str, object] = {}
     success_count = 0
     fetch_history = history_fetcher or fetch_daily_history
+    cutoff = require_decision_cutoff(decision_as_of)
     selected_index = list(result.index[:max_rows])
     fetch_requests: list[tuple[object, str]] = []
     for idx in selected_index:
@@ -108,14 +124,23 @@ def enrich_daily_features(
                 retries=fetch_retries,
                 cache_dir=cache_dir,
                 cache_ttl_seconds=cache_ttl_seconds,
+                decision_as_of=cutoff,
+                trading_calendar=trading_calendar,
             )
             features = compute_daily_features(hist)
             features["daily_source"] = str(hist.attrs.get("daily_source", ""))
+            features["daily_latest_completed_trade_date"] = hist.attrs.get("latest_completed_trade_date")
+            features["daily_completion_status"] = str(hist.attrs.get("daily_completion_status", UNKNOWN))
+            features["daily_completion_basis"] = str(hist.attrs.get("daily_completion_basis", ""))
+            features["daily_decision_cutoff"] = str(hist.attrs.get("decision_cutoff", canonical_utc(cutoff)))
+            features["daily_source_reference"] = str(hist.attrs.get("source_reference", ""))
+            features["daily_observed_at"] = str(hist.attrs.get("source_observed_at", ""))
             metadata = {
                 "daily_source": features["daily_source"],
                 "daily_quality_flags": features.get("daily_quality_flags", ""),
                 "daily_source_order_notes": list(hist.attrs.get("daily_source_order_notes", []) or []),
                 "daily_source_health": dict(hist.attrs.get("daily_source_health", {}) or {}),
+                "daily_completion_status": features["daily_completion_status"],
             }
             return idx, features, None, metadata
         except Exception as exc:
@@ -171,6 +196,8 @@ def fetch_daily_history(
     retries: int = 2,
     cache_dir: str | Path | None = None,
     cache_ttl_seconds: float | None = None,
+    decision_as_of: datetime | str | None = None,
+    trading_calendar=None,
 ) -> pd.DataFrame:
     """Fetch daily history for one stock code.
 
@@ -184,6 +211,7 @@ def fetch_daily_history(
     """
     normalized_code = _normalize_daily_code(code)
     normalized_lookback_days = int(lookback_days)
+    cutoff = require_decision_cutoff(decision_as_of)
     src = _normalize_daily_source(source)
     if src == "auto":
         sources: tuple[str, ...] = (
@@ -208,6 +236,16 @@ def fetch_daily_history(
         )
         cached = _read_daily_history_cache(cache_path, ttl_seconds=cache_ttl_seconds)
         if cached is not None:
+            cached = annotate_completed_daily_bars(
+                cached, cutoff, trading_calendar=trading_calendar,
+            )
+            # Cache freshness is not provider event time.  Until the cache
+            # explicitly carries source observation metadata, it cannot be
+            # promoted into actionable evidence.
+            cached.attrs["daily_cache_causal_status"] = "UNKNOWN"
+            cached.attrs["source_time_status"] = "UNKNOWN"
+            if cached.empty:
+                raise RuntimeError("cached daily history has no completed bar at decision cutoff")
             return cached
 
     attempts = max(int(retries), 0) + 1
@@ -270,6 +308,16 @@ def fetch_daily_history(
                 result.attrs["daily_source_order_notes"] = list(source_order_notes)
                 result.attrs["source_errors"] = list(errors)
                 result.attrs["daily_source_health"] = _daily_source_health_snapshot(sources)
+                result = annotate_completed_daily_bars(
+                    result, cutoff, trading_calendar=trading_calendar,
+                )
+                if result.empty or result.attrs.get("daily_completion_status") != CLOSE_CONFIRMED:
+                    raise RuntimeError(
+                        f"{current} returned no close-confirmed daily bar at {canonical_utc(cutoff)}"
+                    )
+                result.attrs["decision_as_of"] = canonical_utc(cutoff)
+                result.attrs["source_reference"] = f"dsa:{current}:daily:{normalized_code}"
+                result.attrs["source_observed_at"] = result.attrs.get("decision_as_of")
                 if cache_path is not None:
                     _write_daily_history_cache(
                         cache_path,
@@ -299,6 +347,13 @@ def fetch_daily_history(
             stale.attrs["daily_source_order_notes"] = list(source_order_notes)
             stale.attrs["source_errors"] = list(errors)
             stale.attrs["daily_source_health"] = _daily_source_health_snapshot(sources)
+            stale = annotate_completed_daily_bars(
+                stale, cutoff, trading_calendar=trading_calendar,
+            )
+            stale.attrs["daily_cache_causal_status"] = "UNKNOWN"
+            stale.attrs["source_time_status"] = "UNKNOWN"
+            if stale.empty:
+                raise RuntimeError("stale daily cache has no completed bar at decision cutoff")
             return stale
 
     raise RuntimeError(
@@ -512,7 +567,11 @@ def _read_daily_history_cache(
         df = pd.DataFrame(data, columns=columns)
         metadata = payload.get("metadata")
         if isinstance(metadata, dict):
-            for key in ("daily_source", "daily_requested_source", "daily_source_order", "daily_source_order_notes", "source_errors", "daily_source_health"):
+            for key in (
+                "daily_source", "daily_requested_source", "daily_source_order",
+                "daily_source_order_notes", "source_errors", "daily_source_health",
+                "decision_as_of", "source_reference", "source_observed_at",
+            ):
                 if key in metadata:
                     df.attrs[key] = metadata[key]
         if is_stale:
@@ -546,6 +605,9 @@ def _write_daily_history_cache(
                 "daily_source_order_notes": list(df.attrs.get("daily_source_order_notes", [])),
                 "source_errors": list(df.attrs.get("source_errors", [])),
                 "daily_source_health": df.attrs.get("daily_source_health", {}),
+                "decision_as_of": df.attrs.get("decision_as_of"),
+                "source_reference": df.attrs.get("source_reference"),
+                "source_observed_at": df.attrs.get("source_observed_at"),
             },
             "created_at": datetime.now().isoformat(),
             "frame": json.loads(df.to_json(orient="split", date_format="iso", force_ascii=False)),
@@ -887,6 +949,10 @@ def _is_baostock_network_outage(error_code: object, error_msg: object) -> bool:
 
 def compute_daily_features(hist: pd.DataFrame) -> dict[str, object]:
     """Compute compact trend/reversal features from a daily K-line DataFrame."""
+    if hist.attrs.get("daily_cache_causal_status") == UNKNOWN:
+        raise RuntimeError("cached daily history has unknown provider observation time")
+    if hist.attrs.get("daily_completion_status") not in {None, CLOSE_CONFIRMED}:
+        raise RuntimeError("daily history is not close-confirmed at the decision cutoff")
     df = _normalize_daily_history(hist)
     if df.empty:
         raise RuntimeError("daily history is empty after normalization")
@@ -937,6 +1003,12 @@ def compute_daily_features(hist: pd.DataFrame) -> dict[str, object]:
         "signal_score": round(float(signal_score), 4),
         **shape,
         **quality,
+        "daily_latest_completed_trade_date": hist.attrs.get("latest_completed_trade_date"),
+        "daily_completion_status": hist.attrs.get("daily_completion_status"),
+        "daily_completion_basis": hist.attrs.get("daily_completion_basis", ""),
+        "daily_decision_cutoff": hist.attrs.get("decision_cutoff", ""),
+        "daily_source_reference": hist.attrs.get("source_reference", ""),
+        "daily_observed_at": hist.attrs.get("source_observed_at", ""),
     }
 
 

@@ -162,6 +162,14 @@ class Pick:
     daily_quality_score: float | None = None
     daily_quality_flags: str = ""
     daily_source: str = ""
+    latest_completed_trade_date: str | None = None
+    decision_cutoff: str | None = None
+    completion_status: str | None = None
+    completion_basis: str | None = None
+    quantitative_input_reference: str | None = None
+    intraday_prefilter_observed_at: str | None = None
+    intraday_prefilter_reference: str | None = None
+    evidence_hash: str | None = None
     factor_scores: dict[str, float] = field(default_factory=dict)
     llm_confidence: float | None = None
     llm_sector: str = ""
@@ -233,6 +241,7 @@ class ScreenResult:
     result_variant_applied: bool = False
     result_variant_pool_size: int = 0
     result_variant_rotated_slots: int = 0
+    decision_cutoff: str = ""
     saved_path: str = ""
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
 

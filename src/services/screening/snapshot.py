@@ -22,10 +22,11 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from src.services.screening.source_guard import call_with_timeout, parse_source_timeout_seconds
+from src.services.screening.temporal import canonical_utc, require_decision_cutoff
 
 logger = logging.getLogger(__name__)
 
-_SNAPSHOT_CACHE_VERSION = 1
+_SNAPSHOT_CACHE_VERSION = 2
 _DEFAULT_TUSHARE_HTTP_URL = "http://api.waditu.com"
 _EM_REQUEST_MIN_INTERVAL_SECONDS = 1.0
 _EM_REQUEST_JITTER_SECONDS = 0.3
@@ -70,8 +71,10 @@ def fetch_snapshot_with_fallback(
     fallback_max_age_hours: float | None = None,
     cache_ttl_seconds: float = 0.0,
     market: str = "cn",
+    decision_as_of: datetime | str | None = None,
 ) -> pd.DataFrame:
     """Try live sources, optionally falling back to the last-good snapshot."""
+    cutoff = require_decision_cutoff(decision_as_of)
     if market == "us":
         return _fetch_us_snapshot_with_fallback(required_columns)
 
@@ -87,6 +90,8 @@ def fetch_snapshot_with_fallback(
             requested_snapshot_sources=sources,
         )
         if cached is not None:
+            cached.attrs["decision_cutoff"] = canonical_utc(cutoff)
+            cached.attrs["causal_status"] = "UNKNOWN_CACHE_EVENT_TIME"
             return cached
 
     for source in sources:
@@ -103,6 +108,9 @@ def fetch_snapshot_with_fallback(
                     errors.append(f"{source}: {error}")
                     _record_source_failure(source, error)
                     continue
+                df = _annotate_snapshot_temporal_metadata(
+                    df, source=source, decision_as_of=cutoff,
+                )
                 df.attrs.setdefault("snapshot_source", source)
                 df.attrs["source_errors"] = list(errors)
                 df.attrs["fallback_used"] = False
@@ -130,9 +138,44 @@ def fetch_snapshot_with_fallback(
         max_age_hours=fallback_max_age_hours,
     )
     if cached is not None:
+        cached.attrs["decision_cutoff"] = canonical_utc(cutoff)
+        cached.attrs["causal_status"] = "UNKNOWN_CACHE_EVENT_TIME"
         return cached
 
     raise RuntimeError(f"All snapshot sources failed: {'; '.join(errors)}")
+
+
+def _annotate_snapshot_temporal_metadata(
+    frame: pd.DataFrame,
+    *,
+    source: str,
+    decision_as_of: datetime,
+) -> pd.DataFrame:
+    """Keep observation/provenance separate from cache creation time."""
+
+    result = frame.copy()
+    cutoff = canonical_utc(decision_as_of)
+    source_reference = f"dsa:{source}:snapshot:{cutoff}"
+    event_column = next(
+        (name for name in ("source_event_time", "provider_timestamp", "event_time", "timestamp") if name in result.columns),
+        None,
+    )
+    if "source_reference" not in result.columns:
+        result["source_reference"] = source_reference
+    if "retrieved_at" not in result.columns:
+        result["retrieved_at"] = cutoff
+    if "observed_at" not in result.columns:
+        result["observed_at"] = cutoff
+    if "decision_cutoff" not in result.columns:
+        result["decision_cutoff"] = cutoff
+    if "source_event_time" not in result.columns:
+        result["source_event_time"] = result[event_column] if event_column else None
+    result.attrs["source_reference"] = source_reference
+    result.attrs["source_observed_at"] = cutoff
+    result.attrs["decision_cutoff"] = cutoff
+    result.attrs["source_event_time_status"] = "KNOWN" if event_column else "UNKNOWN"
+    result.attrs["causal_status"] = "OBSERVATION_TIMESTAMPED"
+    return result
 
 
 def _fetch_us_snapshot_with_fallback(
@@ -298,6 +341,10 @@ def _write_last_good_snapshot(
                 ],
                 "row_count": int(len(df)),
                 "columns": list(df.columns),
+                "source_reference": df.attrs.get("source_reference"),
+                "source_observed_at": df.attrs.get("source_observed_at"),
+                "source_event_time_status": df.attrs.get("source_event_time_status", "UNKNOWN"),
+                "decision_cutoff": df.attrs.get("decision_cutoff"),
             },
             "frame": json.loads(
                 df.to_json(orient="split", date_format="iso", force_ascii=False)
@@ -395,6 +442,11 @@ def _read_last_good_snapshot(
     cached.attrs["stale"] = not fresh
     cached.attrs["stale_age_hours"] = stale_age_hours
     cached.attrs["source_errors"] = list(source_errors)
+    cached.attrs["source_reference"] = str(metadata.get("source_reference") or "")
+    cached.attrs["source_observed_at"] = metadata.get("source_observed_at")
+    cached.attrs["source_event_time_status"] = "UNKNOWN"
+    cached.attrs["decision_cutoff"] = metadata.get("decision_cutoff")
+    cached.attrs["causal_status"] = "UNKNOWN_CACHE_EVENT_TIME"
     cached.attrs["last_good_snapshot_source"] = str(
         metadata.get("snapshot_source", "")
     )

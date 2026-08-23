@@ -359,9 +359,9 @@ class BacktestServiceTestCase(unittest.TestCase):
             }
 
         self.assertEqual(results["7203"].analysis_date, date(2024, 10, 1))
-        self.assertEqual(results["7203"].start_price, 200.0)
+        self.assertEqual(results["7203"].start_price, 210.0)
         self.assertEqual(results["005930"].analysis_date, date(2024, 10, 2))
-        self.assertEqual(results["005930"].start_price, 100.0)
+        self.assertEqual(results["005930"].start_price, 105.0)
 
     def test_unfiltered_rerun_rebuilds_legacy_cn_snapshot_for_indexed_bare_jp_code(
         self,
@@ -417,7 +417,7 @@ class BacktestServiceTestCase(unittest.TestCase):
             )
 
         self.assertEqual(result.analysis_date, date(2024, 10, 1))
-        self.assertEqual(result.start_price, 200.0)
+        self.assertEqual(result.start_price, 210.0)
 
     def test_canonical_hk_query_does_not_backtest_legacy_bare_jp_collision(
         self,
@@ -1021,7 +1021,7 @@ class BacktestServiceTestCase(unittest.TestCase):
         with self.db.get_session() as session:
             result = session.query(BacktestResult).filter(BacktestResult.code == "600519.SH").one()
             self.assertEqual(result.analysis_date, date(2024, 2, 5))
-            self.assertEqual(result.start_price, 100.0)
+            self.assertEqual(result.start_price, 105.0)
             self.assertEqual(result.end_close, 105.0)
 
     def test_run_backtest_does_not_mix_start_and_forward_bars_across_code_shapes(self) -> None:
@@ -1171,7 +1171,7 @@ class BacktestServiceTestCase(unittest.TestCase):
                 .one()
             )
             self.assertEqual(result.eval_status, "completed")
-            self.assertEqual(result.start_price, 100.0)
+            self.assertEqual(result.start_price, 105.0)
             self.assertEqual(result.end_close, 105.0)
 
     def test_run_backtest_replays_legacy_non_session_effective_date_from_local_bars(
@@ -1233,7 +1233,7 @@ class BacktestServiceTestCase(unittest.TestCase):
                 .one()
             )
             self.assertEqual(result.eval_status, "completed")
-            self.assertEqual(result.start_price, 100.0)
+            self.assertEqual(result.start_price, 101.0)
             self.assertEqual(result.end_close, 103.0)
 
     def test_non_session_resolution_exposes_backtest_only_local_start(
@@ -1399,7 +1399,7 @@ class BacktestServiceTestCase(unittest.TestCase):
             )
             self.assertEqual(result.eval_status, "completed")
             self.assertEqual(result.analysis_date, date(2026, 1, 1))
-            self.assertEqual(result.start_price, 100.0)
+            self.assertEqual(result.start_price, 105.0)
             self.assertEqual(result.end_close, 105.0)
 
     def test_run_backtest_refills_from_authoritative_start_date(self) -> None:
@@ -1493,7 +1493,7 @@ class BacktestServiceTestCase(unittest.TestCase):
                 .one()
             )
             self.assertEqual(result.eval_status, "completed")
-            self.assertEqual(result.start_price, 100.0)
+            self.assertEqual(result.start_price, 105.0)
             self.assertEqual(result.end_close, 105.0)
 
     def test_run_backtest_rejects_all_stale_daily_window_candidates(self) -> None:
@@ -2507,13 +2507,13 @@ class BacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(result.direction_expected, "up")
 
         # Prices
-        self.assertAlmostEqual(result.start_price, 100.0)
+        self.assertAlmostEqual(result.start_price, 105.0)
         self.assertAlmostEqual(result.end_close, 107.0)
-        self.assertAlmostEqual(result.stock_return_pct, 7.0)
+        self.assertAlmostEqual(result.stock_return_pct, (107.0 - 105.0) / 105.0 * 100)
 
         # Direction & outcome
-        self.assertEqual(result.outcome, "win")
-        self.assertTrue(result.direction_correct)
+        self.assertEqual(result.outcome, "neutral")
+        self.assertIsNone(result.direction_correct)
 
         # Target hits -- day2 high=111 >= take_profit=110
         self.assertTrue(result.hit_take_profit)
@@ -2523,10 +2523,10 @@ class BacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(result.first_hit_date, date(2024, 1, 2))
 
         # Simulated execution
-        self.assertAlmostEqual(result.simulated_entry_price, 100.0)
+        self.assertAlmostEqual(result.simulated_entry_price, 105.0)
         self.assertAlmostEqual(result.simulated_exit_price, 110.0)
         self.assertEqual(result.simulated_exit_reason, "take_profit")
-        self.assertAlmostEqual(result.simulated_return_pct, 10.0)
+        self.assertAlmostEqual(result.simulated_return_pct, (110.0 - 105.0) / 105.0 * 100)
 
     def test_summaries_created_after_run(self) -> None:
         """Verify both overall and per-stock BacktestSummary rows are created."""
@@ -2542,9 +2542,10 @@ class BacktestServiceTestCase(unittest.TestCase):
             self.assertIsNotNone(overall)
             self.assertEqual(overall.total_evaluations, 1)
             self.assertEqual(overall.completed_count, 1)
-            self.assertEqual(overall.win_count, 1)
+            self.assertEqual(overall.win_count, 0)
             self.assertEqual(overall.loss_count, 0)
-            self.assertAlmostEqual(overall.win_rate_pct, 100.0)
+            self.assertEqual(overall.neutral_count, 1)
+            self.assertIsNone(overall.win_rate_pct)
 
             # Stock-level summary
             stock = session.query(BacktestSummary).filter(
@@ -2554,7 +2555,8 @@ class BacktestServiceTestCase(unittest.TestCase):
             self.assertIsNotNone(stock)
             self.assertEqual(stock.total_evaluations, 1)
             self.assertEqual(stock.completed_count, 1)
-            self.assertEqual(stock.win_count, 1)
+            self.assertEqual(stock.win_count, 0)
+            self.assertEqual(stock.neutral_count, 1)
 
     def test_get_summary_overall_returns_sentinel_as_none(self) -> None:
         """Verify get_summary translates __overall__ sentinel back to None."""
@@ -2565,7 +2567,8 @@ class BacktestServiceTestCase(unittest.TestCase):
         self.assertIsNotNone(summary)
         self.assertIsNone(summary["code"])
         self.assertEqual(summary["scope"], "overall")
-        self.assertEqual(summary["win_count"], 1)
+        self.assertEqual(summary["win_count"], 0)
+        self.assertEqual(summary["neutral_count"], 1)
 
     def test_agent_learning_summary_helpers_keep_skill_rollups_neutral_until_supported(self) -> None:
         service = BacktestService(self.db)
@@ -2578,13 +2581,13 @@ class BacktestServiceTestCase(unittest.TestCase):
 
         self.assertIsNotNone(global_summary)
         self.assertEqual(global_summary["total_evaluations"], 1)
-        self.assertAlmostEqual(global_summary["win_rate"], 1.0)
-        self.assertAlmostEqual(global_summary["direction_accuracy"], 1.0)
-        self.assertAlmostEqual(global_summary["avg_return"], 0.10)
+        self.assertAlmostEqual(global_summary["win_rate"], 0.5)
+        self.assertAlmostEqual(global_summary["direction_accuracy"], 0.5)
+        self.assertAlmostEqual(global_summary["avg_return"], (110.0 - 105.0) / 105.0)
 
         self.assertIsNotNone(stock_summary)
         self.assertEqual(stock_summary["code"], "600519")
-        self.assertAlmostEqual(stock_summary["win_rate"], 1.0)
+        self.assertAlmostEqual(stock_summary["win_rate"], 0.5)
 
         self.assertIsNone(skill_summary)
         self.assertIsNone(strategy_summary)
@@ -2602,9 +2605,9 @@ class BacktestServiceTestCase(unittest.TestCase):
 
         item = data["items"][0]
         self.assertEqual(item["code"], "600519")
-        self.assertEqual(item["outcome"], "win")
+        self.assertEqual(item["outcome"], "neutral")
         self.assertEqual(item["direction_expected"], "up")
-        self.assertTrue(item["direction_correct"])
+        self.assertIsNone(item["direction_correct"])
 
     def test_get_recent_evaluations_aligns_neutral_advice_with_score(self) -> None:
         service = BacktestService(self.db)
@@ -2702,9 +2705,9 @@ class BacktestServiceTestCase(unittest.TestCase):
         item = data["items"][0]
         self.assertEqual(item["stock_name"], "贵州茅台")
         self.assertEqual(item["trend_prediction"], "看多")
-        self.assertEqual(item["actual_movement"], "down")
-        self.assertAlmostEqual(item["actual_return_pct"], -4.0)
-        self.assertFalse(item["direction_correct"])
+        self.assertEqual(item["actual_movement"], "flat")
+        self.assertAlmostEqual(item["actual_return_pct"], 0.0)
+        self.assertIsNone(item["direction_correct"])
 
     def test_get_summary_supports_analysis_date_range(self) -> None:
         self._seed_analysis(
@@ -2734,8 +2737,9 @@ class BacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(summary["total_evaluations"], 1)
         self.assertEqual(summary["completed_count"], 1)
         self.assertEqual(summary["win_count"], 0)
-        self.assertEqual(summary["loss_count"], 1)
-        self.assertAlmostEqual(summary["direction_accuracy_pct"], 0.0)
+        self.assertEqual(summary["loss_count"], 0)
+        self.assertEqual(summary["neutral_count"], 1)
+        self.assertIsNone(summary["direction_accuracy_pct"])
 
     def test_get_summary_date_range_filters_to_single_window_and_engine(self) -> None:
         service = BacktestService(self.db)
@@ -2845,9 +2849,10 @@ class BacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(summary_explicit["engine_version"], "v1")
         self.assertEqual(summary_explicit["total_evaluations"], 1)
         self.assertEqual(summary_explicit["completed_count"], 1)
-        self.assertEqual(summary_explicit["win_count"], 1)
+        self.assertEqual(summary_explicit["win_count"], 0)
         self.assertEqual(summary_explicit["loss_count"], 0)
-        self.assertAlmostEqual(summary_explicit["direction_accuracy_pct"], 100.0)
+        self.assertEqual(summary_explicit["neutral_count"], 1)
+        self.assertIsNone(summary_explicit["direction_accuracy_pct"])
 
     def test_get_summary_date_range_rejects_excessive_row_counts(self) -> None:
         service = BacktestService(self.db)
@@ -3153,7 +3158,8 @@ class BacktestServiceTestCase(unittest.TestCase):
             ).first()
             self.assertIsNotNone(s1)
             self.assertIsNotNone(s2)
-            self.assertEqual(s1.win_count, 1)
+            self.assertEqual(s1.win_count, 0)
+            self.assertEqual(s1.neutral_count, 1)
             self.assertEqual(s2.win_count, 1)
 
             # Overall aggregates both
@@ -3164,7 +3170,8 @@ class BacktestServiceTestCase(unittest.TestCase):
             self.assertIsNotNone(overall)
             self.assertEqual(overall.total_evaluations, 2)
             self.assertEqual(overall.completed_count, 2)
-            self.assertEqual(overall.win_count, 2)
+            self.assertEqual(overall.win_count, 1)
+            self.assertEqual(overall.neutral_count, 1)
 
     def test_run_backtest_excludes_market_review_records(self) -> None:
         with self.db.get_session() as session:

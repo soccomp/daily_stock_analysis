@@ -181,10 +181,9 @@ class BacktestService:
                     )
                     continue
 
-                evaluation = BacktestEngine.evaluate_single(
+                evaluation = BacktestEngine.evaluate_single_next_eligible_bar(
                     operation_advice=analysis.operation_advice,
                     analysis_date=daily_window.start_bar.date,
-                    start_price=float(daily_window.start_bar.close),
                     forward_bars=daily_window.forward_bars,
                     stop_loss=analysis.stop_loss,
                     take_profit=analysis.take_profit,
@@ -211,6 +210,8 @@ class BacktestService:
                         operation_advice=evaluation.get("operation_advice"),
                         position_recommendation=evaluation.get("position_recommendation"),
                         start_price=evaluation.get("start_price"),
+                        entry_date=evaluation.get("entry_date"),
+                        entry_timing=evaluation.get("entry_timing"),
                         end_close=evaluation.get("end_close"),
                         max_high=evaluation.get("max_high"),
                         min_low=evaluation.get("min_low"),
@@ -971,6 +972,8 @@ class BacktestService:
             "market_phase_summary": market_phase_summary,
             "position_recommendation": row.position_recommendation,
             "start_price": row.start_price,
+            "entry_date": row.entry_date.isoformat() if row.entry_date else None,
+            "entry_timing": row.entry_timing,
             "end_close": row.end_close,
             "max_high": row.max_high,
             "min_low": row.min_low,

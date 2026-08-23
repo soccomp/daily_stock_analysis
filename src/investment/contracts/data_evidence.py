@@ -11,6 +11,7 @@ from pydantic import AwareDatetime, Field, StrictStr, model_validator
 from typing_extensions import Self
 
 from .base import FrozenValue, canonical_json_bytes
+from src.services.screening.temporal import actionable_news_for_cutoff
 
 
 PORTFOLIO_SNAPSHOT_MAX_AGE = timedelta(minutes=5)
@@ -135,6 +136,112 @@ def analysis_context_evidence(*, context_snapshot: Any, source_report_id: int, n
         availability_status=availability,
         quality_flags=quality_flags,
     )
+
+
+def price_plan_evidence(*, context_snapshot: Any, source_report_id: int, now) -> DataEvidence:
+    """Record price-plan timing without inventing an upstream event time.
+
+    Analysis snapshots produced by older callers often contain only a display
+    price.  Such evidence is retained as UNKNOWN so Athena can reject an
+    actionable proposal instead of silently treating retrieval time as quote
+    time.
+    """
+
+    source_event_time = _find_aware_timestamp(
+        context_snapshot,
+        keys=("source_event_time", "provider_timestamp", "quote_timestamp", "event_time"),
+    )
+    retrieved_at = _find_aware_timestamp(
+        context_snapshot,
+        keys=("retrieved_at", "fetched_at", "realtime_fetched_at"),
+    ) or now
+    provider = _find_text(context_snapshot, keys=("provider", "source")) or "DSA_ANALYSIS_CONTEXT"
+    source_reference = _find_text(
+        context_snapshot,
+        keys=("source_reference", "quote_reference", "reference"),
+    ) or f"dsa-price-plan:{source_report_id}"
+    cutoff = now
+    flags: list[str] = []
+    available = source_event_time is not None
+    if source_event_time is None:
+        flags.append("PRICE_PLAN_SOURCE_EVENT_TIME_MISSING")
+    else:
+        completion = _find_text(
+            context_snapshot,
+            keys=("completion_status", "daily_completion_status"),
+        )
+        flags.append("DAILY_BAR_COMPLETE" if completion == "CLOSE_CONFIRMED" else "INTRADAY_OBSERVED")
+        if source_event_time > now:
+            available = False
+            flags.append("PRICE_PLAN_SOURCE_EVENT_TIME_LATER_THAN_DECISION")
+    return DataEvidence.build(
+        data_evidence_id=f"data-evidence-price-plan-{source_report_id}",
+        data_class="PRICE_PLAN",
+        provider=provider,
+        upstream_ref=f"dsa-analysis-history:{source_report_id}",
+        source_reference=source_reference,
+        source_event_time=source_event_time,
+        as_of=cutoff,
+        retrieved_at=retrieved_at,
+        observed_at=retrieved_at,
+        freshness_policy_id="price-plan-point-in-time-v1",
+        freshness_status="FRESH" if available else "UNKNOWN",
+        availability_status="AVAILABLE" if available else "UNKNOWN",
+        quality_flags=tuple(dict.fromkeys(flags)),
+    )
+
+
+def actionable_news_evidence(
+    *,
+    items: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
+    decision_as_of,
+) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
+    """Expose the cutoff rule for callers assembling LLM evidence."""
+
+    return actionable_news_for_cutoff(items, decision_as_of)
+
+
+def _find_text(value: Any, *, keys: tuple[str, ...]) -> str | None:
+    if isinstance(value, Mapping):
+        for key in keys:
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        for nested in value.values():
+            found = _find_text(nested, keys=keys)
+            if found:
+                return found
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            found = _find_text(nested, keys=keys)
+            if found:
+                return found
+    return None
+
+
+def _find_aware_timestamp(value: Any, *, keys: tuple[str, ...]) -> datetime | None:
+    if isinstance(value, Mapping):
+        for key in keys:
+            candidate = value.get(key)
+            if isinstance(candidate, datetime) and candidate.tzinfo is not None and candidate.utcoffset() is not None:
+                return candidate
+            if isinstance(candidate, str):
+                try:
+                    parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+                except ValueError:
+                    parsed = None
+                if parsed is not None and parsed.tzinfo is not None and parsed.utcoffset() is not None:
+                    return parsed
+        for nested in value.values():
+            found = _find_aware_timestamp(nested, keys=keys)
+            if found is not None:
+                return found
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            found = _find_aware_timestamp(nested, keys=keys)
+            if found is not None:
+                return found
+    return None
 
 
 def _analysis_availability(

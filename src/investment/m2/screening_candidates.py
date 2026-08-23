@@ -43,10 +43,18 @@ class ScreeningCandidate:
     screen_score: float | None
     score: float | None
     selected_at: str
+    latest_completed_trade_date: str | None = None
+    decision_cutoff: str | None = None
+    completion_status: str | None = None
+    completion_basis: str | None = None
+    quantitative_input_reference: str | None = None
+    intraday_prefilter_observed_at: str | None = None
+    intraday_prefilter_reference: str | None = None
+    evidence_hash: str | None = None
 
     def as_scope(self) -> dict[str, Any]:
         """Project to the M2 research-object shape with source lineage."""
-        return {
+        scope = {
             "symbol": self.symbol,
             "source": "SCREENING",
             "screening_run_id": self.screening_run_id,
@@ -56,6 +64,15 @@ class ScreeningCandidate:
             "score": self.score,
             "selected_at": self.selected_at,
         }
+        for key in (
+            "latest_completed_trade_date", "decision_cutoff", "completion_status",
+            "completion_basis", "quantitative_input_reference",
+            "intraday_prefilter_observed_at", "intraday_prefilter_reference", "evidence_hash",
+        ):
+            value = getattr(self, key)
+            if value is not None:
+                scope[key] = value
+        return scope
 
 
 class ScreeningCandidateSource(Protocol):
@@ -169,6 +186,14 @@ def _project_candidate(
         screen_score=_as_float(item.get("screen_score")),
         score=_as_float(item.get("score")),
         selected_at=selected_at.isoformat(),
+        latest_completed_trade_date=_as_text(item.get("latest_completed_trade_date")),
+        decision_cutoff=_as_text(item.get("decision_cutoff")),
+        completion_status=_as_text(item.get("completion_status")),
+        completion_basis=_as_text(item.get("completion_basis")),
+        quantitative_input_reference=_as_text(item.get("quantitative_input_reference")),
+        intraday_prefilter_observed_at=_as_text(item.get("intraday_prefilter_observed_at")),
+        intraday_prefilter_reference=_as_text(item.get("intraday_prefilter_reference")),
+        evidence_hash=_as_text(item.get("evidence_hash")),
     )
 
 
@@ -183,6 +208,11 @@ def _cn_symbol(value: Any) -> str | None:
     if str(get_market_for_stock(normalized) or "").upper() != "CN":
         return None
     return normalized
+
+
+def _as_text(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
 
 
 def _selected_at(detail: dict[str, Any]) -> datetime | None:

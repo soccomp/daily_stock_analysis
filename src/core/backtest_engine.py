@@ -24,6 +24,7 @@ class DailyBarLike(Protocol):
     high: Optional[float]
     low: Optional[float]
     close: Optional[float]
+    open: Optional[float]
 
 
 class BacktestResultLike(Protocol):
@@ -271,6 +272,63 @@ class BacktestEngine:
             "simulated_exit_reason": simulated_exit_reason,
             "simulated_return_pct": simulated_return_pct,
         }
+
+    @classmethod
+    def evaluate_single_next_eligible_bar(
+        cls,
+        *,
+        operation_advice: Optional[str],
+        analysis_date: date,
+        forward_bars: Sequence[DailyBarLike],
+        stop_loss: Optional[float],
+        take_profit: Optional[float],
+        config: EvaluationConfig,
+    ) -> Dict[str, Any]:
+        """Evaluate a completed T signal from the first eligible T+1 open."""
+
+        if not forward_bars:
+            return {
+                "analysis_date": analysis_date,
+                "operation_advice": operation_advice,
+                "position_recommendation": cls.infer_position_recommendation(operation_advice),
+                "direction_expected": cls.infer_direction_expected(operation_advice),
+                "eval_status": "insufficient_data",
+                "eval_window_days": int(config.eval_window_days),
+                "entry_timing": "NEXT_ELIGIBLE_BAR_OPEN",
+            }
+        entry_bar = forward_bars[0]
+        entry_date = getattr(entry_bar, "date", None)
+        entry_price = getattr(entry_bar, "open", None)
+        entry_timing = "NEXT_ELIGIBLE_BAR_OPEN"
+        if entry_price is None:
+            # A few legacy StockDaily rows have no open even though the next
+            # session is otherwise usable.  Closing-price entry is still
+            # strictly later than T and is labelled explicitly; new data uses
+            # the preferred next-bar open convention.
+            entry_price = getattr(entry_bar, "close", None)
+            entry_timing = "NEXT_ELIGIBLE_BAR_CLOSE_FALLBACK"
+        if entry_date is None or entry_date <= analysis_date or entry_price is None or entry_price <= 0:
+            return {
+                "analysis_date": analysis_date,
+                "operation_advice": operation_advice,
+                "position_recommendation": cls.infer_position_recommendation(operation_advice),
+                "direction_expected": cls.infer_direction_expected(operation_advice),
+                "eval_status": "insufficient_data",
+                "eval_window_days": int(config.eval_window_days),
+                "entry_timing": entry_timing,
+            }
+        result = cls.evaluate_single(
+            operation_advice=operation_advice,
+            analysis_date=analysis_date,
+            start_price=float(entry_price),
+            forward_bars=forward_bars,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            config=config,
+        )
+        result["entry_date"] = entry_date
+        result["entry_timing"] = entry_timing
+        return result
 
     @classmethod
     def evaluate_decision_signal(

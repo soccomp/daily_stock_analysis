@@ -24,6 +24,7 @@ from src.investment.contracts.portfolio_snapshot import PortfolioSnapshot
 from src.investment.contracts.data_evidence import (
     DataEvidence,
     analysis_context_evidence,
+    price_plan_evidence,
     portfolio_snapshot_evidence,
 )
 from src.investment.contracts.research_bundle import ModelProvenance, ResearchBundle
@@ -169,17 +170,28 @@ class InvestmentShadowWiringService:
             raise ShadowWiringRejected("explicit shadow decision identities cannot be blank")
 
         if data_evidence is None:
-            data_evidence = (
-                (
-                    portfolio_snapshot_evidence(snapshot=portfolio_snapshot, now=now),
-                    analysis_context_evidence(
-                        context_snapshot=context_snapshot,
-                        source_report_id=source_report_id,
-                        now=now,
-                    ),
-                )
-                if research_trigger is not None else ()
+            evidence_items = [
+                portfolio_snapshot_evidence(snapshot=portfolio_snapshot, now=now),
+                analysis_context_evidence(
+                    context_snapshot=context_snapshot,
+                    source_report_id=source_report_id,
+                    now=now,
+                ),
+            ] if research_trigger is not None else []
+            trigger_has_strategy_evidence = (
+                isinstance(research_trigger, ResearchTrigger)
+                and research_trigger.strategy_evidence is not None
+            ) or (
+                isinstance(research_trigger, dict)
+                and research_trigger.get("strategy_evidence") is not None
             )
+            if trigger_has_strategy_evidence and research_actionability == "ACTIONABLE_LONG":
+                evidence_items.append(price_plan_evidence(
+                    context_snapshot=context_snapshot,
+                    source_report_id=source_report_id,
+                    now=now,
+                ))
+            data_evidence = tuple(evidence_items)
 
         trigger = (
             research_trigger

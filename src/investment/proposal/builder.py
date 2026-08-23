@@ -18,6 +18,7 @@ from src.investment.contracts.candidate_provenance import CandidateProvenance
 from src.investment.contracts.data_evidence import (
     DataEvidence,
     analysis_context_evidence,
+    price_plan_evidence,
     portfolio_snapshot_evidence,
 )
 from src.investment.contracts.investment_proposal import InvestmentProposal
@@ -169,6 +170,19 @@ class InvestmentProposalBuilder:
                 if authoritative_snapshot is not None:
                     evidence_items.insert(0, portfolio_snapshot_evidence(
                         snapshot=authoritative_snapshot,
+                        now=now,
+                    ))
+                trigger_has_strategy_evidence = (
+                    isinstance(research_trigger, ResearchTrigger)
+                    and research_trigger.strategy_evidence is not None
+                ) or (
+                    isinstance(research_trigger, dict)
+                    and research_trigger.get("strategy_evidence") is not None
+                )
+                if trigger_has_strategy_evidence and action in {"BUY", "REDUCE", "SELL"}:
+                    evidence_items.append(price_plan_evidence(
+                        context_snapshot=context_snapshot,
+                        source_report_id=source_report_id,
                         now=now,
                     ))
                 data_evidence = tuple(evidence_items)
