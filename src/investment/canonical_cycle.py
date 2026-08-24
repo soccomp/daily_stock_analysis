@@ -48,6 +48,9 @@ STAGE_STATES = frozenset(
 STAGE_TERMINAL_STATES = frozenset(
     {"SUCCEEDED", "FAILED", "BLOCKED", "NO_ACTION", "SKIPPED", "PARTIAL"}
 )
+CURRENT_WORK_STATES = frozenset(
+    {"RUNNING", "SUCCEEDED", "FAILED", "BLOCKED", "NO_ACTION", "IDLE"}
+)
 
 
 class CanonicalCycleConflictError(RuntimeError):
@@ -83,6 +86,7 @@ class CanonicalCycleRepository:
         scheduler_task_name: str,
         scheduled_for: datetime,
         source_runtime_identity: str,
+        cycle_slot: datetime | None = None,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         cycle_id = self._required(cycle_id, "cycle_id")
@@ -91,6 +95,7 @@ class CanonicalCycleRepository:
             source_runtime_identity, "source_runtime_identity"
         )
         scheduled = to_utc_naive_datetime(scheduled_for)
+        slot = to_utc_naive_datetime(cycle_slot or scheduled_for)
         observed = to_utc_naive_datetime(now or datetime.now(timezone.utc))
         with self.db.session_scope() as session:
             row = session.get(CanonicalCycleRecord, cycle_id)
@@ -100,6 +105,7 @@ class CanonicalCycleRepository:
                     schema_version=CANONICAL_CYCLE_SCHEMA_VERSION,
                     scheduler_task_name=scheduler_task_name,
                     scheduled_for=scheduled,
+                    cycle_slot=slot,
                     created_at=observed,
                     started_at=observed,
                     status="RUNNING",
@@ -115,7 +121,7 @@ class CanonicalCycleRepository:
                 self._assert_cycle_identity(
                     row,
                     scheduler_task_name=scheduler_task_name,
-                    scheduled_for=scheduled,
+                    cycle_slot=slot,
                     source_runtime_identity=source_runtime_identity,
                 )
                 if row.status in CYCLE_NON_TERMINAL_STATES:
@@ -208,10 +214,43 @@ class CanonicalCycleRepository:
                 row.reason_detail = bounded_reason or row.reason_detail
                 row.updated_at = observed
 
-            cycle.current_stage = stage
-            cycle.current_stage_at = observed
+            if state != "NOT_ENTERED":
+                cycle.current_stage = stage
+                cycle.current_stage_at = observed
+                cycle.current_symbol_or_scope = None
+                cycle.current_work_state = state
             cycle.updated_at = observed
             return self._stage_payload(row)
+
+    def set_current_work(
+        self,
+        *,
+        cycle_id: str,
+        stage: str,
+        symbol_or_scope: str | None,
+        work_state: str,
+        at: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Persist the live unit of work without rewriting stage facts."""
+
+        if stage not in CANONICAL_CYCLE_STAGES:
+            raise ValueError(f"unsupported canonical cycle stage: {stage}")
+        if work_state not in CURRENT_WORK_STATES:
+            raise ValueError(f"unsupported canonical current work state: {work_state}")
+        observed = to_utc_naive_datetime(at or datetime.now(timezone.utc))
+        normalized_scope = str(symbol_or_scope or "").strip() or None
+        with self.db.session_scope() as session:
+            row = session.get(CanonicalCycleRecord, self._required(cycle_id, "cycle_id"))
+            if row is None:
+                raise CanonicalCycleConflictError(f"unknown canonical cycle: {cycle_id}")
+            if row.status in CYCLE_TERMINAL_STATES:
+                return self._cycle_payload(row)
+            row.current_stage = stage
+            row.current_stage_at = observed
+            row.current_symbol_or_scope = normalized_scope
+            row.current_work_state = work_state
+            row.updated_at = observed
+            return self._cycle_payload(row)
 
     def update_identity_and_counts(
         self,
@@ -296,11 +335,39 @@ class CanonicalCycleRepository:
             if row is None:
                 raise CanonicalCycleConflictError(f"unknown canonical cycle: {cycle_id}")
             if row.status in CYCLE_TERMINAL_STATES:
+                if acquired_at is not None:
+                    acquired = to_utc_naive_datetime(acquired_at)
+                    if row.lock_acquired_at not in (None, acquired):
+                        raise CanonicalCycleConflictError(
+                            f"lock acquisition fact cannot be rewritten: {row.cycle_id}"
+                        )
+                    row.lock_acquired_at = acquired
+                if released_at is not None:
+                    released = to_utc_naive_datetime(released_at)
+                    if row.lock_acquired_at is None:
+                        raise CanonicalCycleConflictError(
+                            f"lock release requires acquisition fact: {row.cycle_id}"
+                        )
+                    if row.ended_at is not None and released < row.ended_at:
+                        raise CanonicalCycleConflictError(
+                            f"lock release precedes cycle end: {row.cycle_id}"
+                        )
+                    if row.lock_released_at not in (None, released):
+                        raise CanonicalCycleConflictError(
+                            f"lock release fact cannot be rewritten: {row.cycle_id}"
+                        )
+                    row.lock_released_at = released
+                row.updated_at = utc_naive_now()
                 return self._cycle_payload(row)
             if acquired_at is not None:
                 row.lock_acquired_at = to_utc_naive_datetime(acquired_at)
             if released_at is not None:
-                row.lock_released_at = to_utc_naive_datetime(released_at)
+                released = to_utc_naive_datetime(released_at)
+                if row.lock_acquired_at is None:
+                    raise CanonicalCycleConflictError(
+                        f"lock release requires acquisition fact: {row.cycle_id}"
+                    )
+                row.lock_released_at = released
             row.updated_at = utc_naive_now()
             return self._cycle_payload(row)
 
@@ -329,13 +396,38 @@ class CanonicalCycleRepository:
                     raise CanonicalCycleConflictError(
                         f"terminal cycle meaning cannot be rewritten: {cycle_id}"
                     )
+                if lock_released_at is not None:
+                    released = to_utc_naive_datetime(lock_released_at)
+                    if row.lock_acquired_at is None:
+                        raise CanonicalCycleConflictError(
+                            f"lock release requires acquisition fact: {cycle_id}"
+                        )
+                    if row.ended_at is not None and released < row.ended_at:
+                        raise CanonicalCycleConflictError(
+                            f"lock release precedes cycle end: {cycle_id}"
+                        )
+                    if row.lock_released_at not in (None, released):
+                        raise CanonicalCycleConflictError(
+                            f"lock release fact cannot be rewritten: {cycle_id}"
+                        )
+                    row.lock_released_at = released
+                    row.updated_at = utc_naive_now()
                 return self._cycle_payload(row)
             row.status = status
             row.terminal_reason_code = reason_code
             row.terminal_reason_detail = bounded_reason
             row.ended_at = ended
             if lock_released_at is not None:
-                row.lock_released_at = to_utc_naive_datetime(lock_released_at)
+                released = to_utc_naive_datetime(lock_released_at)
+                if row.lock_acquired_at is None:
+                    raise CanonicalCycleConflictError(
+                        f"lock release requires acquisition fact: {cycle_id}"
+                    )
+                if released < ended:
+                    raise CanonicalCycleConflictError(
+                        f"lock release precedes cycle end: {cycle_id}"
+                    )
+                row.lock_released_at = released
             row.updated_at = ended
             return self._cycle_payload(row)
 
@@ -381,6 +473,14 @@ class CanonicalCycleRepository:
             "current_cycle_id": current.cycle_id if current else None,
             "current_status": current.status if current else None,
             "current_stage": current.current_stage if current else None,
+            "current_symbol_or_scope": (
+                current.current_symbol_or_scope if current else None
+            ),
+            "current_work_state": current.current_work_state if current else None,
+            "current_scheduled_for": (
+                self._iso(current.scheduled_for) if current else None
+            ),
+            "current_cycle_slot": self._iso(current.cycle_slot) if current else None,
             "started_at": self._iso(current.started_at) if current else None,
             "elapsed_seconds": (
                 max(0, int((now - current.started_at).total_seconds()))
@@ -399,7 +499,14 @@ class CanonicalCycleRepository:
             ),
             "last_run_at": self._iso(latest.started_at) if latest else None,
             "last_success_at": self._iso(
-                next((row.ended_at for row in rows if row.status == "SUCCEEDED"), None)
+                next(
+                    (
+                        row.ended_at
+                        for row in rows
+                        if row.status in {"SUCCEEDED", "NO_ACTION"}
+                    ),
+                    None,
+                )
             ),
             "last_error": self._last_error(rows),
             "last_skipped_at": self._iso(
@@ -420,12 +527,12 @@ class CanonicalCycleRepository:
         row: CanonicalCycleRecord,
         *,
         scheduler_task_name: str,
-        scheduled_for: datetime,
+        cycle_slot: datetime,
         source_runtime_identity: str,
     ) -> None:
         if (
             row.scheduler_task_name != scheduler_task_name
-            or row.scheduled_for != scheduled_for
+            or row.cycle_slot != cycle_slot
             or row.source_runtime_identity != source_runtime_identity
         ):
             raise CanonicalCycleConflictError(
@@ -472,6 +579,7 @@ class CanonicalCycleRepository:
             "schema_version": row.schema_version,
             "scheduler_task_name": row.scheduler_task_name,
             "scheduled_for": cls._iso(row.scheduled_for),
+            "cycle_slot": cls._iso(row.cycle_slot),
             "created_at": cls._iso(row.created_at),
             "started_at": cls._iso(row.started_at),
             "ended_at": cls._iso(row.ended_at),
@@ -482,6 +590,8 @@ class CanonicalCycleRepository:
             "terminal_reason_detail": row.terminal_reason_detail,
             "current_stage": row.current_stage,
             "current_stage_at": cls._iso(row.current_stage_at),
+            "current_symbol_or_scope": row.current_symbol_or_scope,
+            "current_work_state": row.current_work_state,
             "last_error": row.last_error,
             "market_review_id": row.market_review_id,
             "market_context_id": row.market_context_id,

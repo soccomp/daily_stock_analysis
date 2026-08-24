@@ -63,7 +63,7 @@ from src.utils.sniper_points import extract_sniper_points, parse_sniper_value
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
-CURRENT_SCHEMA_VERSION = "2026-08-24-canonical-cycle-v1"
+CURRENT_SCHEMA_VERSION = "2026-08-24-canonical-cycle-v2"
 INTELLIGENCE_ITEM_NULL_SCOPE_VALUE = "__dsa_null_scope__"
 
 # SQLAlchemy ORM 基类
@@ -1295,6 +1295,7 @@ class CanonicalCycleRecord(Base):
     schema_version = Column(String(32), nullable=False, default="1.0")
     scheduler_task_name = Column(String(160), nullable=False, index=True)
     scheduled_for = Column(DateTime, nullable=False, index=True)
+    cycle_slot = Column(DateTime, nullable=False, index=True)
     created_at = Column(DateTime, nullable=False, index=True)
     started_at = Column(DateTime, index=True)
     ended_at = Column(DateTime, index=True)
@@ -1305,6 +1306,8 @@ class CanonicalCycleRecord(Base):
     terminal_reason_detail = Column(Text)
     current_stage = Column(String(64), index=True)
     current_stage_at = Column(DateTime)
+    current_symbol_or_scope = Column(String(256), index=True)
+    current_work_state = Column(String(32))
     last_error = Column(Text)
     market_review_id = Column(String(160), index=True)
     market_context_id = Column(String(160), index=True)
@@ -1750,6 +1753,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             self._ensure_decision_signal_profile_schema()
             self._ensure_research_trigger_strategy_evidence_schema()
             self._ensure_backtest_entry_lineage_schema()
+            self._ensure_canonical_cycle_schema()
             self._ensure_intelligence_item_scope_values()
             self._ensure_schema_migration_record()
             self._ensure_intelligence_items_unique_index()
@@ -1811,6 +1815,35 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             connection.exec_driver_sql(
                 f"ALTER TABLE {table_name} ADD COLUMN strategy_evidence_json TEXT"
             )
+
+    def _ensure_canonical_cycle_schema(self) -> None:
+        """Add Mission 1 corrective lifecycle columns to existing ledgers."""
+
+        table_name = CanonicalCycleRecord.__tablename__
+        inspector = inspect(self._engine)
+        if not inspector.has_table(table_name):
+            return
+        existing = {column["name"] for column in inspector.get_columns(table_name)}
+        missing = []
+        if "cycle_slot" not in existing:
+            missing.append(f"ALTER TABLE {table_name} ADD COLUMN cycle_slot DATETIME")
+        if "current_symbol_or_scope" not in existing:
+            missing.append(
+                f"ALTER TABLE {table_name} ADD COLUMN current_symbol_or_scope VARCHAR(256)"
+            )
+        if "current_work_state" not in existing:
+            missing.append(
+                f"ALTER TABLE {table_name} ADD COLUMN current_work_state VARCHAR(32)"
+            )
+        if missing:
+            with self._engine.begin() as connection:
+                for statement in missing:
+                    connection.exec_driver_sql(statement)
+                if "cycle_slot" not in existing:
+                    connection.exec_driver_sql(
+                        f"UPDATE {table_name} SET cycle_slot = scheduled_for "
+                        "WHERE cycle_slot IS NULL"
+                    )
 
     def _ensure_backtest_entry_lineage_schema(self) -> None:
         """Add nullable entry lineage to existing backtest databases."""

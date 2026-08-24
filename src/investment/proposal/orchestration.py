@@ -73,6 +73,9 @@ class _NoopCanonicalCycleRepository:
     def set_stage(self, **_kwargs):
         return None
 
+    def set_current_work(self, **_kwargs):
+        return None
+
     def update_identity_and_counts(self, **_kwargs):
         return None
 
@@ -170,7 +173,8 @@ class ProposalHandoffLoopService:
                 blocked_reasons=("proposal clock must be timezone-aware",),
             )
         interval = int(getattr(self._config, "single_brain_m2_interval_minutes", 60))
-        slot = cycle_slot(scheduled_for or now, interval_minutes=interval)
+        actual_scheduled_for = scheduled_for or now
+        slot = cycle_slot(actual_scheduled_for, interval_minutes=interval)
         cycle = build_cycle_id(account_id="dsa-proposal-authority", scheduled_for=slot)
         canonical_enabled = (
             lock_acquired_at is not None
@@ -192,7 +196,8 @@ class ProposalHandoffLoopService:
         canonical.start_cycle(
             cycle_id=cycle,
             scheduler_task_name=scheduler_task_name,
-            scheduled_for=slot,
+            scheduled_for=actual_scheduled_for,
+            cycle_slot=slot,
             source_runtime_identity="DSA:ProposalHandoffLoopService",
             now=now,
         )
@@ -239,7 +244,6 @@ class ProposalHandoffLoopService:
                 status="FAILED",
                 terminal_reason_code="UNEXPECTED_EXCEPTION",
                 terminal_reason_detail=exc,
-                lock_released_at=datetime.now(timezone.utc),
             )
             raise
 
@@ -274,7 +278,6 @@ class ProposalHandoffLoopService:
             status=terminal_status,
             terminal_reason_code=terminal_reason,
             terminal_reason_detail="; ".join(result.blocked_reasons),
-            lock_released_at=datetime.now(timezone.utc),
         )
         return ProposalHandoffRunResult(
             **{
@@ -523,6 +526,14 @@ class ProposalHandoffLoopService:
         research_trigger_ids: list[str] = []
         for scope in scopes:
             symbol = scope["symbol"]
+            current_scope = f"{symbol}:{scope.get('source') or 'UNKNOWN'}"
+            canonical.set_current_work(
+                cycle_id=cycle,
+                stage="CANDIDATE_EVALUATION",
+                symbol_or_scope=current_scope,
+                work_state="RUNNING",
+                at=datetime.now(timezone.utc),
+            )
             logger.info(
                 "Issue #9 research object selected: symbol=%s source=%s",
                 symbol,
@@ -577,6 +588,13 @@ class ProposalHandoffLoopService:
                         "acknowledgement_id": acknowledgement.acknowledgement_id,
                     }
                 )
+                canonical.set_current_work(
+                    cycle_id=cycle,
+                    stage="CANDIDATE_EVALUATION",
+                    symbol_or_scope=current_scope,
+                    work_state="SUCCEEDED",
+                    at=datetime.now(timezone.utc),
+                )
                 logger.info(
                     "Issue #9 proposal accepted: proposal_id=%s acknowledgement_id=%s "
                     "acknowledgement_state=%s lifecycle_state=%s deduplicated=%s",
@@ -598,6 +616,13 @@ class ProposalHandoffLoopService:
                             scope.get("research_trigger") or {}
                         ).get("research_trigger_id"),
                     }
+                )
+                canonical.set_current_work(
+                    cycle_id=cycle,
+                    stage="CANDIDATE_EVALUATION",
+                    symbol_or_scope=current_scope,
+                    work_state="FAILED",
+                    at=datetime.now(timezone.utc),
                 )
                 if self._trigger_coordinator is not None and scope.get("research_trigger"):
                     try:

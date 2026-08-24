@@ -1,17 +1,21 @@
 """Focused deterministic evidence for PALLAS Convergence Mission 1."""
 
 import json
-from datetime import datetime, timezone
+import threading
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 
 from src.config import Config
 from src.investment.canonical_cycle import CanonicalCycleRepository
+from src.investment.m2.identity import cycle_id as build_cycle_id
+from src.investment.m2.identity import cycle_slot
 from src.investment.proposal.orchestration import ProposalHandoffLoopService
 from src.investment.proposal.transport import AthenaProposalAcknowledgement
 from src.repositories.market_review_linkage_repo import MarketReviewLinkageRepository
 from src.services.runtime_scheduler import _persist_proposal_handoff_terminal
+from src.services.runtime_scheduler import _RUNTIME_ANALYSIS_LOCK, run_with_global_analysis_lock
 from src.services.runtime_scheduler import RuntimeSchedulerService
 from src.storage import AnalysisHistory, DatabaseManager
 
@@ -165,6 +169,7 @@ def test_natural_cycle_without_market_context_fails_closed_before_work(isolated_
     assert result.status == "FAILED_CLOSED"
     assert result.canonical_cycle["status"] == "BLOCKED"
     assert result.canonical_cycle["terminal_reason_code"] == "REQUIRED_DEPENDENCY_BLOCKED"
+    assert result.canonical_cycle["current_stage"] == "LOCK"
 
 
 def test_lock_unavailable_is_durable_skipped_without_entering_investment_work(isolated_db):
@@ -224,7 +229,7 @@ def test_scheduler_status_reads_last_terminal_cycle_from_canonical_ledger(isolat
     status = service.status()
     assert status["last_terminal_cycle_id"] == cycle_id
     assert status["last_terminal_status"] == "NO_ACTION"
-    assert status["last_success_at"] is None
+    assert status["last_success_at"] == "2026-08-24T02:00:00Z"
     task = status["background_tasks"][0]
     assert task["last_terminal_cycle_id"] == cycle_id
 
@@ -314,3 +319,193 @@ def test_one_success_one_timeout_is_persisted_as_partial_with_candidate_outcomes
     assert result.canonical_cycle["candidate_count"] == 2
     assert {item["status"] for item in result.candidate_outcomes} == {"SUCCEEDED", "FAILED"}
     assert result.canonical_cycle["proposal_ids"] == ["proposal-000001"]
+
+
+def test_live_projection_exposes_current_candidate_while_analysis_is_blocked(
+    isolated_db, monkeypatch
+):
+    started = threading.Event()
+    release = threading.Event()
+    result_holder = {}
+
+    class Coordinator:
+        def plan(self, **_kwargs):
+            return [{"symbol": "000001", "source": "HOLDING"}]
+
+    class Runner:
+        def complete(self, **_kwargs):
+            started.set()
+            assert release.wait(3)
+            return SimpleNamespace(
+                completed_at=NOW,
+                result=object(),
+                context_snapshot={},
+                source_report_id=101,
+            )
+
+    def build(_self, **_kwargs):
+        proposal = SimpleNamespace(proposal_id="proposal-live", content_hash="b" * 64)
+        return SimpleNamespace(
+            proposal=proposal,
+            research_bundle=SimpleNamespace(research_id="research-live"),
+        )
+
+    def publish(proposal):
+        return AthenaProposalAcknowledgement(
+            proposal_id=proposal.proposal_id,
+            proposal_hash=proposal.content_hash,
+            acknowledgement_id="ack-live",
+            acknowledgement_state="ACCEPTED",
+            lifecycle_state="NO_ACTION",
+            deduplicated=False,
+        )
+
+    monkeypatch.setattr(
+        "src.investment.proposal.orchestration.InvestmentProposalBuilder.build",
+        build,
+    )
+    service = ProposalHandoffLoopService(
+        config=_config(),
+        analysis_runner=Runner(),
+        publisher=SimpleNamespace(publish=publish),
+        snapshot_source=_SnapshotSource(),
+        trigger_coordinator=Coordinator(),
+        clock=lambda: NOW,
+    )
+
+    def run():
+        result_holder["result"] = service.run_cycle(
+            scheduled_for=NOW,
+            market_review_context=_market_context("review-live", "context-live", NOW),
+            lock_acquired_at=NOW,
+        )
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert started.wait(2)
+    projection = CanonicalCycleRepository(isolated_db).scheduler_projection(
+        scheduler_task_name="single_brain_proposal_handoff"
+    )
+    assert projection["current_stage"] == "CANDIDATE_EVALUATION"
+    assert projection["current_symbol_or_scope"] == "000001:HOLDING"
+    assert projection["current_work_state"] == "RUNNING"
+
+    release.set()
+    worker.join(3)
+    assert not worker.is_alive()
+    assert result_holder["result"].status in {"COMPLETED", "PARTIAL"}
+    terminal = CanonicalCycleRepository(isolated_db).get_cycle(
+        result_holder["result"].cycle_id
+    )
+    assert terminal["current_stage"] == "ATHENA_HANDOFF_ACK"
+    assert terminal["current_symbol_or_scope"] is None
+
+
+def test_actual_scheduled_time_is_separate_from_cycle_slot(isolated_db):
+    due = datetime(2026, 8, 24, 2, 12, 28, tzinfo=UTC)
+    result = _service(clock=lambda: due).run_cycle(
+        scheduled_for=due,
+        lock_acquired_at=due,
+    )
+    assert result.canonical_cycle["scheduled_for"] == "2026-08-24T02:12:28Z"
+    assert result.canonical_cycle["cycle_slot"] == "2026-08-24T02:00:00Z"
+    assert result.cycle_id == build_cycle_id(
+        account_id="dsa-proposal-authority",
+        scheduled_for=cycle_slot(due, interval_minutes=60),
+    )
+    assert cycle_slot(due, interval_minutes=60).isoformat() == "2026-08-24T02:00:00+00:00"
+
+
+def test_lock_release_is_persisted_after_wrapper_unlocks_on_success(isolated_db):
+    repository = CanonicalCycleRepository(isolated_db)
+    cycle_id = "m2-cycle-lock-release-success"
+    repository.start_cycle(
+        cycle_id=cycle_id,
+        scheduler_task_name="single_brain_proposal_handoff",
+        scheduled_for=NOW,
+        source_runtime_identity="DSA:test",
+        now=NOW,
+    )
+    repository.record_lock(cycle_id=cycle_id, acquired_at=NOW)
+    callback_state = {}
+
+    def task(*_args):
+        repository.finish_cycle(
+            cycle_id=cycle_id,
+            status="SUCCEEDED",
+            terminal_reason_code="PROPOSAL_HANDOFF_COMPLETE",
+            ended_at=NOW + timedelta(seconds=1),
+        )
+
+    def after_release(released_at):
+        callback_state["lock_was_released"] = _RUNTIME_ANALYSIS_LOCK.acquire(
+            blocking=False
+        )
+        if callback_state["lock_was_released"]:
+            _RUNTIME_ANALYSIS_LOCK.release()
+        repository.record_lock(cycle_id=cycle_id, released_at=released_at)
+
+    assert run_with_global_analysis_lock(
+        task,
+        SimpleNamespace(),
+        None,
+        blocking=True,
+        on_released=after_release,
+    )
+    cycle = repository.get_cycle(cycle_id)
+    assert callback_state["lock_was_released"] is True
+    assert cycle["lock_released_at"] is not None
+    assert cycle["lock_released_at"] >= cycle["ended_at"]
+
+
+def test_lock_release_is_persisted_after_wrapper_unlocks_on_exception(isolated_db):
+    repository = CanonicalCycleRepository(isolated_db)
+    cycle_id = "m2-cycle-lock-release-failure"
+    repository.start_cycle(
+        cycle_id=cycle_id,
+        scheduler_task_name="single_brain_proposal_handoff",
+        scheduled_for=NOW,
+        source_runtime_identity="DSA:test",
+        now=NOW,
+    )
+    repository.record_lock(cycle_id=cycle_id, acquired_at=NOW)
+
+    def task(*_args):
+        repository.finish_cycle(
+            cycle_id=cycle_id,
+            status="FAILED",
+            terminal_reason_code="UNEXPECTED_EXCEPTION",
+            ended_at=NOW + timedelta(seconds=1),
+        )
+        raise RuntimeError("deterministic failure")
+
+    def after_release(released_at):
+        repository.record_lock(cycle_id=cycle_id, released_at=released_at)
+
+    with pytest.raises(RuntimeError, match="deterministic failure"):
+        run_with_global_analysis_lock(
+            task,
+            SimpleNamespace(),
+            None,
+            blocking=True,
+            on_released=after_release,
+        )
+    cycle = repository.get_cycle(cycle_id)
+    assert cycle["status"] == "FAILED"
+    assert cycle["lock_released_at"] >= cycle["ended_at"]
+
+
+def test_lock_unavailable_does_not_invoke_release_callback():
+    assert _RUNTIME_ANALYSIS_LOCK.acquire(blocking=False)
+    callback_called = []
+    try:
+        assert not run_with_global_analysis_lock(
+            lambda *_args: None,
+            SimpleNamespace(),
+            None,
+            blocking=False,
+            on_released=lambda _released_at: callback_called.append(True),
+        )
+    finally:
+        _RUNTIME_ANALYSIS_LOCK.release()
+    assert callback_called == []

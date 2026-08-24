@@ -51,6 +51,7 @@ def run_with_global_analysis_lock(
     stock_codes: Optional[List[str]] = None,
     *,
     blocking: bool = True,
+    on_released: Callable[[datetime], Any] | None = None,
 ) -> bool:
     """Execute a task while holding the shared runtime analysis lock."""
     if not _RUNTIME_ANALYSIS_LOCK.acquire(blocking=blocking):
@@ -59,13 +60,15 @@ def run_with_global_analysis_lock(
         task_runner(config, args, stock_codes)
     finally:
         _RUNTIME_ANALYSIS_LOCK.release()
+        if on_released is not None:
+            on_released(datetime.now(timezone.utc))
     return True
 
 
 def _proposal_handoff_cycle_identity(
     config: Config,
     observed_at: datetime,
-) -> tuple[str, datetime]:
+) -> tuple[str, datetime, datetime]:
     try:
         interval_minutes = max(
             1,
@@ -76,6 +79,7 @@ def _proposal_handoff_cycle_identity(
     slot = cycle_slot(observed_at, interval_minutes=interval_minutes)
     return (
         build_cycle_id(account_id="dsa-proposal-authority", scheduled_for=slot),
+        observed_at,
         slot,
     )
 
@@ -87,18 +91,23 @@ def _persist_proposal_handoff_terminal(
     status: str,
     reason_code: str,
     reason_detail: object,
+    scheduled_for: datetime | None = None,
     lock_acquired_at: datetime | None = None,
+    lock_released_at: datetime | None = None,
 ) -> None:
     """Persist scheduler-owned outcomes when the handoff service is not entered."""
 
-    cycle_id, scheduled_for = _proposal_handoff_cycle_identity(config, observed_at)
+    cycle_id, actual_scheduled_for, slot = _proposal_handoff_cycle_identity(
+        config, scheduled_for or observed_at
+    )
     repository = CanonicalCycleRepository()
     existing = repository.get_cycle(cycle_id)
     if existing is None:
         repository.start_cycle(
             cycle_id=cycle_id,
             scheduler_task_name=CANONICAL_CYCLE_TASK,
-            scheduled_for=scheduled_for,
+            scheduled_for=actual_scheduled_for,
+            cycle_slot=slot,
             source_runtime_identity="DSA:ProposalHandoffLoopService",
             now=observed_at,
         )
@@ -143,7 +152,7 @@ def _persist_proposal_handoff_terminal(
         status=status,
         terminal_reason_code=reason_code,
         terminal_reason_detail=reason_detail,
-        lock_released_at=datetime.now(timezone.utc),
+        lock_released_at=lock_released_at,
     )
 
 
@@ -252,6 +261,11 @@ def build_single_brain_m2_background_tasks(
                 )
             return
 
+        release_ref: dict[str, datetime] = {}
+        release_cycle_ref: dict[str, str] = {}
+        scheduled_ref: dict[str, datetime] = {}
+        acquired_ref: dict[str, datetime] = {}
+
         def run_once(
             loaded_config: Config,
             _args: Any,
@@ -260,8 +274,17 @@ def build_single_brain_m2_background_tasks(
             if execution_mode == "PROPOSAL_HANDOFF":
                 from src.investment.proposal.orchestration import ProposalHandoffLoopService
 
+                scheduled_for = datetime.now(timezone.utc)
                 lock_acquired_at = datetime.now(timezone.utc)
+                scheduled_ref["scheduled_for"] = scheduled_for
+                acquired_ref["lock_acquired_at"] = lock_acquired_at
+                expected_cycle_id, _, _ = _proposal_handoff_cycle_identity(
+                    loaded_config, scheduled_for
+                )
+                release_cycle_ref["cycle_id"] = expected_cycle_id
+
                 result = ProposalHandoffLoopService.from_config(loaded_config).run_cycle(
+                    scheduled_for=scheduled_for,
                     lock_acquired_at=lock_acquired_at,
                     require_market_review_context=True,
                     scheduler_task_name=CANONICAL_CYCLE_TASK,
@@ -281,21 +304,41 @@ def build_single_brain_m2_background_tasks(
             )
 
         try:
+            def persist_release_after_unlock(released_at: datetime) -> None:
+                release_ref["released_at"] = released_at
+                cycle_id = release_cycle_ref.get("cycle_id")
+                if not cycle_id:
+                    return
+                try:
+                    CanonicalCycleRepository().record_lock(
+                        cycle_id=cycle_id,
+                        released_at=released_at,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Canonical cycle lock release persistence failed: cycle=%s",
+                        cycle_id,
+                    )
+
             acquired = run_with_global_analysis_lock(
                 run_once,
                 current_config,
                 None,
                 blocking=False,
+                on_released=persist_release_after_unlock,
             )
         except Exception as exc:
             if execution_mode == "PROPOSAL_HANDOFF":
+                scheduled_for = scheduled_ref.get("scheduled_for", datetime.now(timezone.utc))
                 _persist_proposal_handoff_terminal(
                     current_config,
-                    observed_at=datetime.now(timezone.utc),
+                    observed_at=scheduled_for,
                     status="FAILED",
                     reason_code="HANDOFF_CONSTRUCTION_FAILED",
                     reason_detail=exc,
-                    lock_acquired_at=datetime.now(timezone.utc),
+                    scheduled_for=scheduled_for,
+                    lock_acquired_at=acquired_ref.get("lock_acquired_at"),
+                    lock_released_at=release_ref.get("released_at"),
                 )
             raise
         if not acquired:
@@ -717,6 +760,18 @@ class RuntimeSchedulerService:
                             "current_cycle_id": canonical_projection["current_cycle_id"],
                             "current_status": canonical_projection["current_status"],
                             "current_stage": canonical_projection["current_stage"],
+                            "current_symbol_or_scope": canonical_projection[
+                                "current_symbol_or_scope"
+                            ],
+                            "current_work_state": canonical_projection[
+                                "current_work_state"
+                            ],
+                            "current_scheduled_for": canonical_projection[
+                                "current_scheduled_for"
+                            ],
+                            "current_cycle_slot": canonical_projection[
+                                "current_cycle_slot"
+                            ],
                             "last_run_at": canonical_projection["last_run_at"],
                             "last_success_at": canonical_projection["last_success_at"],
                             "last_error": canonical_projection["last_error"],
@@ -767,6 +822,26 @@ class RuntimeSchedulerService:
             ),
             "current_stage": (
                 canonical_projection["current_stage"]
+                if canonical_projection is not None
+                else None
+            ),
+            "current_symbol_or_scope": (
+                canonical_projection["current_symbol_or_scope"]
+                if canonical_projection is not None
+                else None
+            ),
+            "current_work_state": (
+                canonical_projection["current_work_state"]
+                if canonical_projection is not None
+                else None
+            ),
+            "current_scheduled_for": (
+                canonical_projection["current_scheduled_for"]
+                if canonical_projection is not None
+                else None
+            ),
+            "current_cycle_slot": (
+                canonical_projection["current_cycle_slot"]
                 if canonical_projection is not None
                 else None
             ),
