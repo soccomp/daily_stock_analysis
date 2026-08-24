@@ -17,6 +17,7 @@ from src.investment.canonical_cycle import (
 )
 from src.investment.m2.identity import analysis_query_id, cycle_id as build_cycle_id, cycle_slot
 from src.investment.m2.orchestration import DSAAnalysisCompletionRunner
+from src.investment.m2.natural_admission import CycleBudget, build_cycle_budget
 from src.investment.m2.screening_candidates import (
     DatabaseScreeningCandidateSource,
     ScreeningCandidateSource,
@@ -60,6 +61,7 @@ class ProposalHandoffRunResult:
     market_review_linkage: dict[str, object] | None = None
     candidate_count: int = 0
     failed_count: int = 0
+    deferred_count: int = 0
     candidate_outcomes: tuple[dict[str, object], ...] = ()
     canonical_cycle: dict[str, object] | None = None
 
@@ -188,6 +190,11 @@ class ProposalHandoffLoopService:
         actual_scheduled_for = scheduled_for or now
         slot = cycle_slot(actual_scheduled_for, interval_minutes=interval)
         cycle = build_cycle_id(account_id="dsa-proposal-authority", scheduled_for=slot)
+        budget = build_cycle_budget(
+            started_at=cycle_started_at,
+            scheduled_for=actual_scheduled_for,
+            config=self._config,
+        )
         canonical_enabled = (
             lock_acquired_at is not None
             or market_review_context is not None
@@ -203,6 +210,7 @@ class ProposalHandoffLoopService:
                 interval=interval,
                 canonical=_NoopCanonicalCycleRepository(),
                 require_market_review_context=require_market_review_context,
+                budget=budget,
             )
         canonical = CanonicalCycleRepository()
         canonical.start_cycle(
@@ -212,6 +220,11 @@ class ProposalHandoffLoopService:
             cycle_slot=slot,
             source_runtime_identity="DSA:ProposalHandoffLoopService",
             now=cycle_started_at,
+        )
+        canonical.update_identity_and_counts(
+            cycle_id=cycle,
+            cycle_deadline=budget.deadline,
+            candidate_reserve_seconds=int(budget.candidate_reserve_seconds),
         )
         canonical.set_stage(
             cycle_id=cycle,
@@ -249,6 +262,7 @@ class ProposalHandoffLoopService:
                 interval=interval,
                 canonical=canonical,
                 require_market_review_context=require_market_review_context,
+                budget=budget,
             )
         except Exception as exc:
             canonical.finish_cycle(
@@ -263,6 +277,8 @@ class ProposalHandoffLoopService:
             result_status=result.status,
             blocked_reasons=result.blocked_reasons,
         )
+        if result.deferred_count:
+            terminal_status, terminal_reason = "PARTIAL", "CYCLE_BUDGET_EXHAUSTED"
         canonical.update_identity_and_counts(
             cycle_id=cycle,
             candidate_count=result.candidate_count,
@@ -278,6 +294,7 @@ class ProposalHandoffLoopService:
             ),
             blocked_count=len(result.blocked_reasons),
             failed_count=result.failed_count,
+            deferred_count=result.deferred_count,
             research_trigger_ids=result.research_trigger_ids,
             proposal_ids=result.proposal_ids,
             acknowledgement_ids=tuple(
@@ -309,6 +326,7 @@ class ProposalHandoffLoopService:
         interval: int,
         canonical: CanonicalCycleRepository,
         require_market_review_context: bool,
+        budget: CycleBudget,
     ) -> ProposalHandoffRunResult:
         linkage_repository = MarketReviewLinkageRepository()
         resolved_market_context = (
@@ -384,6 +402,44 @@ class ProposalHandoffLoopService:
                     ),
                 )
         else:
+            from src.services.dependency_health import get_dependency_health_store
+
+            health_store = get_dependency_health_store()
+            health_store.record_result(
+                "dsa-market-context",
+                category="MARKET_CONTEXT",
+                role="PRIMARY",
+                success=True,
+                reachable=True,
+                usable=True,
+                records=1,
+                data_timestamp=str(resolved_market_context.get("as_of") or now.isoformat()),
+                max_age_seconds=max(60, interval * 60),
+                metadata={"reference": resolved_market_context.get("context_id")},
+            )
+            if bool(getattr(self._config, "single_brain_m2_readiness_gate_enabled", False)):
+                readiness = health_store.snapshot().get("readiness") or {}
+                if readiness.get("DSA_RESEARCH_READINESS") not in {"READY", "DEGRADED"}:
+                    for stage in (
+                        "RESEARCH_TRIGGER", "CANDIDATE_EVALUATION", "RESEARCH_BUNDLE",
+                        "INVESTMENT_PROPOSAL", "ATHENA_HANDOFF_ACK",
+                    ):
+                        canonical.set_stage(
+                            cycle_id=cycle,
+                            stage=stage,
+                            state="NOT_ENTERED",
+                            reason_code="DSA_RESEARCH_READINESS_BLOCKED",
+                            reason_detail="; ".join(readiness.get("reasons") or ()),
+                            at=now,
+                        )
+                    return ProposalHandoffRunResult(
+                        cycle,
+                        "FAILED_CLOSED",
+                        blocked_reasons=(
+                            "DSA research readiness blocked: "
+                            + "; ".join(readiness.get("reasons") or ("UNKNOWN",)),
+                        ),
+                    )
             canonical.update_identity_and_counts(
                 cycle_id=cycle,
                 market_review_id=str(resolved_market_context["market_review_id"]),
@@ -536,9 +592,35 @@ class ProposalHandoffLoopService:
                 candidate_count=0,
             )
         research_trigger_ids: list[str] = []
+        deferred_count = 0
         for scope in scopes:
             symbol = scope["symbol"]
             current_scope = f"{symbol}:{scope.get('source') or 'UNKNOWN'}"
+            budget_observed_at = self._clock()
+            if not budget.admits_candidate(budget_observed_at):
+                deferred_count += 1
+                trigger = scope.get("research_trigger")
+                candidate_outcomes.append({
+                    "symbol": symbol,
+                    "source": scope.get("source"),
+                    "status": "DEFERRED_BUDGET",
+                    "reason": "insufficient remaining cycle budget for configured timeout contract",
+                    "research_trigger_id": (trigger or {}).get("research_trigger_id"),
+                    "remaining_seconds": int(budget.remaining_seconds(budget_observed_at)),
+                    "required_seconds": int(budget.candidate_reserve_seconds),
+                })
+                if self._trigger_coordinator is not None and trigger:
+                    self._trigger_coordinator.mark_deferred_budget(
+                        trigger=trigger, now=budget_observed_at
+                    )
+                canonical.set_current_work(
+                    cycle_id=cycle,
+                    stage="CANDIDATE_EVALUATION",
+                    symbol_or_scope=current_scope,
+                    work_state="DEFERRED",
+                    at=budget_observed_at,
+                )
+                continue
             canonical.set_current_work(
                 cycle_id=cycle,
                 stage="CANDIDATE_EVALUATION",
@@ -659,7 +741,15 @@ class ProposalHandoffLoopService:
                 )
             except (TypeError, ValueError, MarketReviewLinkageConflictError) as exc:
                 blocked.append(f"market review identity linkage failed: {exc}")
-        status = "COMPLETED" if proposal_ids and not blocked else "PARTIAL" if proposal_ids else "FAILED_CLOSED"
+        status = (
+            "PARTIAL"
+            if deferred_count
+            else "COMPLETED"
+            if proposal_ids and not blocked
+            else "PARTIAL"
+            if proposal_ids
+            else "FAILED_CLOSED"
+        )
         research_ids = tuple(
             str(item["research_id"])
             for item in candidate_outcomes
@@ -673,7 +763,7 @@ class ProposalHandoffLoopService:
                 if len(research_ids) == len(scopes)
                 else "PARTIAL"
                 if research_ids
-                else "FAILED"
+                else "PARTIAL" if deferred_count else "FAILED"
             ),
             object_ids=research_ids,
             reason_code=(
@@ -681,7 +771,7 @@ class ProposalHandoffLoopService:
                 if len(research_ids) == len(scopes)
                 else "RESEARCH_BUNDLES_PARTIAL"
                 if research_ids
-                else "ALL_CANDIDATES_FAILED"
+                else "CYCLE_BUDGET_EXHAUSTED" if deferred_count else "ALL_CANDIDATES_FAILED"
             ),
             at=now,
         )
@@ -693,7 +783,7 @@ class ProposalHandoffLoopService:
                 if len(proposal_ids) == len(scopes)
                 else "PARTIAL"
                 if proposal_ids
-                else "FAILED"
+                else "PARTIAL" if deferred_count else "FAILED"
             ),
             object_ids=proposal_ids,
             reason_code=(
@@ -701,7 +791,7 @@ class ProposalHandoffLoopService:
                 if len(proposal_ids) == len(scopes)
                 else "PROPOSALS_PARTIAL"
                 if proposal_ids
-                else "ALL_CANDIDATES_FAILED"
+                else "CYCLE_BUDGET_EXHAUSTED" if deferred_count else "ALL_CANDIDATES_FAILED"
             ),
             at=now,
         )
@@ -713,7 +803,7 @@ class ProposalHandoffLoopService:
                 if len(acknowledgements) == len(scopes)
                 else "PARTIAL"
                 if acknowledgements
-                else "FAILED"
+                else "PARTIAL" if deferred_count else "FAILED"
             ),
             object_ids=tuple(item.acknowledgement_id for item in acknowledgements),
             reason_code=(
@@ -721,7 +811,7 @@ class ProposalHandoffLoopService:
                 if len(acknowledgements) == len(scopes)
                 else "ACKS_PARTIAL"
                 if acknowledgements
-                else "ALL_CANDIDATES_FAILED"
+                else "CYCLE_BUDGET_EXHAUSTED" if deferred_count else "ALL_CANDIDATES_FAILED"
             ),
             at=now,
         )
@@ -736,6 +826,7 @@ class ProposalHandoffLoopService:
             market_review_linkage=linkage,
             candidate_count=len(scopes),
             failed_count=len(blocked),
+            deferred_count=deferred_count,
             candidate_outcomes=tuple(candidate_outcomes),
         )
 

@@ -76,7 +76,15 @@ class _DeterministicAnalysisRunner:
         result.code = kwargs["symbol"]
         return AnalysisCompletion(
             result=result,
-            context_snapshot={"source": "pallas-evidence-upgrade"},
+            context_snapshot={
+                "source": "pallas-evidence-upgrade",
+                "price_plan": {
+                    "provider": "deterministic-test-provider",
+                    "source_reference": f"test-price-plan:{kwargs['symbol']}",
+                    "source_event_time": self._completed_at.isoformat(),
+                    "retrieved_at": self._completed_at.isoformat(),
+                },
+            },
             source_report_id=11,
             recovered=False,
             completed_at=self._completed_at,
@@ -325,11 +333,17 @@ def test_p008_strategy_evidence_survives_real_dsa_to_athena_http_ack(
         captured_artifacts.append(artifacts)
         return artifacts
 
+    p008_athena_root = Path(
+        os.environ.get(
+            "PALLAS_ATHENA_P008_ROOT",
+            str(Path(__file__).resolve().parents[1] / "../pallas-008-athena-impl"),
+        )
+    ).resolve()
     with _isolated_athena_intake(
         tmp_path,
-        acceptance_policy_path=Path(__file__).resolve().parents[1]
-        / "../pallas-008-athena-impl/config/pallas_008_investment_acceptance_policy.json",
-        athena_root=Path(__file__).resolve().parents[1] / "../pallas-008-athena-impl",
+        acceptance_policy_path=p008_athena_root
+        / "config/pallas_008_investment_acceptance_policy.json",
+        athena_root=p008_athena_root,
     ) as endpoint:
         publisher = CanonicalHttpInvestmentProposalPublisher(url=endpoint)
         service = ProposalHandoffLoopService(

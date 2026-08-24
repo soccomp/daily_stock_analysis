@@ -129,12 +129,25 @@ def _persist_proposal_handoff_terminal(
             at=lock_acquired_at,
         )
     else:
+        admission_skip = status == "SKIPPED" and reason_code in {
+            "NON_TRADING_DAY",
+            "OUTSIDE_TRADING_SESSION",
+            "TRADING_CALENDAR_UNAVAILABLE",
+        }
         repository.set_stage(
             cycle_id=cycle_id,
             stage="LOCK",
-            state="BLOCKED",
-            reason_code="GLOBAL_ANALYSIS_LOCK_UNAVAILABLE",
-            reason_detail="the shared analysis lock was held by another natural run",
+            state="NOT_ENTERED" if admission_skip else "BLOCKED",
+            reason_code=(
+                "ADMISSION_SKIPPED_BEFORE_LOCK"
+                if admission_skip
+                else "GLOBAL_ANALYSIS_LOCK_UNAVAILABLE"
+            ),
+            reason_detail=(
+                "natural cycle admission ended before lock acquisition"
+                if admission_skip
+                else "the shared analysis lock was held by another natural run"
+            ),
             at=observed_at,
         )
     current = repository.get_cycle(cycle_id)
@@ -270,6 +283,24 @@ def build_single_brain_m2_background_tasks(
                     scheduled_for=scheduler_due,
                 )
             return
+
+        if (
+            execution_mode == "PROPOSAL_HANDOFF"
+            and bool(getattr(current_config, "single_brain_m2_natural_session_gate_enabled", False))
+        ):
+            from src.investment.m2.natural_admission import evaluate_natural_cycle_admission
+
+            admission = evaluate_natural_cycle_admission(task_started_at)
+            if not admission.allowed:
+                _persist_proposal_handoff_terminal(
+                    current_config,
+                    observed_at=task_started_at,
+                    status="SKIPPED",
+                    reason_code=admission.reason_code,
+                    reason_detail=f"market_phase={admission.market_phase}; zero work created",
+                    scheduled_for=scheduler_due,
+                )
+                return
 
         release_ref: dict[str, datetime] = {}
         release_cycle_ref: dict[str, str] = {}
@@ -763,12 +794,25 @@ class RuntimeSchedulerService:
                 "next_run_at": next_run_at,
             })
         canonical_projection: dict[str, Any] | None = None
+        natural_work_window: dict[str, Any] | None = None
         try:
             config = self._config_provider()
             if str(getattr(config, "single_brain_execution_mode", "")).strip().upper() == "PROPOSAL_HANDOFF":
                 canonical_projection = CanonicalCycleRepository().scheduler_projection(
                     scheduler_task_name=CANONICAL_CYCLE_TASK
                 )
+                from src.investment.m2.natural_admission import evaluate_natural_cycle_admission
+
+                admission_observed_at = datetime.now(timezone.utc)
+                admission = evaluate_natural_cycle_admission(admission_observed_at)
+                natural_work_window = {
+                    "timezone": "Asia/Shanghai",
+                    "observed_at": admission_observed_at.isoformat(),
+                    "inside_window": admission.allowed,
+                    "market_phase": admission.market_phase,
+                    "reason_code": admission.reason_code,
+                    "is_trading_day": admission.market_phase not in {"non_trading", "unknown"},
+                }
         except Exception as exc:  # pragma: no cover - status must remain readable
             logger.debug("Canonical cycle projection unavailable: %s", exc)
         if canonical_projection is not None:
@@ -796,6 +840,12 @@ class RuntimeSchedulerService:
                             "last_error": canonical_projection["last_error"],
                             "last_terminal_cycle_id": canonical_projection["last_terminal_cycle_id"],
                             "last_terminal_status": canonical_projection["last_terminal_status"],
+                            "cycle_deadline": canonical_projection["cycle_deadline"],
+                            "remaining_seconds": canonical_projection["remaining_seconds"],
+                            "candidate_count": canonical_projection["candidate_count"],
+                            "proposal_count": canonical_projection["proposal_count"],
+                            "deferred_count": canonical_projection["deferred_count"],
+                            "failed_count": canonical_projection["failed_count"],
                         }
                     )
         return {
@@ -874,6 +924,27 @@ class RuntimeSchedulerService:
                 if canonical_projection is not None
                 else None
             ),
+            "current_cycle_deadline": (
+                canonical_projection["cycle_deadline"]
+                if canonical_projection is not None
+                else None
+            ),
+            "current_cycle_remaining_seconds": (
+                canonical_projection["remaining_seconds"]
+                if canonical_projection is not None
+                else None
+            ),
+            "current_cycle_counts": (
+                {
+                    "candidate": canonical_projection["candidate_count"],
+                    "proposal": canonical_projection["proposal_count"],
+                    "deferred": canonical_projection["deferred_count"],
+                    "failed": canonical_projection["failed_count"],
+                }
+                if canonical_projection is not None
+                else None
+            ),
+            "natural_work_window": natural_work_window,
             "last_terminal_cycle_id": (
                 canonical_projection["last_terminal_cycle_id"]
                 if canonical_projection is not None

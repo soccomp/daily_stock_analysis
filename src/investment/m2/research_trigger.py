@@ -470,6 +470,20 @@ class HoldingsReviewCoverageRepository:
                 row.review_status = "BLOCKED_RUNTIME"
                 row.updated_at = to_utc_naive_datetime(now)
 
+    def mark_deferred(self, *, symbol: str, now: datetime) -> None:
+        """Return an admitted holding to the fair queue without consuming it."""
+
+        with self.db.session_scope() as session:
+            row = session.execute(
+                select(HoldingsReviewCoverageRecord).where(
+                    HoldingsReviewCoverageRecord.symbol == symbol
+                )
+            ).scalar_one_or_none()
+            if row is not None:
+                row.review_status = "DEFERRED_CAPACITY"
+                row.deferred_count = int(row.deferred_count or 0) + 1
+                row.updated_at = to_utc_naive_datetime(now)
+
     def projection(self) -> tuple[dict[str, Any], ...]:
         with self.db.get_session() as session:
             rows = tuple(
@@ -691,6 +705,15 @@ class ResearchTriggerCoordinator:
         self.ledger.mark_blocked(value.research_trigger_id)
         if value.trigger_type == "SCHEDULED_HOLDING_REVIEW":
             self.coverage.mark_blocked(symbol=value.symbol, now=now)
+
+    def mark_deferred_budget(
+        self, *, trigger: ResearchTrigger | dict[str, Any], now: datetime
+    ) -> None:
+        """Keep the durable FIRED trigger eligible for a later legal cycle."""
+
+        value = self._coerce_trigger(trigger)
+        if value.trigger_type == "SCHEDULED_HOLDING_REVIEW":
+            self.coverage.mark_deferred(symbol=value.symbol, now=now)
 
     def enqueue_material_event(
         self, *, symbol: str, event_id: str, effective_at: datetime, evidence_refs: tuple[str, ...], snapshot_id: str | None = None,

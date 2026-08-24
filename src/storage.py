@@ -1317,6 +1317,9 @@ class CanonicalCycleRecord(Base):
     no_action_count = Column(Integer, nullable=False, default=0)
     blocked_count = Column(Integer, nullable=False, default=0)
     failed_count = Column(Integer, nullable=False, default=0)
+    deferred_count = Column(Integer, nullable=False, default=0)
+    cycle_deadline = Column(DateTime)
+    candidate_reserve_seconds = Column(Integer)
     research_trigger_ids_json = Column(Text, nullable=False, default="[]")
     proposal_ids_json = Column(Text, nullable=False, default="[]")
     acknowledgement_ids_json = Column(Text, nullable=False, default="[]")
@@ -1834,6 +1837,16 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         if "current_work_state" not in existing:
             missing.append(
                 f"ALTER TABLE {table_name} ADD COLUMN current_work_state VARCHAR(32)"
+            )
+        if "deferred_count" not in existing:
+            missing.append(
+                f"ALTER TABLE {table_name} ADD COLUMN deferred_count INTEGER DEFAULT 0 NOT NULL"
+            )
+        if "cycle_deadline" not in existing:
+            missing.append(f"ALTER TABLE {table_name} ADD COLUMN cycle_deadline DATETIME")
+        if "candidate_reserve_seconds" not in existing:
+            missing.append(
+                f"ALTER TABLE {table_name} ADD COLUMN candidate_reserve_seconds INTEGER"
             )
         if missing:
             with self._engine.begin() as connection:

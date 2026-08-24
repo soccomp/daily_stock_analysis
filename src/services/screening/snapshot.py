@@ -300,7 +300,7 @@ def _persist_dependency_observation(
 
         get_dependency_health_store().record_result(
             source,
-            category="MARKET_DATA",
+            category="RESEARCH_MARKET_DATA",
             configured=source != "tushare" or bool(os.getenv("TUSHARE_TOKEN", "").strip()),
             enabled=True,
             role="PRIMARY" if source in {"tushare", "efinance"} else "FALLBACK",

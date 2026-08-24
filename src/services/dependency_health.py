@@ -12,7 +12,7 @@ import json
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional
 
@@ -29,13 +29,13 @@ READINESS_READY = "READY"
 READINESS_DEGRADED = "DEGRADED"
 READINESS_BLOCKED = "BLOCKED"
 
-CRITICAL_CATEGORIES = (
-    "LLM_RESEARCH",
-    "MARKET_DATA",
-    "TRADING_CALENDAR",
-    "ATHENA_AUTHORITY",
-    "SIMULATION_WORKER",
-)
+CRITICAL_CATEGORIES = ("LLM_RESEARCH", "RESEARCH_MARKET_DATA", "MARKET_CONTEXT")
+_CATEGORY_PURPOSE = {
+    "LLM_RESEARCH": "structured Pallas research generation",
+    "RESEARCH_MARKET_DATA": "research and screening market evidence",
+    "MARKET_CONTEXT": "causal market review context",
+    "NEWS_SEARCH": "advisory research news enrichment",
+}
 
 _DEFAULT_PATH = Path(__file__).resolve().parents[2] / "runtime" / "dependency_health.json"
 _DEFAULT_INTERVAL_SECONDS = 300
@@ -155,6 +155,40 @@ def _category_status(items: Iterable[Mapping[str, Any]]) -> str:
     if FAILED in active:
         return FAILED
     return UNKNOWN
+
+
+def evaluate_dsa_research_readiness(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
+    """Evaluate only facts owned by DSA; downstream Athena truth is excluded."""
+
+    categories = snapshot.get("categories") if isinstance(snapshot, Mapping) else {}
+    categories = categories if isinstance(categories, Mapping) else {}
+    blocked = []
+    degraded = []
+    reasons = []
+    for category in CRITICAL_CATEGORIES:
+        status = str((categories.get(category) or {}).get("status") or UNKNOWN)
+        if status == DEGRADED and category == "RESEARCH_MARKET_DATA":
+            degraded.append(category)
+            reasons.append(f"{category}:{status}")
+        elif status != HEALTHY:
+            blocked.append(category)
+            reasons.append(f"{category}:{status}")
+    news_status = str((categories.get("NEWS_SEARCH") or {}).get("status") or UNKNOWN)
+    advisories = [] if news_status in {HEALTHY, DISABLED} else [f"NEWS_SEARCH:{news_status}"]
+    state = READINESS_BLOCKED if blocked else (READINESS_DEGRADED if degraded or advisories else READINESS_READY)
+    return {
+        "DSA_RESEARCH_READINESS": state,
+        "AUTONOMOUS_SIMULATION_READINESS": state,
+        "reasons": reasons,
+        "blocked_categories": blocked,
+        "degraded_categories": degraded,
+        "advisories": advisories,
+        "advisory_categories": ["NEWS_SEARCH"] if advisories else [],
+        "simulation_only": True,
+        "execution_authority": "ATHENA_ONLY",
+        "dsa_execution_authority": False,
+        "proof_order": False,
+    }
 
 
 def _llm_combined_status(row: Mapping[str, Any]) -> str:
@@ -448,6 +482,17 @@ class DependencyHealthStore:
                 llm["failure_class"] = "GENERATION_HEALTH_EXPIRED"
         grouped: Dict[str, list[Mapping[str, Any]]] = {}
         for row in self._document.get("dependencies", {}).values():
+            data_timestamp = _parse_timestamp(row.get("data_timestamp"))
+            max_age_seconds = row.get("max_age_seconds")
+            if (
+                row.get("status") in {HEALTHY, DEGRADED}
+                and data_timestamp is not None
+                and max_age_seconds is not None
+                and (_now() - data_timestamp).total_seconds() > int(max_age_seconds)
+            ):
+                row["status"] = STALE
+                row["usable"] = False
+                row["failure_class"] = "FRESHNESS_EXPIRED"
             if row.get("dependency_id") == "qwen-omlx" and row.get("category") == "LLM_RESEARCH":
                 # Preserve old local-Qwen evidence on disk without allowing a
                 # dormant/local provider to make Codex/Luna research ready.
@@ -456,9 +501,40 @@ class DependencyHealthStore:
         categories: Dict[str, Any] = {}
         for category, rows in grouped.items():
             statuses = _category_status(rows)
+
+            def _freshness_expiry(row: Mapping[str, Any]) -> Optional[str]:
+                llm_expiry = (row.get("generation") or {}).get("freshness_expires_at")
+                if llm_expiry or row.get("generation_freshness_expires_at"):
+                    return llm_expiry or row.get("generation_freshness_expires_at")
+                timestamp = _parse_timestamp(row.get("data_timestamp"))
+                max_age = row.get("max_age_seconds")
+                if timestamp is not None and max_age is not None:
+                    return (timestamp + timedelta(seconds=int(max_age))).isoformat()
+                return None
+
+            source_events = [
+                row.get("data_timestamp") or row.get("last_success_at") or row.get("last_attempt_at")
+                for row in rows
+                if row.get("data_timestamp") or row.get("last_success_at") or row.get("last_attempt_at")
+            ]
+            fresh_until = [expiry for row in rows if (expiry := _freshness_expiry(row))]
+            reason = next((
+                f"{row.get('dependency_id')}:{row.get('status')}"
+                for row in rows if row.get("status") not in {HEALTHY, DISABLED}
+            ), None)
             categories[category] = {
+                "key": category,
                 "category": category,
+                "owner_component": "DSA",
+                "purpose": _CATEGORY_PURPOSE.get(category, "DSA research dependency"),
                 "status": statuses,
+                "reason": reason,
+                "reason_code": reason,
+                "observed_at": _iso(),
+                "source_event_at": max(source_events) if source_events else None,
+                "fresh_until": min(fresh_until) if fresh_until else None,
+                "stale_at": min(fresh_until) if fresh_until else None,
+                "source": "dsa_dependency_health_store",
                 "dependency_ids": [row.get("dependency_id") for row in rows],
                 "critical": category in CRITICAL_CATEGORIES,
                 "reasons": [
@@ -468,46 +544,9 @@ class DependencyHealthStore:
                 ],
             }
         self._document["categories"] = categories
-        self._document["readiness"] = self._readiness_locked()
-
-    def _readiness_locked(self) -> Dict[str, Any]:
-        categories = self._document.get("categories", {})
-        reasons = []
-        blocked = []
-        degraded = []
-        for category in CRITICAL_CATEGORIES:
-            row = categories.get(category)
-            status = str((row or {}).get("status") or UNKNOWN)
-            if status in {FAILED, STALE, UNKNOWN, DISABLED}:
-                blocked.append(category)
-                reasons.append(f"{category}:{status}")
-            elif status == DEGRADED:
-                if category == "LLM_RESEARCH":
-                    # A model generation that is reachable but not usable is
-                    # still unsafe for autonomous research.  Only a fresh,
-                    # successful Codex/Luna generation may clear this gate.
-                    blocked.append(category)
-                    reasons.append(f"{category}:{status}")
-                else:
-                    degraded.append(category)
-                    reasons.append(f"{category}:{status}")
-        news = categories.get("NEWS_SEARCH")
-        advisories = []
-        if news and news.get("status") not in {HEALTHY, DISABLED}:
-            advisories.append(f"NEWS_SEARCH:{news.get('status')}")
-        readiness = READINESS_BLOCKED if blocked else (READINESS_DEGRADED if degraded or reasons else READINESS_READY)
-        return {
-            "AUTONOMOUS_SIMULATION_READINESS": readiness,
-            "reasons": reasons,
-            "advisories": advisories,
-            "advisory_categories": ["NEWS_SEARCH"] if advisories else [],
-            "blocked_categories": blocked,
-            "degraded_categories": degraded,
-            "simulation_only": True,
-            "execution_authority": "ATHENA_ONLY",
-            "dsa_execution_authority": False,
-            "proof_order": False,
-        }
+        self._document["readiness"] = evaluate_dsa_research_readiness(
+            {"categories": categories}
+        )
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
@@ -598,13 +637,12 @@ def configured_dependency_inventory() -> list[Dict[str, Any]]:
         {"dependency_id": "serpapi", "category": "NEWS_SEARCH", "configured": _env_configured("SERPAPI_API_KEYS"), "enabled": _env_configured("SERPAPI_API_KEYS"), "role": "AUXILIARY", "priority": 99, "endpoint": "https://serpapi.com"},
         {"dependency_id": "minimax-search", "category": "NEWS_SEARCH", "configured": _env_configured("MINIMAX_API_KEYS"), "enabled": _env_configured("MINIMAX_API_KEYS"), "role": "AUXILIARY", "priority": 99, "endpoint": "https://api.minimax.chat"},
         {"dependency_id": "anspire", "category": "NEWS_SEARCH", "configured": _env_configured("ANSPIRE_API_KEYS"), "enabled": _env_configured("ANSPIRE_API_KEYS"), "role": "AUXILIARY", "priority": 99, "endpoint": "https://api.anspire.cn"},
-        {"dependency_id": "tushare", "category": "MARKET_DATA", "configured": _env_configured("TUSHARE_TOKEN"), "enabled": _env_configured("TUSHARE_TOKEN"), "role": "PRIMARY", "priority": 1, "endpoint": "https://api.tushare.pro"},
-        {"dependency_id": "tickflow", "category": "MARKET_DATA", "configured": _env_configured("TICKFLOW_API_KEY"), "enabled": _env_configured("TICKFLOW_API_KEY"), "role": "AUXILIARY", "priority": 99},
-        {"dependency_id": "efinance", "category": "MARKET_DATA", "configured": True, "enabled": True, "role": "FALLBACK", "priority": 2, "endpoint": "https://www.efinance.com.cn"},
-        {"dependency_id": "sina", "category": "MARKET_DATA", "configured": True, "enabled": True, "role": "FALLBACK", "priority": 3, "endpoint": "https://finance.sina.com.cn"},
-        {"dependency_id": "eastmoney", "category": "MARKET_DATA", "configured": True, "enabled": True, "role": "FALLBACK", "priority": 4, "endpoint": "https://datacenter.eastmoney.com"},
-        {"dependency_id": "akshare", "category": "MARKET_DATA", "configured": True, "enabled": True, "role": "FALLBACK", "priority": 3, "endpoint": "https://akshare.akfamily.xyz"},
-        {"dependency_id": "calendar-akshare", "category": "TRADING_CALENDAR", "configured": True, "enabled": True, "role": "PRIMARY", "priority": 1, "endpoint": "https://finance.sina.com.cn"},
+        {"dependency_id": "tushare", "category": "RESEARCH_MARKET_DATA", "configured": _env_configured("TUSHARE_TOKEN"), "enabled": _env_configured("TUSHARE_TOKEN"), "role": "PRIMARY", "priority": 1, "endpoint": "https://api.tushare.pro"},
+        {"dependency_id": "tickflow", "category": "RESEARCH_MARKET_DATA", "configured": _env_configured("TICKFLOW_API_KEY"), "enabled": _env_configured("TICKFLOW_API_KEY"), "role": "AUXILIARY", "priority": 99},
+        {"dependency_id": "efinance", "category": "RESEARCH_MARKET_DATA", "configured": True, "enabled": True, "role": "FALLBACK", "priority": 2, "endpoint": "https://www.efinance.com.cn"},
+        {"dependency_id": "sina", "category": "RESEARCH_MARKET_DATA", "configured": True, "enabled": True, "role": "FALLBACK", "priority": 3, "endpoint": "https://finance.sina.com.cn"},
+        {"dependency_id": "eastmoney", "category": "RESEARCH_MARKET_DATA", "configured": True, "enabled": True, "role": "FALLBACK", "priority": 4, "endpoint": "https://datacenter.eastmoney.com"},
+        {"dependency_id": "akshare", "category": "RESEARCH_MARKET_DATA", "configured": True, "enabled": True, "role": "FALLBACK", "priority": 3, "endpoint": "https://akshare.akfamily.xyz"},
     ]
     return inventory
 
@@ -703,4 +741,5 @@ __all__ = [
     "READINESS_READY", "READINESS_DEGRADED", "READINESS_BLOCKED",
     "CRITICAL_CATEGORIES", "DependencyHealthStore", "DependencyHealthMonitor",
     "configured_dependency_inventory", "get_dependency_health_store",
+    "evaluate_dsa_research_readiness",
 ]

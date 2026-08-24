@@ -79,7 +79,9 @@ def test_critical_unobserved_dependencies_fail_closed(tmp_path):
     store.record_result("calendar", category="TRADING_CALENDAR", configured=True, enabled=True)
     readiness = store.snapshot()["readiness"]
     assert readiness["AUTONOMOUS_SIMULATION_READINESS"] == "BLOCKED"
-    assert "TRADING_CALENDAR:UNKNOWN" in readiness["reasons"]
+    assert "RESEARCH_MARKET_DATA:UNKNOWN" in readiness["reasons"]
+    assert "MARKET_CONTEXT:UNKNOWN" in readiness["reasons"]
+    assert "TRADING_CALENDAR:UNKNOWN" not in readiness["reasons"]
 
 
 def test_codex_identity_metadata_cannot_promote_failed_generation(tmp_path):

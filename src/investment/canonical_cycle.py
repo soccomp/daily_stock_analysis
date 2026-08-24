@@ -49,7 +49,7 @@ STAGE_TERMINAL_STATES = frozenset(
     {"SUCCEEDED", "FAILED", "BLOCKED", "NO_ACTION", "SKIPPED", "PARTIAL"}
 )
 CURRENT_WORK_STATES = frozenset(
-    {"RUNNING", "SUCCEEDED", "FAILED", "BLOCKED", "NO_ACTION", "IDLE"}
+    {"RUNNING", "SUCCEEDED", "FAILED", "BLOCKED", "DEFERRED", "NO_ACTION", "IDLE"}
 )
 
 
@@ -264,6 +264,9 @@ class CanonicalCycleRepository:
         no_action_count: int | None = None,
         blocked_count: int | None = None,
         failed_count: int | None = None,
+        deferred_count: int | None = None,
+        cycle_deadline: datetime | None = None,
+        candidate_reserve_seconds: int | None = None,
         research_trigger_ids: Iterable[object] | None = None,
         proposal_ids: Iterable[object] | None = None,
         acknowledgement_ids: Iterable[object] | None = None,
@@ -286,11 +289,18 @@ class CanonicalCycleRepository:
                 ("no_action_count", no_action_count),
                 ("blocked_count", blocked_count),
                 ("failed_count", failed_count),
+                ("deferred_count", deferred_count),
             ):
                 if value is not None:
                     if int(value) < 0:
                         raise ValueError(f"{field} cannot be negative")
                     setattr(row, field, int(value))
+            if cycle_deadline is not None:
+                row.cycle_deadline = to_utc_naive_datetime(cycle_deadline)
+            if candidate_reserve_seconds is not None:
+                if int(candidate_reserve_seconds) < 0:
+                    raise ValueError("candidate_reserve_seconds cannot be negative")
+                row.candidate_reserve_seconds = int(candidate_reserve_seconds)
             for field, values in (
                 ("research_trigger_ids_json", research_trigger_ids),
                 ("proposal_ids_json", proposal_ids),
@@ -487,6 +497,16 @@ class CanonicalCycleRepository:
                 if current is not None and current.started_at is not None
                 else None
             ),
+            "cycle_deadline": self._iso(current.cycle_deadline) if current else None,
+            "remaining_seconds": (
+                max(0, int((current.cycle_deadline - now).total_seconds()))
+                if current is not None and current.cycle_deadline is not None
+                else None
+            ),
+            "candidate_count": int(current.candidate_count or 0) if current else 0,
+            "proposal_count": int(current.proposal_count or 0) if current else 0,
+            "deferred_count": int(current.deferred_count or 0) if current else 0,
+            "failed_count": int(current.failed_count or 0) if current else 0,
             "last_terminal_cycle_id": terminal.cycle_id if terminal else None,
             "last_terminal_status": terminal.status if terminal else None,
             "last_terminal_reason": (
@@ -601,6 +621,9 @@ class CanonicalCycleRepository:
             "no_action_count": int(row.no_action_count or 0),
             "blocked_count": int(row.blocked_count or 0),
             "failed_count": int(row.failed_count or 0),
+            "deferred_count": int(row.deferred_count or 0),
+            "cycle_deadline": cls._iso(row.cycle_deadline),
+            "candidate_reserve_seconds": row.candidate_reserve_seconds,
             "research_trigger_ids": _ids(row.research_trigger_ids_json),
             "proposal_ids": _ids(row.proposal_ids_json),
             "acknowledgement_ids": _ids(row.acknowledgement_ids_json),

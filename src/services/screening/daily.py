@@ -514,7 +514,7 @@ def _persist_dependency_observation(
         configured = source != "tushare" or _has_tushare_token()
         get_dependency_health_store().record_result(
             source,
-            category="MARKET_DATA",
+            category="RESEARCH_MARKET_DATA",
             configured=configured,
             enabled=True,
             role="PRIMARY" if source in {"tushare", "tencent"} else "FALLBACK",
