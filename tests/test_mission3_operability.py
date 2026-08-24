@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from src.services.mission3_operability import Mission3OperabilityService
 
 
@@ -34,7 +36,8 @@ class _Canonical:
 
 def test_mission3_operability_is_read_only_and_keeps_canonical_facts():
     result = Mission3OperabilityService(
-        readiness_service=_Readiness(), health_store=_Health(), canonical_repository=_Canonical()
+        readiness_service=_Readiness(), health_store=_Health(), canonical_repository=_Canonical(),
+        clock=lambda: datetime(2026, 8, 24, 2, tzinfo=timezone.utc),
     ).get()
 
     assert result["read_only"] is True
@@ -45,3 +48,10 @@ def test_mission3_operability_is_read_only_and_keeps_canonical_facts():
     assert result["canonical_cycle"]["current_cycle_id"] == "canonical-cycle-1"
     assert result["canonical_cycle"]["current_stage"] == "MARKET_REVIEW"
     assert result["recurring_scheduler"]["next_run_at"] == "2026-08-24T06:00:00+00:00"
+    assert result["natural_work_admission"] == {
+        "allowed": True,
+        "reason_code": "LEGAL_TRADING_SESSION",
+        "market_phase": "intraday",
+        "observed_at": "2026-08-24T02:00:00+00:00",
+        "source": "evaluate_natural_cycle_admission",
+    }
