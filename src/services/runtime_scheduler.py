@@ -7,11 +7,16 @@ import logging
 import os
 import threading
 import _thread
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from src.config import Config, get_config
+from src.investment.canonical_cycle import (
+    CANONICAL_CYCLE_TASK,
+    CanonicalCycleRepository,
+)
+from src.investment.m2.identity import cycle_id as build_cycle_id, cycle_slot
 from src.scheduler import Scheduler, normalize_schedule_times
 
 logger = logging.getLogger(__name__)
@@ -55,6 +60,91 @@ def run_with_global_analysis_lock(
     finally:
         _RUNTIME_ANALYSIS_LOCK.release()
     return True
+
+
+def _proposal_handoff_cycle_identity(
+    config: Config,
+    observed_at: datetime,
+) -> tuple[str, datetime]:
+    try:
+        interval_minutes = max(
+            1,
+            min(1440, int(getattr(config, "single_brain_m2_interval_minutes", 60))),
+        )
+    except (TypeError, ValueError):
+        interval_minutes = 60
+    slot = cycle_slot(observed_at, interval_minutes=interval_minutes)
+    return (
+        build_cycle_id(account_id="dsa-proposal-authority", scheduled_for=slot),
+        slot,
+    )
+
+
+def _persist_proposal_handoff_terminal(
+    config: Config,
+    *,
+    observed_at: datetime,
+    status: str,
+    reason_code: str,
+    reason_detail: object,
+    lock_acquired_at: datetime | None = None,
+) -> None:
+    """Persist scheduler-owned outcomes when the handoff service is not entered."""
+
+    cycle_id, scheduled_for = _proposal_handoff_cycle_identity(config, observed_at)
+    repository = CanonicalCycleRepository()
+    existing = repository.get_cycle(cycle_id)
+    if existing is None:
+        repository.start_cycle(
+            cycle_id=cycle_id,
+            scheduler_task_name=CANONICAL_CYCLE_TASK,
+            scheduled_for=scheduled_for,
+            source_runtime_identity="DSA:ProposalHandoffLoopService",
+            now=observed_at,
+        )
+        repository.set_stage(
+            cycle_id=cycle_id,
+            stage="SCHEDULER",
+            state="SUCCEEDED",
+            object_id=cycle_id,
+            reason_code="CYCLE_STARTED",
+            at=observed_at,
+        )
+    if lock_acquired_at is not None:
+        repository.record_lock(cycle_id=cycle_id, acquired_at=lock_acquired_at)
+        repository.set_stage(
+            cycle_id=cycle_id,
+            stage="LOCK",
+            state="SUCCEEDED",
+            reason_code="GLOBAL_ANALYSIS_LOCK_ACQUIRED",
+            at=lock_acquired_at,
+        )
+    else:
+        repository.set_stage(
+            cycle_id=cycle_id,
+            stage="LOCK",
+            state="BLOCKED",
+            reason_code="GLOBAL_ANALYSIS_LOCK_UNAVAILABLE",
+            reason_detail="the shared analysis lock was held by another natural run",
+            at=observed_at,
+        )
+    current = repository.get_cycle(cycle_id)
+    if current is not None and current.get("status") in {
+        "SUCCEEDED",
+        "PARTIAL",
+        "FAILED",
+        "SKIPPED",
+        "BLOCKED",
+        "NO_ACTION",
+    }:
+        return
+    repository.finish_cycle(
+        cycle_id=cycle_id,
+        status=status,
+        terminal_reason_code=reason_code,
+        terminal_reason_detail=reason_detail,
+        lock_released_at=datetime.now(timezone.utc),
+    )
 
 
 def _agent_event_monitor_interval_seconds(config: Config) -> int:
@@ -132,6 +222,14 @@ def build_single_brain_m2_background_tasks(
     def m2_shadow_task() -> None:
         current_config = config_provider()
         if not getattr(current_config, "single_brain_m2_enabled", False):
+            if execution_mode == "PROPOSAL_HANDOFF":
+                _persist_proposal_handoff_terminal(
+                    current_config,
+                    observed_at=datetime.now(timezone.utc),
+                    status="SKIPPED",
+                    reason_code="HANDOFF_DISABLED",
+                    reason_detail="proposal handoff was disabled after task registration",
+                )
             return
         current_mode = str(
             getattr(current_config, "single_brain_execution_mode", "SHADOW")
@@ -142,6 +240,16 @@ def build_single_brain_m2_background_tasks(
                 execution_mode,
                 current_mode,
             )
+            if execution_mode == "PROPOSAL_HANDOFF":
+                _persist_proposal_handoff_terminal(
+                    current_config,
+                    observed_at=datetime.now(timezone.utc),
+                    status="SKIPPED",
+                    reason_code="SCHEDULER_MODE_CHANGED",
+                    reason_detail=(
+                        f"registered mode {execution_mode} changed to {current_mode}"
+                    ),
+                )
             return
 
         def run_once(
@@ -152,7 +260,12 @@ def build_single_brain_m2_background_tasks(
             if execution_mode == "PROPOSAL_HANDOFF":
                 from src.investment.proposal.orchestration import ProposalHandoffLoopService
 
-                result = ProposalHandoffLoopService.from_config(loaded_config).run_cycle()
+                lock_acquired_at = datetime.now(timezone.utc)
+                result = ProposalHandoffLoopService.from_config(loaded_config).run_cycle(
+                    lock_acquired_at=lock_acquired_at,
+                    require_market_review_context=True,
+                    scheduler_task_name=CANONICAL_CYCLE_TASK,
+                )
                 persisted_count = len(result.proposal_ids)
             else:
                 from src.investment.m2.orchestration import M2ShadowLoopService
@@ -167,13 +280,33 @@ def build_single_brain_m2_background_tasks(
                 persisted_count,
             )
 
-        acquired = run_with_global_analysis_lock(
-            run_once,
-            current_config,
-            None,
-            blocking=False,
-        )
+        try:
+            acquired = run_with_global_analysis_lock(
+                run_once,
+                current_config,
+                None,
+                blocking=False,
+            )
+        except Exception as exc:
+            if execution_mode == "PROPOSAL_HANDOFF":
+                _persist_proposal_handoff_terminal(
+                    current_config,
+                    observed_at=datetime.now(timezone.utc),
+                    status="FAILED",
+                    reason_code="HANDOFF_CONSTRUCTION_FAILED",
+                    reason_detail=exc,
+                    lock_acquired_at=datetime.now(timezone.utc),
+                )
+            raise
         if not acquired:
+            if execution_mode == "PROPOSAL_HANDOFF":
+                _persist_proposal_handoff_terminal(
+                    current_config,
+                    observed_at=datetime.now(timezone.utc),
+                    status="SKIPPED",
+                    reason_code="GLOBAL_ANALYSIS_LOCK_UNAVAILABLE",
+                    reason_detail="the shared analysis lock was held by another natural run",
+                )
             logger.warning("Single Brain cycle skipped: analysis_already_running")
 
     return [{
@@ -567,16 +700,100 @@ class RuntimeSchedulerService:
                 "running": bool(entry.get("running", False)),
                 "next_run_at": next_run_at,
             })
+        canonical_projection: dict[str, Any] | None = None
+        try:
+            config = self._config_provider()
+            if str(getattr(config, "single_brain_execution_mode", "")).strip().upper() == "PROPOSAL_HANDOFF":
+                canonical_projection = CanonicalCycleRepository().scheduler_projection(
+                    scheduler_task_name=CANONICAL_CYCLE_TASK
+                )
+        except Exception as exc:  # pragma: no cover - status must remain readable
+            logger.debug("Canonical cycle projection unavailable: %s", exc)
+        if canonical_projection is not None:
+            for task in background_tasks:
+                if task.get("name") == CANONICAL_CYCLE_TASK:
+                    task.update(
+                        {
+                            "current_cycle_id": canonical_projection["current_cycle_id"],
+                            "current_status": canonical_projection["current_status"],
+                            "current_stage": canonical_projection["current_stage"],
+                            "last_run_at": canonical_projection["last_run_at"],
+                            "last_success_at": canonical_projection["last_success_at"],
+                            "last_error": canonical_projection["last_error"],
+                            "last_terminal_cycle_id": canonical_projection["last_terminal_cycle_id"],
+                            "last_terminal_status": canonical_projection["last_terminal_status"],
+                        }
+                    )
         return {
             "enabled": self._enabled,
             "mode": self._mode,
             "running": running,
             "schedule_times": schedule_times,
             "next_run_at": next_run,
-            "last_run_at": self._last_run_at,
-            "last_success_at": self._last_success_at,
-            "last_error": self._last_error,
-            "last_skipped_at": self._last_skipped_at,
-            "last_skip_reason": self._last_skip_reason,
+            "last_run_at": (
+                canonical_projection["last_run_at"]
+                if canonical_projection is not None
+                else self._last_run_at
+            ),
+            "last_success_at": (
+                canonical_projection["last_success_at"]
+                if canonical_projection is not None
+                else self._last_success_at
+            ),
+            "last_error": (
+                canonical_projection["last_error"]
+                if canonical_projection is not None
+                else self._last_error
+            ),
+            "last_skipped_at": (
+                canonical_projection["last_skipped_at"]
+                if canonical_projection is not None
+                else self._last_skipped_at
+            ),
+            "last_skip_reason": (
+                canonical_projection["last_skip_reason"]
+                if canonical_projection is not None
+                else self._last_skip_reason
+            ),
+            "current_cycle_id": (
+                canonical_projection["current_cycle_id"]
+                if canonical_projection is not None
+                else None
+            ),
+            "current_status": (
+                canonical_projection["current_status"]
+                if canonical_projection is not None
+                else None
+            ),
+            "current_stage": (
+                canonical_projection["current_stage"]
+                if canonical_projection is not None
+                else None
+            ),
+            "current_cycle_started_at": (
+                canonical_projection["started_at"]
+                if canonical_projection is not None
+                else None
+            ),
+            "current_cycle_elapsed_seconds": (
+                canonical_projection["elapsed_seconds"]
+                if canonical_projection is not None
+                else None
+            ),
+            "last_terminal_cycle_id": (
+                canonical_projection["last_terminal_cycle_id"]
+                if canonical_projection is not None
+                else None
+            ),
+            "last_terminal_status": (
+                canonical_projection["last_terminal_status"]
+                if canonical_projection is not None
+                else None
+            ),
+            "last_terminal_reason": (
+                canonical_projection["last_terminal_reason"]
+                if canonical_projection is not None
+                else None
+            ),
             "background_tasks": background_tasks,
         }

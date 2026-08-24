@@ -10,6 +10,11 @@ from decimal import Decimal
 from typing import Callable
 
 from src.config import Config
+from src.investment.canonical_cycle import (
+    CANONICAL_CYCLE_TASK,
+    CanonicalCycleRepository,
+    canonical_terminal_for_result,
+)
 from src.investment.m2.identity import analysis_query_id, cycle_id as build_cycle_id, cycle_slot
 from src.investment.m2.orchestration import DSAAnalysisCompletionRunner
 from src.investment.m2.screening_candidates import (
@@ -53,6 +58,32 @@ class ProposalHandoffRunResult:
     no_action_outcome: dict[str, object] | None = None
     research_trigger_ids: tuple[str, ...] = ()
     market_review_linkage: dict[str, object] | None = None
+    candidate_count: int = 0
+    failed_count: int = 0
+    candidate_outcomes: tuple[dict[str, object], ...] = ()
+    canonical_cycle: dict[str, object] | None = None
+
+
+class _NoopCanonicalCycleRepository:
+    """Keep legacy direct unit invocations free of scheduler ledger writes."""
+
+    def start_cycle(self, **_kwargs):
+        return None
+
+    def set_stage(self, **_kwargs):
+        return None
+
+    def update_identity_and_counts(self, **_kwargs):
+        return None
+
+    def record_lock(self, **_kwargs):
+        return None
+
+    def finish_cycle(self, **_kwargs):
+        return None
+
+    def get_cycle(self, _cycle_id):
+        return None
 
 
 class ProposalHandoffLoopService:
@@ -125,35 +156,246 @@ class ProposalHandoffLoopService:
         *,
         scheduled_for: datetime | None = None,
         market_review_context: Mapping[str, object] | None = None,
+        lock_acquired_at: datetime | None = None,
+        require_market_review_context: bool = False,
+        scheduler_task_name: str = CANONICAL_CYCLE_TASK,
     ) -> ProposalHandoffRunResult:
         if not bool(getattr(self._config, "single_brain_m2_enabled", False)):
             return ProposalHandoffRunResult(None, "DISABLED")
         now = self._clock()
         if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
-            return ProposalHandoffRunResult(None, "FAILED_CLOSED", blocked_reasons=("proposal clock must be timezone-aware",))
+            return ProposalHandoffRunResult(
+                None,
+                "FAILED_CLOSED",
+                blocked_reasons=("proposal clock must be timezone-aware",),
+            )
         interval = int(getattr(self._config, "single_brain_m2_interval_minutes", 60))
         slot = cycle_slot(scheduled_for or now, interval_minutes=interval)
         cycle = build_cycle_id(account_id="dsa-proposal-authority", scheduled_for=slot)
+        canonical_enabled = (
+            lock_acquired_at is not None
+            or market_review_context is not None
+            or require_market_review_context
+        )
+        if not canonical_enabled:
+            return self._run_cycle_body(
+                scheduled_for=scheduled_for,
+                market_review_context=market_review_context,
+                now=now,
+                slot=slot,
+                cycle=cycle,
+                interval=interval,
+                canonical=_NoopCanonicalCycleRepository(),
+                require_market_review_context=require_market_review_context,
+            )
+        canonical = CanonicalCycleRepository()
+        canonical.start_cycle(
+            cycle_id=cycle,
+            scheduler_task_name=scheduler_task_name,
+            scheduled_for=slot,
+            source_runtime_identity="DSA:ProposalHandoffLoopService",
+            now=now,
+        )
+        canonical.set_stage(
+            cycle_id=cycle,
+            stage="SCHEDULER",
+            state="SUCCEEDED",
+            object_id=cycle,
+            reason_code="CYCLE_STARTED",
+            at=now,
+        )
+        if lock_acquired_at is None:
+            canonical.set_stage(
+                cycle_id=cycle,
+                stage="LOCK",
+                state="NOT_ENTERED",
+                reason_code="LOCK_OWNERSHIP_CALLER",
+                reason_detail="direct service invocation did not own the global scheduler lock",
+                at=now,
+            )
+        else:
+            canonical.record_lock(cycle_id=cycle, acquired_at=lock_acquired_at)
+            canonical.set_stage(
+                cycle_id=cycle,
+                stage="LOCK",
+                state="SUCCEEDED",
+                reason_code="GLOBAL_ANALYSIS_LOCK_ACQUIRED",
+                at=lock_acquired_at,
+            )
+        try:
+            result = self._run_cycle_body(
+                scheduled_for=scheduled_for,
+                market_review_context=market_review_context,
+                now=now,
+                slot=slot,
+                cycle=cycle,
+                interval=interval,
+                canonical=canonical,
+                require_market_review_context=require_market_review_context,
+            )
+        except Exception as exc:
+            canonical.finish_cycle(
+                cycle_id=cycle,
+                status="FAILED",
+                terminal_reason_code="UNEXPECTED_EXCEPTION",
+                terminal_reason_detail=exc,
+                lock_released_at=datetime.now(timezone.utc),
+            )
+            raise
+
+        terminal_status, terminal_reason = canonical_terminal_for_result(
+            result_status=result.status,
+            blocked_reasons=result.blocked_reasons,
+        )
+        canonical.update_identity_and_counts(
+            cycle_id=cycle,
+            candidate_count=result.candidate_count,
+            proposal_count=len(result.proposal_ids),
+            ack_count=len(result.acknowledgements),
+            no_action_count=(
+                1
+                if result.status == "NO_ACTION"
+                else sum(
+                    item.lifecycle_state == "NO_ACTION"
+                    for item in result.acknowledgements
+                )
+            ),
+            blocked_count=len(result.blocked_reasons),
+            failed_count=result.failed_count,
+            research_trigger_ids=result.research_trigger_ids,
+            proposal_ids=result.proposal_ids,
+            acknowledgement_ids=tuple(
+                item.acknowledgement_id for item in result.acknowledgements
+            ),
+            candidate_outcomes=result.candidate_outcomes,
+        )
+        canonical.finish_cycle(
+            cycle_id=cycle,
+            status=terminal_status,
+            terminal_reason_code=terminal_reason,
+            terminal_reason_detail="; ".join(result.blocked_reasons),
+            lock_released_at=datetime.now(timezone.utc),
+        )
+        return ProposalHandoffRunResult(
+            **{
+                **result.__dict__,
+                "canonical_cycle": canonical.get_cycle(cycle),
+            }
+        )
+
+    def _run_cycle_body(
+        self,
+        *,
+        scheduled_for: datetime | None = None,
+        market_review_context: Mapping[str, object] | None = None,
+        now: datetime,
+        slot: datetime,
+        cycle: str,
+        interval: int,
+        canonical: CanonicalCycleRepository,
+        require_market_review_context: bool,
+    ) -> ProposalHandoffRunResult:
         linkage_repository = MarketReviewLinkageRepository()
         resolved_market_context = (
             dict(market_review_context)
             if market_review_context is not None
             else linkage_repository.latest_market_context(
-                trade_date=now.astimezone(timezone.utc).date()
+                trade_date=now.astimezone(timezone.utc).date(),
+                as_of=now,
             )
         )
         if market_review_context is not None:
             try:
                 linkage_repository.validate_context(resolved_market_context or {})
             except (TypeError, ValueError) as exc:
+                for stage in ("MARKET_REVIEW", "MARKET_CONTEXT"):
+                    canonical.set_stage(
+                        cycle_id=cycle,
+                        stage=stage,
+                        state="BLOCKED",
+                        reason_code="MARKET_CONTEXT_INVALID",
+                        reason_detail=exc,
+                        at=now,
+                    )
+                for stage in (
+                    "RESEARCH_TRIGGER",
+                    "CANDIDATE_EVALUATION",
+                    "RESEARCH_BUNDLE",
+                    "INVESTMENT_PROPOSAL",
+                    "ATHENA_HANDOFF_ACK",
+                ):
+                    canonical.set_stage(
+                        cycle_id=cycle,
+                        stage=stage,
+                        state="NOT_ENTERED",
+                        reason_code="UPSTREAM_STAGE_FAILED",
+                        at=now,
+                    )
                 return ProposalHandoffRunResult(
                     cycle,
                     "FAILED_CLOSED",
                     blocked_reasons=(f"market review identity linkage failed: {exc}",),
                 )
+        if resolved_market_context is None:
+            for stage in ("MARKET_REVIEW", "MARKET_CONTEXT"):
+                canonical.set_stage(
+                    cycle_id=cycle,
+                    stage=stage,
+                    state="NOT_ENTERED",
+                    reason_code="NO_PERSISTED_MARKET_CONTEXT",
+                    reason_detail="no causal MarketContext was available at the cycle cutoff",
+                    at=now,
+                )
+            if require_market_review_context:
+                for stage in (
+                    "RESEARCH_TRIGGER",
+                    "CANDIDATE_EVALUATION",
+                    "RESEARCH_BUNDLE",
+                    "INVESTMENT_PROPOSAL",
+                    "ATHENA_HANDOFF_ACK",
+                ):
+                    canonical.set_stage(
+                        cycle_id=cycle,
+                        stage=stage,
+                        state="NOT_ENTERED",
+                        reason_code="MARKET_CONTEXT_REQUIRED",
+                        at=now,
+                    )
+                return ProposalHandoffRunResult(
+                    cycle,
+                    "FAILED_CLOSED",
+                    blocked_reasons=(
+                        "market review context is required for canonical proposal handoff",
+                    ),
+                )
+        else:
+            canonical.update_identity_and_counts(
+                cycle_id=cycle,
+                market_review_id=str(resolved_market_context["market_review_id"]),
+                market_context_id=str(resolved_market_context["context_id"]),
+            )
+            canonical.set_stage(
+                cycle_id=cycle,
+                stage="MARKET_REVIEW",
+                state="SUCCEEDED",
+                object_id=str(resolved_market_context["market_review_id"]),
+                parent_ref=str(resolved_market_context["source_task_id"]),
+                reason_code="EXPLICIT_CYCLE_CONTEXT",
+                at=now,
+            )
+            canonical.set_stage(
+                cycle_id=cycle,
+                stage="MARKET_CONTEXT",
+                state="SUCCEEDED",
+                object_id=str(resolved_market_context["context_id"]),
+                parent_ref=str(resolved_market_context["market_review_id"]),
+                reason_code="EXPLICIT_CYCLE_CONTEXT",
+                at=now,
+            )
         proposal_ids: list[str] = []
         acknowledgements: list[AthenaProposalAcknowledgement] = []
         blocked: list[str] = []
+        candidate_outcomes: list[dict[str, object]] = []
         try:
             authoritative_snapshot = self._snapshot_source.capture_snapshot()
             screening_candidates = self._load_screening_candidates()
@@ -173,12 +415,68 @@ class ProposalHandoffLoopService:
                     now=now,
                 )
         except Exception as exc:
+            canonical.set_stage(
+                cycle_id=cycle,
+                stage="CANDIDATE_EVALUATION",
+                state="FAILED",
+                reason_code="RESEARCH_SELECTION_FAILED",
+                reason_detail=exc,
+                at=now,
+            )
+            for stage in (
+                "RESEARCH_TRIGGER",
+                "RESEARCH_BUNDLE",
+                "INVESTMENT_PROPOSAL",
+                "ATHENA_HANDOFF_ACK",
+            ):
+                canonical.set_stage(
+                    cycle_id=cycle,
+                    stage=stage,
+                    state="NOT_ENTERED",
+                    reason_code="UPSTREAM_STAGE_FAILED",
+                    at=now,
+                )
             return ProposalHandoffRunResult(
                 cycle,
                 "FAILED_CLOSED",
                 blocked_reasons=(f"authoritative research selection failed: {exc}",),
             )
         researched = tuple(f"{scope['symbol']}:{scope['source']}" for scope in scopes)
+        trigger_ids = tuple(
+            str((scope.get("research_trigger") or {}).get("research_trigger_id") or "").strip()
+            for scope in scopes
+        )
+        trigger_ids = tuple(value for value in trigger_ids if value)
+        canonical.set_stage(
+            cycle_id=cycle,
+            stage="CANDIDATE_EVALUATION",
+            state="SUCCEEDED" if scopes else "NO_ACTION",
+            reason_code="CANDIDATE_SELECTION_COMPLETE" if scopes else "NO_CANDIDATES",
+            reason_detail=(
+                None if scopes else "no candidate satisfied strategy-evidence threshold"
+            ),
+            at=now,
+        )
+        canonical.set_stage(
+            cycle_id=cycle,
+            stage="RESEARCH_TRIGGER",
+            state=(
+                "SUCCEEDED"
+                if scopes and len(trigger_ids) == len(scopes)
+                else "NO_ACTION"
+                if not scopes
+                else "PARTIAL"
+            ),
+            object_ids=trigger_ids,
+            reason_code=(
+                "TRIGGERS_LINKED"
+                if scopes and len(trigger_ids) == len(scopes)
+                else "NO_CANDIDATES"
+                if not scopes
+                else "TRIGGER_LINKAGE_PARTIAL"
+            ),
+            at=now,
+        )
         if not scopes:
             no_action = MarketReviewOutcomeRepository().persist_no_action(
                 source_task_id=cycle,
@@ -202,6 +500,15 @@ class ProposalHandoffLoopService:
                         blocked_reasons=(f"market review identity linkage failed: {exc}",),
                         no_action_outcome=no_action,
                     )
+            for stage in ("RESEARCH_BUNDLE", "INVESTMENT_PROPOSAL", "ATHENA_HANDOFF_ACK"):
+                canonical.set_stage(
+                    cycle_id=cycle,
+                    stage=stage,
+                    state="NO_ACTION",
+                    reason_code="NO_CANDIDATES",
+                    reason_detail="durable NO_ACTION outcome recorded",
+                    at=now,
+                )
             return ProposalHandoffRunResult(
                 cycle,
                 "NO_ACTION",
@@ -211,6 +518,7 @@ class ProposalHandoffLoopService:
                 ),
                 no_action_outcome=no_action,
                 market_review_linkage=linkage,
+                candidate_count=0,
             )
         research_trigger_ids: list[str] = []
         for scope in scopes:
@@ -258,6 +566,17 @@ class ProposalHandoffLoopService:
                         reviewed_at=proposal_time,
                         interval_minutes=interval,
                     )
+                candidate_outcomes.append(
+                    {
+                        "symbol": symbol,
+                        "source": scope["source"],
+                        "status": "SUCCEEDED",
+                        "source_report_id": completion.source_report_id,
+                        "research_id": artifacts.research_bundle.research_id,
+                        "proposal_id": artifacts.proposal.proposal_id,
+                        "acknowledgement_id": acknowledgement.acknowledgement_id,
+                    }
+                )
                 logger.info(
                     "Issue #9 proposal accepted: proposal_id=%s acknowledgement_id=%s "
                     "acknowledgement_state=%s lifecycle_state=%s deduplicated=%s",
@@ -269,6 +588,17 @@ class ProposalHandoffLoopService:
                 )
             except Exception as exc:
                 blocked.append(f"{symbol}: {type(exc).__name__}: {exc}")
+                candidate_outcomes.append(
+                    {
+                        "symbol": symbol,
+                        "source": scope.get("source"),
+                        "status": "FAILED",
+                        "reason": f"{type(exc).__name__}: {exc}",
+                        "research_trigger_id": (
+                            scope.get("research_trigger") or {}
+                        ).get("research_trigger_id"),
+                    }
+                )
                 if self._trigger_coordinator is not None and scope.get("research_trigger"):
                     try:
                         self._trigger_coordinator.mark_failure(
@@ -293,6 +623,71 @@ class ProposalHandoffLoopService:
             except (TypeError, ValueError, MarketReviewLinkageConflictError) as exc:
                 blocked.append(f"market review identity linkage failed: {exc}")
         status = "COMPLETED" if proposal_ids and not blocked else "PARTIAL" if proposal_ids else "FAILED_CLOSED"
+        research_ids = tuple(
+            str(item["research_id"])
+            for item in candidate_outcomes
+            if item.get("research_id")
+        )
+        canonical.set_stage(
+            cycle_id=cycle,
+            stage="RESEARCH_BUNDLE",
+            state=(
+                "SUCCEEDED"
+                if len(research_ids) == len(scopes)
+                else "PARTIAL"
+                if research_ids
+                else "FAILED"
+            ),
+            object_ids=research_ids,
+            reason_code=(
+                "RESEARCH_BUNDLES_COMPLETE"
+                if len(research_ids) == len(scopes)
+                else "RESEARCH_BUNDLES_PARTIAL"
+                if research_ids
+                else "ALL_CANDIDATES_FAILED"
+            ),
+            at=now,
+        )
+        canonical.set_stage(
+            cycle_id=cycle,
+            stage="INVESTMENT_PROPOSAL",
+            state=(
+                "SUCCEEDED"
+                if len(proposal_ids) == len(scopes)
+                else "PARTIAL"
+                if proposal_ids
+                else "FAILED"
+            ),
+            object_ids=proposal_ids,
+            reason_code=(
+                "PROPOSALS_COMPLETE"
+                if len(proposal_ids) == len(scopes)
+                else "PROPOSALS_PARTIAL"
+                if proposal_ids
+                else "ALL_CANDIDATES_FAILED"
+            ),
+            at=now,
+        )
+        canonical.set_stage(
+            cycle_id=cycle,
+            stage="ATHENA_HANDOFF_ACK",
+            state=(
+                "SUCCEEDED"
+                if len(acknowledgements) == len(scopes)
+                else "PARTIAL"
+                if acknowledgements
+                else "FAILED"
+            ),
+            object_ids=tuple(item.acknowledgement_id for item in acknowledgements),
+            reason_code=(
+                "ACKS_COMPLETE"
+                if len(acknowledgements) == len(scopes)
+                else "ACKS_PARTIAL"
+                if acknowledgements
+                else "ALL_CANDIDATES_FAILED"
+            ),
+            at=now,
+        )
         return ProposalHandoffRunResult(
             cycle_id=cycle,
             status=status,
@@ -302,6 +697,9 @@ class ProposalHandoffLoopService:
             researched_symbols=researched,
             research_trigger_ids=tuple(research_trigger_ids),
             market_review_linkage=linkage,
+            candidate_count=len(scopes),
+            failed_count=len(blocked),
+            candidate_outcomes=tuple(candidate_outcomes),
         )
 
     def _load_screening_candidates(self) -> list[dict[str, object]]:

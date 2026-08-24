@@ -216,18 +216,32 @@ class MarketReviewLinkageRepository:
                 return None
             return rows[0].to_dict()
 
-    def latest_market_context(self, *, trade_date: date) -> dict[str, Any] | None:
-        """Resolve one unique persisted MarketContext for scheduler linkage."""
+    def latest_market_context(
+        self,
+        *,
+        trade_date: date,
+        as_of: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        """Resolve one explicit causal MarketContext for a cycle.
+
+        The old resolver treated multiple same-day contexts as inherently
+        ambiguous and returned ``None``.  A cycle now supplies its observation
+        cutoff, so the resolver chooses the newest real context at or before
+        that cutoff.  Equal-time distinct contexts remain fail-closed.
+        """
         with self.db.session_scope() as session:
             snapshots = (
-                session.query(AnalysisHistory.context_snapshot)
+                session.query(AnalysisHistory.context_snapshot, AnalysisHistory.created_at)
                 .filter(AnalysisHistory.report_type == "market_review")
                 .order_by(AnalysisHistory.created_at.desc(), AnalysisHistory.id.desc())
                 .all()
             )
-        candidates: dict[tuple[str, str], dict[str, Any]] = {}
-        hashes: dict[tuple[str, str], str] = {}
-        for (context_snapshot,) in snapshots:
+        cutoff = None
+        if as_of is not None:
+            cutoff = as_of if as_of.tzinfo else as_of.replace(tzinfo=timezone.utc)
+            cutoff = cutoff.astimezone(timezone.utc)
+        candidates: list[tuple[datetime, datetime, tuple[str, str], dict[str, Any], str]] = []
+        for context_snapshot, created_at in snapshots:
             try:
                 snapshot = json.loads(context_snapshot or "{}")
             except (TypeError, ValueError):
@@ -242,12 +256,26 @@ class MarketReviewLinkageRepository:
                     continue
                 if item_date != trade_date:
                     continue
-                key = (task_id, context_id)
-                prior_hash = hashes.get(key)
-                if prior_hash is not None and prior_hash != item_hash:
-                    return None
-                candidates[key] = dict(item)
-                hashes[key] = item_hash
-        if len(candidates) != 1:
+                item_as_of = _parse_timestamp(item.get("as_of"))
+                if item_as_of is None:
+                    continue
+                if cutoff is not None and item_as_of > cutoff:
+                    continue
+                created = created_at
+                if created is None:
+                    created = item_as_of.replace(tzinfo=None)
+                elif created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                else:
+                    created = created.astimezone(timezone.utc)
+                candidates.append(
+                    (item_as_of, created, (task_id, context_id), dict(item), item_hash)
+                )
+        if not candidates:
             return None
-        return next(iter(candidates.values()))
+        candidates.sort(key=lambda item: (item[0], item[1], item[2]))
+        latest_as_of = candidates[-1][0]
+        latest = [item for item in candidates if item[0] == latest_as_of]
+        if len({item[2] for item in latest}) != 1:
+            return None
+        return dict(latest[-1][3])

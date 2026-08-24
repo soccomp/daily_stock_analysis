@@ -63,7 +63,7 @@ from src.utils.sniper_points import extract_sniper_points, parse_sniper_value
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
-CURRENT_SCHEMA_VERSION = "2026-06-05-create-all-baseline"
+CURRENT_SCHEMA_VERSION = "2026-08-24-canonical-cycle-v1"
 INTELLIGENCE_ITEM_NULL_SCOPE_VALUE = "__dsa_null_scope__"
 
 # SQLAlchemy ORM 基类
@@ -1279,6 +1279,80 @@ class SingleBrainM2CycleRecord(Base):
     created_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
     updated_at = Column(DateTime, default=utc_naive_now, nullable=False, index=True)
     completed_at = Column(DateTime, index=True)
+
+
+class CanonicalCycleRecord(Base):
+    """Durable lifecycle/outcome ledger for one proposal-handoff cycle.
+
+    This is deliberately separate from the historical M2 shadow journal.  It
+    records the scheduler-owned lifecycle and never reinterprets old M2 rows
+    as canonical cycles.
+    """
+
+    __tablename__ = "canonical_cycles"
+
+    cycle_id = Column(String(160), primary_key=True)
+    schema_version = Column(String(32), nullable=False, default="1.0")
+    scheduler_task_name = Column(String(160), nullable=False, index=True)
+    scheduled_for = Column(DateTime, nullable=False, index=True)
+    created_at = Column(DateTime, nullable=False, index=True)
+    started_at = Column(DateTime, index=True)
+    ended_at = Column(DateTime, index=True)
+    lock_acquired_at = Column(DateTime)
+    lock_released_at = Column(DateTime)
+    status = Column(String(32), nullable=False, index=True)
+    terminal_reason_code = Column(String(96))
+    terminal_reason_detail = Column(Text)
+    current_stage = Column(String(64), index=True)
+    current_stage_at = Column(DateTime)
+    last_error = Column(Text)
+    market_review_id = Column(String(160), index=True)
+    market_context_id = Column(String(160), index=True)
+    candidate_count = Column(Integer, nullable=False, default=0)
+    proposal_count = Column(Integer, nullable=False, default=0)
+    ack_count = Column(Integer, nullable=False, default=0)
+    no_action_count = Column(Integer, nullable=False, default=0)
+    blocked_count = Column(Integer, nullable=False, default=0)
+    failed_count = Column(Integer, nullable=False, default=0)
+    research_trigger_ids_json = Column(Text, nullable=False, default="[]")
+    proposal_ids_json = Column(Text, nullable=False, default="[]")
+    acknowledgement_ids_json = Column(Text, nullable=False, default="[]")
+    candidate_outcomes_json = Column(Text, nullable=False, default="[]")
+    source_runtime_identity = Column(String(160), nullable=False)
+    updated_at = Column(DateTime, nullable=False, index=True)
+
+
+class CanonicalCycleStageRecord(Base):
+    """One idempotent stage projection for a canonical cycle."""
+
+    __tablename__ = "canonical_cycle_stages"
+
+    stage_event_id = Column(String(320), primary_key=True)
+    cycle_id = Column(
+        String(160),
+        ForeignKey("canonical_cycles.cycle_id"),
+        nullable=False,
+        index=True,
+    )
+    stage = Column(String(64), nullable=False, index=True)
+    state = Column(String(32), nullable=False, index=True)
+    entered_at = Column(DateTime, nullable=False)
+    completed_at = Column(DateTime)
+    object_id = Column(String(256))
+    object_ids_json = Column(Text, nullable=False, default="[]")
+    parent_ref = Column(String(256))
+    reason_code = Column(String(96))
+    reason_detail = Column(Text)
+    created_at = Column(DateTime, nullable=False, index=True)
+    updated_at = Column(DateTime, nullable=False, index=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "cycle_id",
+            "stage",
+            name="uix_canonical_cycle_stage",
+        ),
+    )
 
 
 class SingleBrainM2SymbolRecord(Base):
