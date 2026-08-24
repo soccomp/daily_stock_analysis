@@ -21,6 +21,7 @@ from api.v1.endpoints import (
     decision_scorecards,
     decision_signals,
     dependency_health,
+    mission3_operability,
     health,
     history,
     intelligence,
@@ -134,4 +135,10 @@ router.include_router(
     dependency_health.router,
     prefix="/dependencies",
     tags=["DependencyHealth"],
+)
+
+router.include_router(
+    mission3_operability.router,
+    prefix="/mission3",
+    tags=["Mission3Operability"],
 )
