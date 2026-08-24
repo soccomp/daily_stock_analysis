@@ -18,7 +18,7 @@ import re
 import signal
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 logger = logging.getLogger(__name__)
@@ -306,6 +306,10 @@ class Scheduler:
 
         Note: The scheduler loop polls every 30 seconds, so *interval_seconds*
         below 30 will be clamped to 30 to avoid promising unreachable precision.
+
+        Tasks which set ``accepts_scheduler_timestamps = True`` receive the
+        scheduler-owned ``scheduled_for`` due time and the actual ``started_at``
+        time as timezone-aware keyword arguments.
         """
         clamped_interval = max(30, int(interval_seconds))
         if int(interval_seconds) < 30:
@@ -321,6 +325,11 @@ class Scheduler:
             "name": name or getattr(task, "__name__", "background_task"),
             "thread": None,
             "running": False,
+            "pass_scheduler_timestamps": bool(
+                getattr(task, "accepts_scheduler_timestamps", False)
+            ),
+            "scheduled_for_epoch": None,
+            "started_at_epoch": None,
         }
         if not run_immediately:
             entry["last_run"] = time.time()
@@ -334,23 +343,51 @@ class Scheduler:
         if run_immediately:
             self._start_background_task(entry)
 
-    def _start_background_task(self, entry: Dict[str, Any]) -> bool:
+    def _start_background_task(
+        self,
+        entry: Dict[str, Any],
+        *,
+        scheduled_for_epoch: Optional[float] = None,
+    ) -> bool:
         """Start one background task in a dedicated daemon thread."""
         worker = entry.get("thread")
         if worker is not None and worker.is_alive():
             return False
 
+        started_at_epoch = time.time()
+        if scheduled_for_epoch is None:
+            scheduled_for_epoch = started_at_epoch
+
         def _runner() -> None:
             try:
                 logger.info("后台任务开始执行: %s", entry["name"])
-                entry["task"]()
+                if entry.get("pass_scheduler_timestamps"):
+                    scheduled_for = entry.get("scheduled_for_epoch")
+                    started_at = entry.get("started_at_epoch")
+                    if scheduled_for is None or started_at is None:
+                        raise RuntimeError(
+                            "scheduler timestamps missing for timestamp-aware background task"
+                        )
+                    entry["task"](
+                        scheduled_for=datetime.fromtimestamp(
+                            float(scheduled_for), tz=timezone.utc
+                        ),
+                        started_at=datetime.fromtimestamp(
+                            float(started_at), tz=timezone.utc
+                        ),
+                    )
+                else:
+                    entry["task"]()
             except Exception as exc:
                 logger.exception("后台任务执行失败 [%s]: %s", entry["name"], exc)
             finally:
                 entry["running"] = False
                 entry["thread"] = None
 
-        entry["last_run"] = time.time()
+        entry["scheduled_for_epoch"] = float(scheduled_for_epoch)
+        entry["started_at_epoch"] = float(started_at_epoch)
+        # ``last_run`` remains the actual start marker used by interval gating.
+        entry["last_run"] = started_at_epoch
         entry["running"] = True
         worker = threading.Thread(
             target=_runner,
@@ -376,7 +413,14 @@ class Scheduler:
                 entry["thread"] = None
             if now - entry["last_run"] < entry["interval_seconds"]:
                 continue
-            self._start_background_task(entry)
+            # Preserve the original due point even when the scheduler loop is
+            # delayed past it.  The worker start time is captured separately by
+            # ``_start_background_task``.
+            scheduled_for_epoch = entry["last_run"] + entry["interval_seconds"]
+            self._start_background_task(
+                entry,
+                scheduled_for_epoch=scheduled_for_epoch,
+            )
 
     def run(self):
         """

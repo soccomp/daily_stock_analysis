@@ -1,9 +1,11 @@
 """Focused deterministic evidence for PALLAS Convergence Mission 1."""
 
 import json
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -14,6 +16,8 @@ from src.investment.m2.identity import cycle_slot
 from src.investment.proposal.orchestration import ProposalHandoffLoopService
 from src.investment.proposal.transport import AthenaProposalAcknowledgement
 from src.repositories.market_review_linkage_repo import MarketReviewLinkageRepository
+from src.scheduler import Scheduler
+from src.services.runtime_scheduler import build_single_brain_m2_background_tasks
 from src.services.runtime_scheduler import _persist_proposal_handoff_terminal
 from src.services.runtime_scheduler import _RUNTIME_ANALYSIS_LOCK, run_with_global_analysis_lock
 from src.services.runtime_scheduler import RuntimeSchedulerService
@@ -74,6 +78,81 @@ def _market_context(task_id: str, context_id: str, as_of: datetime) -> dict:
         "as_of": as_of.isoformat(),
         "provenance": {"source_task_id": task_id},
     }
+
+
+def _run_real_scheduler_handoff(*, isolated_db, monkeypatch, due: datetime, started: datetime):
+    """Run the timestamp-aware proposal task through the real Scheduler layer."""
+
+    config = SimpleNamespace(
+        single_brain_m2_enabled=True,
+        single_brain_m2_interval_minutes=60,
+        single_brain_m2_run_immediately=False,
+        single_brain_execution_mode="PROPOSAL_HANDOFF",
+    )
+    captured = {}
+
+    real_service = ProposalHandoffLoopService(
+        config=config,
+        analysis_runner=SimpleNamespace(),
+        publisher=SimpleNamespace(),
+        snapshot_source=SimpleNamespace(
+            capture_snapshot=lambda: (_ for _ in ()).throw(
+                AssertionError("missing MarketContext must block before snapshot work")
+            )
+        ),
+        trigger_coordinator=_EmptyCoordinator(),
+        clock=lambda: started,
+    )
+    original_run_cycle = real_service.run_cycle
+
+    def _capture_run_cycle(**kwargs):
+        captured.update(kwargs)
+        result = original_run_cycle(**kwargs)
+        captured["cycle_id"] = result.cycle_id
+        return result
+
+    real_service.run_cycle = _capture_run_cycle
+    monkeypatch.setattr(
+        ProposalHandoffLoopService,
+        "from_config",
+        staticmethod(lambda _config: real_service),
+    )
+    task = build_single_brain_m2_background_tasks(
+        config,
+        config_provider=lambda: config,
+    )[0]
+
+    fake_schedule = SimpleNamespace(get_jobs=lambda: [])
+    fake_thread = MagicMock()
+    fake_thread.is_alive.return_value = False
+
+    def _make_thread(target=None, **_kwargs):
+        fake_thread.start.side_effect = target
+        return fake_thread
+
+    registration_epoch = due.timestamp() - 3600
+    scheduler_time_values = iter(
+        [registration_epoch, started.timestamp(), started.timestamp()]
+    )
+    with patch.dict(sys.modules, {"schedule": fake_schedule}), patch(
+        "src.scheduler.time.time",
+        side_effect=lambda: next(scheduler_time_values),
+    ), patch("src.scheduler.threading.Thread", side_effect=_make_thread):
+        scheduler = Scheduler(schedule_time="18:00", register_signals=False)
+        scheduler.add_background_task(
+            task["task"],
+            interval_seconds=3600,
+            run_immediately=False,
+            name=task["name"],
+        )
+        scheduler._run_background_tasks()
+
+    assert captured["scheduled_for"] == due
+    assert captured["started_at"] == started
+    cycle = CanonicalCycleRepository(isolated_db).get_cycle(
+        captured["cycle_id"]
+    )
+    return captured, cycle, scheduler._background_tasks[0]
 
 
 def test_canonical_cycle_repository_is_durable_and_projection_is_read_only(isolated_db):
@@ -414,6 +493,59 @@ def test_actual_scheduled_time_is_separate_from_cycle_slot(isolated_db):
         scheduled_for=cycle_slot(due, interval_minutes=60),
     )
     assert cycle_slot(due, interval_minutes=60).isoformat() == "2026-08-24T02:00:00+00:00"
+
+
+def test_real_background_scheduler_preserves_delayed_due_time(isolated_db, monkeypatch):
+    due = datetime(2026, 8, 24, 14, 12, 28, tzinfo=UTC)
+    started = datetime(2026, 8, 24, 14, 12, 40, tzinfo=UTC)
+
+    captured, cycle, entry = _run_real_scheduler_handoff(
+        isolated_db=isolated_db,
+        monkeypatch=monkeypatch,
+        due=due,
+        started=started,
+    )
+
+    assert entry["scheduled_for_epoch"] == due.timestamp()
+    assert entry["started_at_epoch"] == started.timestamp()
+    assert entry["last_run"] == started.timestamp()
+    assert cycle["scheduled_for"] == "2026-08-24T14:12:28Z"
+    assert cycle["started_at"] == "2026-08-24T14:12:40Z"
+    assert cycle["cycle_slot"] == "2026-08-24T14:00:00Z"
+    assert captured["cycle_id"] == build_cycle_id(
+        account_id="dsa-proposal-authority",
+        scheduled_for=cycle_slot(due, interval_minutes=60),
+    )
+
+
+def test_real_background_scheduler_keeps_prior_identity_across_slot_boundary(
+    isolated_db, monkeypatch
+):
+    due = datetime(2026, 8, 24, 14, 59, 59, tzinfo=UTC)
+    started = datetime(2026, 8, 24, 15, 0, 10, tzinfo=UTC)
+
+    captured, cycle, entry = _run_real_scheduler_handoff(
+        isolated_db=isolated_db,
+        monkeypatch=monkeypatch,
+        due=due,
+        started=started,
+    )
+
+    assert captured["scheduled_for"] == due
+    assert captured["started_at"] == started
+    assert captured["started_at"] > captured["scheduled_for"]
+    assert entry["last_run"] == started.timestamp()
+    assert cycle["scheduled_for"] == "2026-08-24T14:59:59Z"
+    assert cycle["started_at"] == "2026-08-24T15:00:10Z"
+    assert cycle["cycle_slot"] == "2026-08-24T14:00:00Z"
+    assert cycle["cycle_id"] == build_cycle_id(
+        account_id="dsa-proposal-authority",
+        scheduled_for=cycle_slot(due, interval_minutes=60),
+    )
+    assert cycle["cycle_id"] != build_cycle_id(
+        account_id="dsa-proposal-authority",
+        scheduled_for=cycle_slot(started, interval_minutes=60),
+    )
 
 
 def test_lock_release_is_persisted_after_wrapper_unlocks_on_success(isolated_db):

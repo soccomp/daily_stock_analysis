@@ -228,16 +228,25 @@ def build_single_brain_m2_background_tasks(
     except (TypeError, ValueError):
         interval_minutes = 60
 
-    def m2_shadow_task() -> None:
+    def m2_shadow_task(
+        scheduled_for: datetime | None = None,
+        started_at: datetime | None = None,
+    ) -> None:
+        # Natural Scheduler calls provide both values from the background-task
+        # entry.  The fallback keeps legacy direct test invocations usable but
+        # is never used by the real scheduler handoff.
+        task_started_at = started_at or datetime.now(timezone.utc)
+        scheduler_due = scheduled_for or task_started_at
         current_config = config_provider()
         if not getattr(current_config, "single_brain_m2_enabled", False):
             if execution_mode == "PROPOSAL_HANDOFF":
                 _persist_proposal_handoff_terminal(
                     current_config,
-                    observed_at=datetime.now(timezone.utc),
+                    observed_at=task_started_at,
                     status="SKIPPED",
                     reason_code="HANDOFF_DISABLED",
                     reason_detail="proposal handoff was disabled after task registration",
+                    scheduled_for=scheduler_due,
                 )
             return
         current_mode = str(
@@ -252,18 +261,20 @@ def build_single_brain_m2_background_tasks(
             if execution_mode == "PROPOSAL_HANDOFF":
                 _persist_proposal_handoff_terminal(
                     current_config,
-                    observed_at=datetime.now(timezone.utc),
+                    observed_at=task_started_at,
                     status="SKIPPED",
                     reason_code="SCHEDULER_MODE_CHANGED",
                     reason_detail=(
                         f"registered mode {execution_mode} changed to {current_mode}"
                     ),
+                    scheduled_for=scheduler_due,
                 )
             return
 
         release_ref: dict[str, datetime] = {}
         release_cycle_ref: dict[str, str] = {}
-        scheduled_ref: dict[str, datetime] = {}
+        scheduled_ref: dict[str, datetime] = {"scheduled_for": scheduler_due}
+        started_ref: dict[str, datetime] = {"started_at": task_started_at}
         acquired_ref: dict[str, datetime] = {}
 
         def run_once(
@@ -274,9 +285,12 @@ def build_single_brain_m2_background_tasks(
             if execution_mode == "PROPOSAL_HANDOFF":
                 from src.investment.proposal.orchestration import ProposalHandoffLoopService
 
-                scheduled_for = datetime.now(timezone.utc)
+                # This is scheduler-owned due time.  Do not replace it with
+                # the time at which the worker happens to enter run_once.
+                scheduled_for = scheduler_due
                 lock_acquired_at = datetime.now(timezone.utc)
                 scheduled_ref["scheduled_for"] = scheduled_for
+                started_ref["started_at"] = task_started_at
                 acquired_ref["lock_acquired_at"] = lock_acquired_at
                 expected_cycle_id, _, _ = _proposal_handoff_cycle_identity(
                     loaded_config, scheduled_for
@@ -285,6 +299,7 @@ def build_single_brain_m2_background_tasks(
 
                 result = ProposalHandoffLoopService.from_config(loaded_config).run_cycle(
                     scheduled_for=scheduled_for,
+                    started_at=task_started_at,
                     lock_acquired_at=lock_acquired_at,
                     require_market_review_context=True,
                     scheduler_task_name=CANONICAL_CYCLE_TASK,
@@ -329,10 +344,11 @@ def build_single_brain_m2_background_tasks(
             )
         except Exception as exc:
             if execution_mode == "PROPOSAL_HANDOFF":
-                scheduled_for = scheduled_ref.get("scheduled_for", datetime.now(timezone.utc))
+                scheduled_for = scheduled_ref.get("scheduled_for", scheduler_due)
+                failed_started_at = started_ref.get("started_at", task_started_at)
                 _persist_proposal_handoff_terminal(
                     current_config,
-                    observed_at=scheduled_for,
+                    observed_at=failed_started_at,
                     status="FAILED",
                     reason_code="HANDOFF_CONSTRUCTION_FAILED",
                     reason_detail=exc,
@@ -345,12 +361,15 @@ def build_single_brain_m2_background_tasks(
             if execution_mode == "PROPOSAL_HANDOFF":
                 _persist_proposal_handoff_terminal(
                     current_config,
-                    observed_at=datetime.now(timezone.utc),
+                    observed_at=task_started_at,
                     status="SKIPPED",
                     reason_code="GLOBAL_ANALYSIS_LOCK_UNAVAILABLE",
                     reason_detail="the shared analysis lock was held by another natural run",
+                    scheduled_for=scheduler_due,
                 )
             logger.warning("Single Brain cycle skipped: analysis_already_running")
+
+    m2_shadow_task.accepts_scheduler_timestamps = True
 
     return [{
         "task": m2_shadow_task,

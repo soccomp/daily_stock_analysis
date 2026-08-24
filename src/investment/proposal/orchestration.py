@@ -158,6 +158,7 @@ class ProposalHandoffLoopService:
         self,
         *,
         scheduled_for: datetime | None = None,
+        started_at: datetime | None = None,
         market_review_context: Mapping[str, object] | None = None,
         lock_acquired_at: datetime | None = None,
         require_market_review_context: bool = False,
@@ -171,6 +172,17 @@ class ProposalHandoffLoopService:
                 None,
                 "FAILED_CLOSED",
                 blocked_reasons=("proposal clock must be timezone-aware",),
+            )
+        cycle_started_at = started_at or now
+        if (
+            not isinstance(cycle_started_at, datetime)
+            or cycle_started_at.tzinfo is None
+            or cycle_started_at.utcoffset() is None
+        ):
+            return ProposalHandoffRunResult(
+                None,
+                "FAILED_CLOSED",
+                blocked_reasons=("canonical cycle start must be timezone-aware",),
             )
         interval = int(getattr(self._config, "single_brain_m2_interval_minutes", 60))
         actual_scheduled_for = scheduled_for or now
@@ -199,7 +211,7 @@ class ProposalHandoffLoopService:
             scheduled_for=actual_scheduled_for,
             cycle_slot=slot,
             source_runtime_identity="DSA:ProposalHandoffLoopService",
-            now=now,
+            now=cycle_started_at,
         )
         canonical.set_stage(
             cycle_id=cycle,
@@ -207,7 +219,7 @@ class ProposalHandoffLoopService:
             state="SUCCEEDED",
             object_id=cycle,
             reason_code="CYCLE_STARTED",
-            at=now,
+            at=cycle_started_at,
         )
         if lock_acquired_at is None:
             canonical.set_stage(
