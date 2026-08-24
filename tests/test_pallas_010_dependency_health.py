@@ -78,7 +78,7 @@ def test_critical_unobserved_dependencies_fail_closed(tmp_path):
     store = DependencyHealthStore(tmp_path / "health.json")
     store.record_result("calendar", category="TRADING_CALENDAR", configured=True, enabled=True)
     readiness = store.snapshot()["readiness"]
-    assert readiness["AUTONOMOUS_SIMULATION_READINESS"] == "BLOCKED"
+    assert readiness["DSA_RESEARCH_READINESS"] == "BLOCKED"
     assert "RESEARCH_MARKET_DATA:UNKNOWN" in readiness["reasons"]
     assert "MARKET_CONTEXT:UNKNOWN" in readiness["reasons"]
     assert "TRADING_CALENDAR:UNKNOWN" not in readiness["reasons"]
@@ -115,7 +115,7 @@ def test_codex_identity_metadata_cannot_promote_failed_generation(tmp_path):
     assert row["identity_status"] == "HEALTHY"
     assert row["generation_status"] == "FAILED"
     assert row["status"] == "FAILED"
-    assert store.snapshot()["readiness"]["AUTONOMOUS_SIMULATION_READINESS"] == "BLOCKED"
+    assert store.snapshot()["readiness"]["DSA_RESEARCH_READINESS"] == "BLOCKED"
 
 
 def test_codex_generation_recovery_requires_a_new_generation_observation(tmp_path):
@@ -219,7 +219,7 @@ def test_codex_generation_degraded_is_blocked(tmp_path):
     )
     snapshot = store.snapshot()
     assert snapshot["dependencies"]["codex-luna"]["status"] == "DEGRADED"
-    assert snapshot["readiness"]["AUTONOMOUS_SIMULATION_READINESS"] == "BLOCKED"
+    assert snapshot["readiness"]["DSA_RESEARCH_READINESS"] == "BLOCKED"
     assert "LLM_RESEARCH" in snapshot["readiness"]["blocked_categories"]
 
 
@@ -247,4 +247,4 @@ def test_legacy_qwen_observation_cannot_make_codex_research_ready(tmp_path):
     snapshot = store.snapshot()
 
     assert "LLM_RESEARCH" not in snapshot["categories"]
-    assert snapshot["readiness"]["AUTONOMOUS_SIMULATION_READINESS"] == "BLOCKED"
+    assert snapshot["readiness"]["DSA_RESEARCH_READINESS"] == "BLOCKED"

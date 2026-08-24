@@ -178,7 +178,6 @@ def evaluate_dsa_research_readiness(snapshot: Mapping[str, Any]) -> Dict[str, An
     state = READINESS_BLOCKED if blocked else (READINESS_DEGRADED if degraded or advisories else READINESS_READY)
     return {
         "DSA_RESEARCH_READINESS": state,
-        "AUTONOMOUS_SIMULATION_READINESS": state,
         "reasons": reasons,
         "blocked_categories": blocked,
         "degraded_categories": degraded,
@@ -188,6 +187,95 @@ def evaluate_dsa_research_readiness(snapshot: Mapping[str, Any]) -> Dict[str, An
         "execution_authority": "ATHENA_ONLY",
         "dsa_execution_authority": False,
         "proof_order": False,
+    }
+
+
+def evaluate_dsa_research_admission(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
+    """Separate recoverable research observations from hard admission blockers.
+
+    ``DSA_RESEARCH_READINESS`` is an observed-health projection.  A stale or
+    transiently failed generation/provider observation must not prevent the
+    next scheduler-owned natural operation from attempting the work that can
+    refresh that observation.  Admission therefore checks only configuration,
+    identity integrity, provider availability, and the required causal market
+    context.
+    """
+
+    categories = snapshot.get("categories") if isinstance(snapshot, Mapping) else {}
+    categories = categories if isinstance(categories, Mapping) else {}
+    dependencies = snapshot.get("dependencies") if isinstance(snapshot, Mapping) else {}
+    dependencies = dependencies if isinstance(dependencies, Mapping) else {}
+    blocked: list[str] = []
+    advisories: list[str] = []
+
+    codex = dependencies.get("codex-luna")
+    if not isinstance(codex, Mapping):
+        inventory = [
+            item for item in configured_dependency_inventory()
+            if item.get("dependency_id") == "codex-luna"
+        ]
+        codex = inventory[0] if inventory else None
+    if not isinstance(codex, Mapping) or not (
+        bool(codex.get("configured")) and bool(codex.get("enabled"))
+    ):
+        blocked.append("LLM_RESEARCH_PROVIDER_NOT_CONFIGURED")
+    else:
+        metadata = codex.get("metadata") if isinstance(codex.get("metadata"), Mapping) else {}
+        identity = codex.get("identity") if isinstance(codex.get("identity"), Mapping) else {}
+        identity_metadata = (
+            identity.get("metadata")
+            if isinstance(identity.get("metadata"), Mapping)
+            else {}
+        )
+        model = metadata.get("model") or metadata.get("expected_model") or identity_metadata.get("model")
+        provider = metadata.get("provider") or metadata.get("expected_provider") or identity_metadata.get("provider")
+        if model and str(model) != "gpt-5.6-luna":
+            blocked.append("LLM_RESEARCH_MODEL_MISMATCH")
+        if provider and str(provider) != "codex_chatgpt_oauth":
+            blocked.append("LLM_RESEARCH_PROVIDER_MISMATCH")
+        identity_status = codex.get("identity_status") or identity.get("status")
+        if identity_status in {FAILED, DISABLED}:
+            blocked.append(f"LLM_RESEARCH_IDENTITY:{identity_status}")
+        elif identity_status in {None, UNKNOWN}:
+            advisories.append("LLM_RESEARCH_IDENTITY_NOT_YET_OBSERVED")
+        observed_status = str(codex.get("status") or UNKNOWN)
+        if observed_status in {STALE, FAILED, UNKNOWN, DEGRADED}:
+            advisories.append(f"LLM_RESEARCH_OBSERVED:{observed_status}")
+
+    market_rows = [
+        item for item in dependencies.values()
+        if isinstance(item, Mapping) and item.get("category") == "RESEARCH_MARKET_DATA"
+    ]
+    if not market_rows:
+        market_rows = [
+            item for item in configured_dependency_inventory()
+            if item.get("category") == "RESEARCH_MARKET_DATA"
+        ]
+    if not any(bool(item.get("configured")) and bool(item.get("enabled")) for item in market_rows):
+        blocked.append("RESEARCH_MARKET_DATA_PROVIDER_NOT_CONFIGURED")
+    else:
+        observed_status = str(
+            (categories.get("RESEARCH_MARKET_DATA") or {}).get("status") or UNKNOWN
+        )
+        if observed_status in {STALE, FAILED, UNKNOWN, DEGRADED}:
+            advisories.append(f"RESEARCH_MARKET_DATA_OBSERVED:{observed_status}")
+
+    context_status = str(
+        (categories.get("MARKET_CONTEXT") or {}).get("status") or UNKNOWN
+    )
+    if context_status != HEALTHY:
+        blocked.append(f"MARKET_CONTEXT_REQUIRED:{context_status}")
+
+    return {
+        "status": "BLOCKED" if blocked else "ADMITTED",
+        "can_attempt": not blocked,
+        "blocked_reasons": list(dict.fromkeys(blocked)),
+        "advisories": list(dict.fromkeys(advisories)),
+        "observed_readiness": (
+            (snapshot.get("readiness") or {}).get("DSA_RESEARCH_READINESS")
+            if isinstance(snapshot.get("readiness"), Mapping)
+            else None
+        ),
     }
 
 
@@ -287,8 +375,13 @@ class DependencyHealthStore:
             "alerts": [],
             "monitor": self.monitor_config(),
             "readiness": {
-                "AUTONOMOUS_SIMULATION_READINESS": READINESS_BLOCKED,
+                "DSA_RESEARCH_READINESS": READINESS_BLOCKED,
                 "reasons": ["DEPENDENCY_HEALTH_NOT_OBSERVED"],
+            },
+            "research_admission": {
+                "status": "BLOCKED",
+                "can_attempt": False,
+                "blocked_reasons": ["DEPENDENCY_HEALTH_NOT_OBSERVED"],
             },
         }
 
@@ -547,6 +640,9 @@ class DependencyHealthStore:
         self._document["readiness"] = evaluate_dsa_research_readiness(
             {"categories": categories}
         )
+        self._document["research_admission"] = evaluate_dsa_research_admission(
+            {"categories": categories, "dependencies": self._document.get("dependencies", {})}
+        )
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
@@ -741,5 +837,5 @@ __all__ = [
     "READINESS_READY", "READINESS_DEGRADED", "READINESS_BLOCKED",
     "CRITICAL_CATEGORIES", "DependencyHealthStore", "DependencyHealthMonitor",
     "configured_dependency_inventory", "get_dependency_health_store",
-    "evaluate_dsa_research_readiness",
+    "evaluate_dsa_research_readiness", "evaluate_dsa_research_admission",
 ]

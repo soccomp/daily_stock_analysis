@@ -14,6 +14,7 @@ from src.investment.m2.natural_admission import (
 from src.investment.proposal.orchestration import ProposalHandoffLoopService
 from src.investment.proposal.transport import AthenaProposalAcknowledgement
 from src.services.dependency_health import DependencyHealthStore
+from src.services.dependency_health import evaluate_dsa_research_admission
 from src.services.runtime_scheduler import build_single_brain_m2_background_tasks
 from src.storage import DatabaseManager
 
@@ -46,6 +47,7 @@ def test_dsa_readiness_uses_only_owned_facts_and_never_heals_absence(tmp_path, m
     )
     snapshot = store.snapshot()
     assert snapshot["readiness"]["DSA_RESEARCH_READINESS"] == "BLOCKED"
+    assert "AUTONOMOUS_SIMULATION_READINESS" not in snapshot["readiness"]
     assert set(snapshot["readiness"]["blocked_categories"]) == {
         "LLM_RESEARCH", "RESEARCH_MARKET_DATA", "MARKET_CONTEXT"
     }
@@ -136,6 +138,40 @@ def test_outside_session_scheduler_creates_zero_work_and_never_takes_lock(
     }
 
 
+def test_unknown_calendar_persists_durable_blocked_before_lock(isolated_db, monkeypatch):
+    config = SimpleNamespace(
+        single_brain_m2_enabled=True,
+        single_brain_m2_interval_minutes=60,
+        single_brain_m2_run_immediately=False,
+        single_brain_execution_mode="PROPOSAL_HANDOFF",
+        single_brain_m2_natural_session_gate_enabled=True,
+    )
+    monkeypatch.setattr(
+        "src.investment.m2.natural_admission.evaluate_natural_cycle_admission",
+        lambda *_args: SimpleNamespace(
+            allowed=False,
+            reason_code="TRADING_CALENDAR_UNAVAILABLE",
+            market_phase="UNKNOWN",
+        ),
+    )
+    monkeypatch.setattr(
+        "src.services.runtime_scheduler.run_with_global_analysis_lock",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("lock must not be entered")),
+    )
+    task = build_single_brain_m2_background_tasks(config, config_provider=lambda: config)[0]["task"]
+    task(scheduled_for=NOW, started_at=NOW)
+    repository = CanonicalCycleRepository(isolated_db)
+    projection = repository.scheduler_projection(
+        scheduler_task_name="single_brain_proposal_handoff"
+    )
+    assert projection["last_terminal_status"] == "BLOCKED"
+    assert projection["last_terminal_reason"]["code"] == "TRADING_CALENDAR_UNAVAILABLE"
+    stages = repository.stage_events(projection["last_terminal_cycle_id"])
+    assert ("LOCK", "NOT_ENTERED") in {
+        (item["stage"], item["state"]) for item in stages
+    }
+
+
 def test_budget_reserves_configured_timeouts_and_next_interval_guard():
     config = SimpleNamespace(
         single_brain_m2_interval_minutes=60,
@@ -197,25 +233,95 @@ def test_partial_workload_defers_remaining_candidate_and_persists_deadline(isola
     assert result.canonical_cycle["deferred_count"] == 1
 
 
-def test_readiness_block_stops_before_snapshot_and_generation(isolated_db, monkeypatch):
+def _admission_snapshot(*, llm_status="STALE", market_status="STALE", model="gpt-5.6-luna"):
+    return {
+        "dependencies": {
+            "codex-luna": {
+                "dependency_id": "codex-luna",
+                "category": "LLM_RESEARCH",
+                "configured": True,
+                "enabled": True,
+                "status": llm_status,
+                "identity_status": "HEALTHY",
+                "generation_status": llm_status,
+                "metadata": {"model": model, "provider": "codex_chatgpt_oauth"},
+            },
+            "sina": {
+                "dependency_id": "sina",
+                "category": "RESEARCH_MARKET_DATA",
+                "configured": True,
+                "enabled": True,
+                "status": market_status,
+            },
+        },
+        "categories": {
+            "LLM_RESEARCH": {"status": llm_status},
+            "RESEARCH_MARKET_DATA": {"status": market_status},
+            "MARKET_CONTEXT": {"status": "HEALTHY"},
+        },
+        "readiness": {"DSA_RESEARCH_READINESS": "BLOCKED"},
+    }
+
+
+def test_expired_health_allows_one_natural_research_attempt(isolated_db, monkeypatch):
     class FakeStore:
         def record_result(self, *_args, **_kwargs):
             return None
 
         def snapshot(self):
-            return {"readiness": {"DSA_RESEARCH_READINESS": "BLOCKED", "reasons": ["LLM_RESEARCH:STALE"]}}
+            return _admission_snapshot()
 
     monkeypatch.setattr("src.services.dependency_health.get_dependency_health_store", lambda: FakeStore())
+    calls = {"snapshot": 0, "generation": 0}
+    runner = SimpleNamespace(
+        complete=lambda **_kwargs: (
+            calls.__setitem__("generation", calls["generation"] + 1)
+            or SimpleNamespace(
+                completed_at=NOW,
+                result=object(),
+                context_snapshot={},
+                source_report_id=101,
+            )
+        )
+    )
+    monkeypatch.setattr(
+        "src.investment.proposal.orchestration.InvestmentProposalBuilder.build",
+        lambda _self, **kwargs: SimpleNamespace(
+            proposal=SimpleNamespace(
+                proposal_id="proposal-expired-health",
+                content_hash="a" * 64,
+            ),
+            research_bundle=SimpleNamespace(research_id="research-expired-health"),
+        ),
+    )
     config = SimpleNamespace(
         single_brain_m2_enabled=True, single_brain_m2_interval_minutes=60,
+        single_brain_m2_cycle_guard_seconds=300, generation_backend_timeout_seconds=300,
+        single_brain_m2_snapshot_timeout_seconds=5, single_brain_proposal_timeout_seconds=5,
         single_brain_m2_readiness_gate_enabled=True,
     )
     service = ProposalHandoffLoopService(
         config=config,
-        analysis_runner=SimpleNamespace(complete=lambda **_kwargs: (_ for _ in ()).throw(AssertionError("generation must not run"))),
-        publisher=SimpleNamespace(),
-        snapshot_source=SimpleNamespace(capture_snapshot=lambda: (_ for _ in ()).throw(AssertionError("snapshot must not run"))),
-        trigger_coordinator=SimpleNamespace(plan=lambda **_kwargs: []),
+        analysis_runner=runner,
+        publisher=SimpleNamespace(publish=lambda proposal: AthenaProposalAcknowledgement(
+            proposal_id=proposal.proposal_id,
+            proposal_hash=proposal.content_hash,
+            acknowledgement_id="ack-expired-health",
+            acknowledgement_state="ACCEPTED",
+            lifecycle_state="NO_ACTION",
+            deduplicated=False,
+        )),
+        snapshot_source=SimpleNamespace(
+            capture_snapshot=lambda: calls.__setitem__("snapshot", calls["snapshot"] + 1) or object()
+        ),
+        trigger_coordinator=SimpleNamespace(
+            plan=lambda **_kwargs: [{
+                "symbol": "000001",
+                "source": "HOLDING",
+                "research_trigger": {"research_trigger_id": "trigger-expired-health"},
+            }],
+            mark_success=lambda **_kwargs: None,
+        ),
         clock=lambda: NOW,
     )
     context = {
@@ -226,6 +332,42 @@ def test_readiness_block_stops_before_snapshot_and_generation(isolated_db, monke
         scheduled_for=NOW, lock_acquired_at=NOW,
         market_review_context=context, require_market_review_context=True,
     )
-    assert result.status == "FAILED_CLOSED"
-    assert result.canonical_cycle["status"] == "BLOCKED"
-    assert "LLM_RESEARCH:STALE" in result.blocked_reasons[0]
+    assert result.status == "COMPLETED"
+    assert calls == {"snapshot": 1, "generation": 1}
+
+
+@pytest.mark.parametrize("status", ["STALE", "FAILED", "UNKNOWN"])
+def test_transient_research_health_is_admitted_for_next_natural_cycle(status):
+    admission = evaluate_dsa_research_admission(
+        _admission_snapshot(llm_status=status, market_status=status)
+    )
+    assert admission["can_attempt"] is True
+    assert admission["status"] == "ADMITTED"
+
+
+def test_model_provider_identity_mismatch_still_blocks_natural_admission():
+    snapshot = _admission_snapshot(model="wrong-model")
+    admission = evaluate_dsa_research_admission(snapshot)
+    assert admission["can_attempt"] is False
+    assert "LLM_RESEARCH_MODEL_MISMATCH" in admission["blocked_reasons"]
+
+
+def test_stale_research_market_data_does_not_create_refresh_deadlock():
+    snapshot = _admission_snapshot(llm_status="HEALTHY", market_status="STALE")
+    admission = evaluate_dsa_research_admission(snapshot)
+    assert admission["can_attempt"] is True
+    assert "RESEARCH_MARKET_DATA_OBSERVED:STALE" in admission["advisories"]
+
+
+def test_missing_research_market_provider_remains_blocked():
+    snapshot = _admission_snapshot(llm_status="HEALTHY", market_status="UNKNOWN")
+    snapshot["dependencies"].pop("sina")
+    snapshot["dependencies"]["tushare"] = {
+        "category": "RESEARCH_MARKET_DATA",
+        "configured": False,
+        "enabled": False,
+        "status": "DISABLED",
+    }
+    admission = evaluate_dsa_research_admission(snapshot)
+    assert admission["can_attempt"] is False
+    assert "RESEARCH_MARKET_DATA_PROVIDER_NOT_CONFIGURED" in admission["blocked_reasons"]

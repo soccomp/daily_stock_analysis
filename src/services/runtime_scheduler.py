@@ -129,7 +129,7 @@ def _persist_proposal_handoff_terminal(
             at=lock_acquired_at,
         )
     else:
-        admission_skip = status == "SKIPPED" and reason_code in {
+        admission_skip = reason_code in {
             "NON_TRADING_DAY",
             "OUTSIDE_TRADING_SESSION",
             "TRADING_CALENDAR_UNAVAILABLE",
@@ -139,7 +139,9 @@ def _persist_proposal_handoff_terminal(
             stage="LOCK",
             state="NOT_ENTERED" if admission_skip else "BLOCKED",
             reason_code=(
-                "ADMISSION_SKIPPED_BEFORE_LOCK"
+                "ADMISSION_BLOCKED_BEFORE_LOCK"
+                if reason_code == "TRADING_CALENDAR_UNAVAILABLE"
+                else "ADMISSION_SKIPPED_BEFORE_LOCK"
                 if admission_skip
                 else "GLOBAL_ANALYSIS_LOCK_UNAVAILABLE"
             ),
@@ -292,10 +294,15 @@ def build_single_brain_m2_background_tasks(
 
             admission = evaluate_natural_cycle_admission(task_started_at)
             if not admission.allowed:
+                terminal_status = (
+                    "BLOCKED"
+                    if admission.reason_code == "TRADING_CALENDAR_UNAVAILABLE"
+                    else "SKIPPED"
+                )
                 _persist_proposal_handoff_terminal(
                     current_config,
                     observed_at=task_started_at,
-                    status="SKIPPED",
+                    status=terminal_status,
                     reason_code=admission.reason_code,
                     reason_detail=f"market_phase={admission.market_phase}; zero work created",
                     scheduled_for=scheduler_due,

@@ -402,7 +402,10 @@ class ProposalHandoffLoopService:
                     ),
                 )
         else:
-            from src.services.dependency_health import get_dependency_health_store
+            from src.services.dependency_health import (
+                evaluate_dsa_research_admission,
+                get_dependency_health_store,
+            )
 
             health_store = get_dependency_health_store()
             health_store.record_result(
@@ -418,8 +421,9 @@ class ProposalHandoffLoopService:
                 metadata={"reference": resolved_market_context.get("context_id")},
             )
             if bool(getattr(self._config, "single_brain_m2_readiness_gate_enabled", False)):
-                readiness = health_store.snapshot().get("readiness") or {}
-                if readiness.get("DSA_RESEARCH_READINESS") not in {"READY", "DEGRADED"}:
+                health_snapshot = health_store.snapshot()
+                admission = evaluate_dsa_research_admission(health_snapshot)
+                if not admission.get("can_attempt"):
                     for stage in (
                         "RESEARCH_TRIGGER", "CANDIDATE_EVALUATION", "RESEARCH_BUNDLE",
                         "INVESTMENT_PROPOSAL", "ATHENA_HANDOFF_ACK",
@@ -428,16 +432,16 @@ class ProposalHandoffLoopService:
                             cycle_id=cycle,
                             stage=stage,
                             state="NOT_ENTERED",
-                            reason_code="DSA_RESEARCH_READINESS_BLOCKED",
-                            reason_detail="; ".join(readiness.get("reasons") or ()),
+                            reason_code="DSA_RESEARCH_ADMISSION_BLOCKED",
+                            reason_detail="; ".join(admission.get("blocked_reasons") or ()),
                             at=now,
                         )
                     return ProposalHandoffRunResult(
                         cycle,
                         "FAILED_CLOSED",
                         blocked_reasons=(
-                            "DSA research readiness blocked: "
-                            + "; ".join(readiness.get("reasons") or ("UNKNOWN",)),
+                            "DSA research admission blocked: "
+                            + "; ".join(admission.get("blocked_reasons") or ("UNKNOWN",)),
                         ),
                     )
             canonical.update_identity_and_counts(

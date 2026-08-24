@@ -244,7 +244,7 @@ def test_non_qualifying_codex_chat_cannot_heal_failed_generation(monkeypatch, tm
     row = store.snapshot()["dependencies"]["codex-luna"]
     assert row["status"] == "FAILED"
     assert row["generation_status"] == "FAILED"
-    assert store.snapshot()["readiness"]["AUTONOMOUS_SIMULATION_READINESS"] == "BLOCKED"
+    assert store.snapshot()["readiness"]["DSA_RESEARCH_READINESS"] == "BLOCKED"
 
 
 def test_qualifying_structured_pallas_generation_can_recover_health(monkeypatch, tmp_path):
