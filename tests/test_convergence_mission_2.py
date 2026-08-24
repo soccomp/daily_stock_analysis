@@ -34,15 +34,25 @@ def isolated_db(tmp_path, monkeypatch):
         DatabaseManager.reset_instance()
 
 
-def test_dsa_readiness_uses_only_owned_facts_and_never_heals_absence(tmp_path):
+def test_dsa_readiness_uses_only_owned_facts_and_never_heals_absence(tmp_path, monkeypatch):
     store = DependencyHealthStore(tmp_path / "health.json")
     store.record_result("news", category="NEWS_SEARCH", success=False, reachable=False)
+    store.record_result(
+        "market-context", category="MARKET_CONTEXT", success=True, reachable=True,
+        usable=True, records=1, data_timestamp=NOW.isoformat(), max_age_seconds=1,
+    )
+    monkeypatch.setattr(
+        "src.services.dependency_health._now", lambda: NOW + timedelta(seconds=2)
+    )
     snapshot = store.snapshot()
     assert snapshot["readiness"]["DSA_RESEARCH_READINESS"] == "BLOCKED"
     assert set(snapshot["readiness"]["blocked_categories"]) == {
         "LLM_RESEARCH", "RESEARCH_MARKET_DATA", "MARKET_CONTEXT"
     }
     assert "ATHENA_AUTHORITY" not in snapshot["readiness"]["blocked_categories"]
+    assert snapshot["categories"]["MARKET_CONTEXT"]["status"] == "STALE"
+    assert snapshot["categories"]["MARKET_CONTEXT"]["source_event_at"] == NOW.isoformat()
+    assert snapshot["categories"]["MARKET_CONTEXT"]["fresh_until"] is not None
     for fact in snapshot["categories"].values():
         assert fact["owner_component"] == "DSA"
         assert {"purpose", "reason_code", "observed_at", "source_event_at", "fresh_until", "source"} <= set(fact)

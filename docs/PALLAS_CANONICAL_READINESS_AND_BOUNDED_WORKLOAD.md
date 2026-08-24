@@ -6,6 +6,8 @@ Issue #41 separates readiness by authority instead of treating every dependency 
 - Athena owns proposal intake, pre-trade data, calendar, investment authority, and simulation worker facts.
 - DSA never reports Athena or worker health as local truth. Athena consumes only DSA-owned facts and builds the aggregate readiness view.
 
+Qualifying Luna generation keeps its existing 900-second default TTL. Naturally completed research-market provider calls use `DSA_RESEARCH_MARKET_DATA_HEALTH_TTL_SECONDS` (default 3600); persisted market context uses the recurring interval as its maximum age. Snapshot reads age expired evidence to `STALE` without making a provider call.
+
 The natural `single_brain_proposal_handoff` task is admitted only during an authoritative XSHG regular session. Non-trading days, pre/post-market, lunch, and unknown calendar states terminate as durable `SKIPPED` cycles before lock acquisition and create no research, proposal, replay, or execution work.
 
 Every admitted cycle persists a deadline. The deadline is bounded by both the actual start and the scheduler-owned due interval, less `DSA_SINGLE_BRAIN_M2_CYCLE_GUARD_SECONDS`. Before each expensive candidate, remaining time must cover the configured generation, snapshot, and proposal timeout contract. Otherwise the candidate is persisted as `DEFERRED_BUDGET`; its durable trigger remains eligible for fair selection in a later legal cycle.

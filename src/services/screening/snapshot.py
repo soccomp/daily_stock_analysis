@@ -310,6 +310,11 @@ def _persist_dependency_observation(
             usable=success and rows > 0,
             records=rows,
             empty_valid=False,
+            data_timestamp=datetime.now(timezone.utc).isoformat(),
+            max_age_seconds=max(
+                60,
+                int(os.getenv("DSA_RESEARCH_MARKET_DATA_HEALTH_TTL_SECONDS", "3600")),
+            ),
             failure_class_name=type(error).__name__ if error is not None else None,
             error=error,
         )
