@@ -8,6 +8,7 @@ from src.investment.m2.orchestration import M2ShadowBlocked, M2ShadowLoopService
 from src.services.runtime_scheduler import (
     RuntimeSchedulerService,
     SCHEDULER_MODE_PROPOSAL_HANDOFF_ONLY,
+    _restricted_single_brain_scheduler_mode,
     build_single_brain_m2_background_tasks,
 )
 from src.services.single_brain_m2_readiness_service import (
@@ -59,6 +60,26 @@ def test_issue_9_uses_exactly_one_proposal_handoff_scheduler_at_m2_cadence():
     assert first_scheduler._background_tasks[0]["interval_seconds"] == 3600
     assert ordinary_runner.call_count == 0
     assert service.status()["mode"] == SCHEDULER_MODE_PROPOSAL_HANDOFF_ONLY
+
+
+def test_screening_is_a_separate_responsibility_under_the_same_scheduler_authority():
+    config = _config()
+    config.single_brain_m2_screening_enabled = True
+
+    tasks = build_single_brain_m2_background_tasks(
+        config,
+        config_provider=lambda: config,
+    )
+
+    assert [task["name"] for task in tasks] == [
+        "single_brain_proposal_handoff",
+        "single_brain_screening_producer",
+    ]
+    assert tasks[0]["interval_seconds"] == 3600
+    assert tasks[0]["daily_due_time"] == "09:30"
+    assert tasks[1]["interval_seconds"] == 30
+    assert tasks[1]["daily_due_time"] == "14:45"
+    assert _restricted_single_brain_scheduler_mode(tasks) == SCHEDULER_MODE_PROPOSAL_HANDOFF_ONLY
 
 
 def test_registered_scheduler_mode_change_fails_closed_until_reconciled():

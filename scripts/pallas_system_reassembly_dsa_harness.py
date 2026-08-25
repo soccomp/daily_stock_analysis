@@ -21,11 +21,14 @@ from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 
 NOW = datetime(2026, 8, 25, 2, 0, tzinfo=timezone.utc)
 SCREENING_DUE = NOW + timedelta(hours=4, minutes=45)  # 14:45 BJT, legal session
+START_OPEN = datetime(2026, 8, 25, 0, 0, tzinfo=timezone.utc)  # 08:00 BJT
 START_EARLY = datetime(2026, 8, 25, 2, 17, tzinfo=timezone.utc)  # 10:17 BJT
+START_LUNCH = datetime(2026, 8, 25, 3, 31, tzinfo=timezone.utc)  # 11:31 BJT
 START_MID = datetime(2026, 8, 25, 5, 17, tzinfo=timezone.utc)  # 13:17 BJT
 START_NEAR_DUE = datetime(2026, 8, 25, 6, 44, tzinfo=timezone.utc)  # 14:44 BJT
 START_POST_DUE = datetime(2026, 8, 25, 6, 46, tzinfo=timezone.utc)  # 14:46 BJT
@@ -36,6 +39,13 @@ PRIOR_COMPLETED_TRADE_DATE = "2026-08-24"
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+def _parse_time(value: object) -> datetime:
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise AssertionError(f"scheduler timestamp is not timezone-aware: {value!r}")
+    return parsed.astimezone(timezone.utc)
 
 
 def _context(*, as_of: datetime = NOW, lineage: str = "fixture", quality: str = "complete") -> dict[str, object]:
@@ -269,17 +279,33 @@ class _FixtureScreeningService:
         db_manager,
         mode,
         attempt_number=1,
+        attempt_events=None,
+        screening_calls=None,
         observed_at=NOW,
         **_kwargs,
     ):
         self.db = db_manager
         self.mode = mode
         self.attempt_number = attempt_number
+        self.attempt_events = attempt_events if attempt_events is not None else []
+        self.screening_calls = screening_calls if screening_calls is not None else []
         self.observed_at = observed_at
 
     def screen(self, *, strategy, market, max_results):
+        attempt_number = self.attempt_number
+        self.attempt_number += 1
+        self.screening_calls.append({
+            "attempt": attempt_number,
+            "mode": self.mode,
+            "at": self.observed_at.isoformat(),
+        })
+        self.attempt_events.append({
+            "attempt": attempt_number,
+            "mode": self.mode,
+            "at": self.observed_at.isoformat(),
+        })
         if self.mode == "failed" or (
-            self.mode == "transient_recovery" and self.attempt_number == 1
+            self.mode == "transient_recovery" and attempt_number == 1
         ):
             raise OSError("fixture screening producer unavailable")
         candidates = [] if self.mode == "zero" else [{
@@ -292,10 +318,10 @@ class _FixtureScreeningService:
             "strategy_evidence": _pallas008_evidence(decision_cutoff=self.observed_at),
         }]
         source_errors = []
-        if self.mode == "quality_recovery" and self.attempt_number == 1:
+        if self.mode == "quality_recovery" and attempt_number == 1:
             source_errors = ["fixture provider quality failed"]
         payload = {
-            "run_id": f"screen-run-{self.mode}-{self.attempt_number}",
+            "run_id": f"screen-run-{self.mode}-{attempt_number}",
             "strategy": strategy, "market": market,
             "snapshot_source": "fixture:screening-provider", "snapshot_count": len(candidates),
             "after_filter_count": len(candidates), "candidate_count": len(candidates),
@@ -428,34 +454,50 @@ def _scheduler_poll(
     _require(scheduler is not None, "RuntimeSchedulerService did not register Scheduler")
     entries = scheduler._background_tasks
     _require(
-        [entry["name"] for entry in entries] == ["single_brain_proposal_handoff"],
+        [entry["name"] for entry in entries]
+        == ["single_brain_proposal_handoff", "single_brain_screening_producer"],
         "canonical task registration mismatch",
     )
-    entry = entries[0]
-    before_last_run = float(entry.get("last_run") or 0.0)
-    before_due = entry.get("scheduled_for_epoch")
+    before = {
+        id(entry): (
+            float(entry.get("last_run") or 0.0),
+            entry.get("scheduled_for_epoch"),
+        )
+        for entry in entries
+    }
     with patch.object(scheduler_module.time, "time", return_value=observed_at.timestamp()):
         scheduler._run_background_tasks()
-    worker = entry.get("thread")
-    if worker is not None:
-        worker.join(timeout=10)
-    _require(not entry.get("running"), "natural background task did not finish")
-    after_last_run = float(entry.get("last_run") or 0.0)
-    after_due = entry.get("scheduled_for_epoch")
-    dispatched = after_last_run != before_last_run or after_due != before_due
+    for entry in entries:
+        worker = entry.get("thread")
+        if worker is not None:
+            worker.join(timeout=10)
+        _require(not entry.get("running"), f"natural task did not finish: {entry['name']}")
+    events = []
+    for entry in entries:
+        before_last_run, before_due = before[id(entry)]
+        after_last_run = float(entry.get("last_run") or 0.0)
+        after_due = entry.get("scheduled_for_epoch")
+        dispatched = after_last_run != before_last_run or after_due != before_due
+        if not dispatched:
+            continue
+        events.append({
+            "task_name": entry["name"],
+            "observed_at": observed_at.isoformat(),
+            "dispatched": True,
+            "scheduled_for": (
+                datetime.fromtimestamp(float(after_due), tz=timezone.utc).isoformat()
+                if after_due is not None else None
+            ),
+            "started_at": (
+                datetime.fromtimestamp(float(entry["started_at_epoch"]), tz=timezone.utc).isoformat()
+                if entry.get("started_at_epoch") is not None else None
+            ),
+            "interval_seconds": entry["interval_seconds"],
+            "phase_locked": entry.get("phase_locked", False),
+        })
     return {
         "observed_at": observed_at.isoformat(),
-        "dispatched": dispatched,
-        "scheduled_for": (
-            datetime.fromtimestamp(float(after_due), tz=timezone.utc).isoformat()
-            if dispatched and after_due is not None else None
-        ),
-        "started_at": (
-            datetime.fromtimestamp(float(entry["started_at_epoch"]), tz=timezone.utc).isoformat()
-            if dispatched and entry.get("started_at_epoch") is not None else None
-        ),
-        "interval_seconds": entry["interval_seconds"],
-        "phase_locked": entry.get("phase_locked", False),
+        "events": events,
     }
 
 
@@ -466,23 +508,77 @@ def _run_scheduler_until_dispatch(
     natural_clock: dict[str, datetime],
     dispatch_target: int,
     dispatch_log: list[dict[str, object]],
+    task_name: str = "single_brain_proposal_handoff",
+    all_dispatch_log: list[dict[str, object]] | None = None,
 ) -> None:
     """Replay only the existing 30-second scheduler poll, never the callback."""
 
     observed_at = start_at
-    while observed_at <= SCREENING_DUE + timedelta(minutes=20):
-        event = _scheduler_poll(
+    while observed_at <= SCREENING_DUE + timedelta(minutes=30):
+        poll = _scheduler_poll(
             runtime,
             observed_at=observed_at,
             natural_clock=natural_clock,
         )
-        if event["dispatched"]:
-            dispatch_log.append(event)
+        for event in poll["events"]:
+            if all_dispatch_log is not None:
+                all_dispatch_log.append(event)
+            if event["task_name"] == task_name:
+                dispatch_log.append(event)
             if len(dispatch_log) >= dispatch_target:
                 return
         observed_at += timedelta(seconds=30)
     raise AssertionError(
         f"scheduler did not naturally dispatch {dispatch_target} task(s): {dispatch_log}"
+    )
+
+
+def _run_scheduler_until_post_screening(
+    runtime,
+    *,
+    start_at: datetime,
+    natural_clock: dict[str, datetime],
+    proposal_dispatch_log: list[dict[str, object]],
+    screening_dispatch_log: list[dict[str, object]],
+    all_dispatch_log: list[dict[str, object]],
+) -> None:
+    """Drive the one authority through screening due and the next proposal."""
+
+    observed_at = start_at
+    while observed_at <= SCREENING_DUE + timedelta(minutes=30):
+        poll = _scheduler_poll(
+            runtime,
+            observed_at=observed_at,
+            natural_clock=natural_clock,
+        )
+        for event in poll["events"]:
+            all_dispatch_log.append(event)
+            if event["task_name"] == "single_brain_proposal_handoff":
+                proposal_dispatch_log.append(event)
+            elif event["task_name"] == "single_brain_screening_producer":
+                screening_dispatch_log.append(event)
+        if screening_dispatch_log and proposal_dispatch_log:
+            latest_proposal = proposal_dispatch_log[-1]
+            eligible_screening = [
+                event for event in screening_dispatch_log
+                if event["scheduled_for"] is not None
+                and latest_proposal["scheduled_for"] is not None
+                and _parse_time(event["scheduled_for"])
+                <= _parse_time(latest_proposal["scheduled_for"])
+            ]
+            latest_screening = eligible_screening[-1] if eligible_screening else None
+            if (
+                latest_screening is not None
+                and latest_proposal["scheduled_for"] is not None
+                and latest_screening["scheduled_for"] is not None
+                and _parse_time(latest_proposal["scheduled_for"])
+                >= _parse_time(latest_screening["scheduled_for"])
+                and _parse_time(latest_proposal["scheduled_for"]) >= SCREENING_DUE
+            ):
+                return
+        observed_at += timedelta(seconds=30)
+    raise AssertionError(
+        "scheduler did not naturally reach screening and the following proposal"
     )
 
 
@@ -504,10 +600,18 @@ def _causal_timeline(
         parsed = datetime.fromisoformat(text)
         return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
-    scheduler_scheduled_for = parse(dispatch_log[-1]["scheduled_for"])
-    scheduler_started_at = parse(dispatch_log[-1]["started_at"])
-    research_completed_at = research_completions[-1]
     proposal_produced_at = parse(proposal_raw["created_at"])
+    eligible_dispatches = [
+        event for event in dispatch_log
+        if parse(event["scheduled_for"]) <= proposal_produced_at
+    ]
+    _require(eligible_dispatches, "proposal timestamp has no preceding scheduler dispatch")
+    dispatch = eligible_dispatches[-1]
+    scheduler_scheduled_for = parse(dispatch["scheduled_for"])
+    scheduler_started_at = parse(dispatch["started_at"])
+    eligible_research = [event for event in research_completions if event <= proposal_produced_at]
+    _require(eligible_research, "proposal timestamp has no preceding research completion")
+    research_completed_at = eligible_research[-1]
     proposal_published_at = proposal_publications[-1]
     ordered = (
         scheduler_scheduled_for,
@@ -554,7 +658,7 @@ def _run_natural_day(
     DatabaseManager.reset_instance()
     db_ref = {"db": DatabaseManager.get_instance()}
     generated_contexts: list[str] = []
-    screening_calls: list[str] = []
+    screening_calls: list[dict[str, object]] = []
     screening_attempts: list[dict[str, object]] = []
     research_completions: list[datetime] = []
     proposal_publications: list[datetime] = []
@@ -612,16 +716,12 @@ def _run_natural_day(
 
     def screening_factory(*args, **kwargs):
         attempt_number = len(screening_attempts) + 1
-        screening_calls.append(screening_mode)
-        screening_attempts.append({
-            "attempt": attempt_number,
-            "mode": screening_mode,
-            "at": natural_clock["now"].isoformat(),
-        })
         return _FixtureScreeningService(
             *args,
             mode=screening_mode,
             attempt_number=attempt_number,
+            attempt_events=screening_attempts,
+            screening_calls=screening_calls,
             observed_at=natural_clock["now"],
             **kwargs,
         )
@@ -651,6 +751,8 @@ def _run_natural_day(
 
     runtime = make_runtime()
     dispatch_log: list[dict[str, object]] = []
+    screening_dispatch_log: list[dict[str, object]] = []
+    all_dispatch_log: list[dict[str, object]] = []
     runtime_status: dict[str, object] = {}
     restart_status: dict[str, object] | None = None
     context_refresh_probe: dict[str, object] = {}
@@ -687,6 +789,11 @@ def _run_natural_day(
                 natural_clock=natural_clock,
                 dispatch_target=1,
                 dispatch_log=dispatch_log,
+                all_dispatch_log=all_dispatch_log,
+            )
+            screening_dispatch_log.extend(
+                event for event in all_dispatch_log
+                if event["task_name"] == "single_brain_screening_producer"
             )
             if dispatches > 1:
                 if restart_between_attempts:
@@ -708,6 +815,7 @@ def _run_natural_day(
                         natural_clock=natural_clock,
                         dispatch_target=dispatches,
                         dispatch_log=dispatch_log,
+                        all_dispatch_log=all_dispatch_log,
                     )
                 else:
                     next_poll = datetime.fromisoformat(
@@ -719,7 +827,23 @@ def _run_natural_day(
                         natural_clock=natural_clock,
                         dispatch_target=dispatches,
                         dispatch_log=dispatch_log,
+                        all_dispatch_log=all_dispatch_log,
                     )
+                screening_dispatch_log[:] = [
+                    event for event in all_dispatch_log
+                    if event["task_name"] == "single_brain_screening_producer"
+                ]
+            next_poll = datetime.fromisoformat(
+                str(all_dispatch_log[-1]["observed_at"])
+            ) + timedelta(seconds=30)
+            _run_scheduler_until_post_screening(
+                runtime,
+                start_at=next_poll,
+                natural_clock=natural_clock,
+                proposal_dispatch_log=dispatch_log,
+                screening_dispatch_log=screening_dispatch_log,
+                all_dispatch_log=all_dispatch_log,
+            )
             context_refresh_probe = _market_context_refresh_probe(
                 db_ref["db"], config=config
             )
@@ -739,6 +863,34 @@ def _run_natural_day(
         proposal_raw=json.loads(proposals[-1].canonical_json()) if proposals else None,
         proposal_publications=proposal_publications,
     )
+    lunch_gate = None
+    if start_at == START_LUNCH and dispatch_log:
+        from src.services.runtime_scheduler import _proposal_handoff_cycle_identity
+
+        scheduled_for = _parse_time(dispatch_log[0]["scheduled_for"])
+        cycle_id, _, _ = _proposal_handoff_cycle_identity(config, scheduled_for)
+        cycle = CanonicalCycleRepository().get_cycle(cycle_id)
+        lunch_gate = {
+            "scheduled_for": dispatch_log[0]["scheduled_for"],
+            "cycle_id": cycle_id,
+            "status": cycle.get("status") if cycle else None,
+            "terminal_reason_code": cycle.get("terminal_reason_code") if cycle else None,
+            "current_work_state": cycle.get("current_work_state") if cycle else None,
+            "persisted": cycle is not None,
+        }
+    registered_responsibilities = [
+        {
+            key: entry.get(key)
+            for key in (
+                "name", "interval_seconds", "run_immediately",
+                "daily_due_time", "daily_due_timezone",
+            )
+            if key in entry
+        }
+        for entry in build_single_brain_m2_background_tasks(
+            config, config_provider=lambda: config
+        )
+    ]
     candidate_status = {
         "success": "VALID", "zero": "NO_FRESH_CANDIDATES",
         "holdings_only": "DISCOVERY_FAILED", "transient_recovery": "VALID",
@@ -768,7 +920,11 @@ def _run_natural_day(
             "screening_due_at": SCREENING_DUE.isoformat(),
             "screening_calls": screening_calls,
             "screening_attempts": screening_attempts,
+            "screening_dispatch_log": screening_dispatch_log,
+            "all_dispatch_log": all_dispatch_log,
             "dispatch_log": dispatch_log,
+            "registered_responsibilities": registered_responsibilities,
+            "lunch_gate": lunch_gate,
             "runtime_scheduler_thread_alive_before_dispatch": runtime_status["thread_alive"],
             "restart_thread_alive": restart_status.get("thread_alive") if restart_status else None,
             "restart_state_path_reused": bool(restart_between_attempts),
@@ -931,7 +1087,7 @@ def _ambiguous_linkage_probe() -> dict[str, object]:
 
 def _run_scenarios(directory: Path) -> dict[str, dict[str, object]]:
     return {
-        "success": _run_natural_day(directory, mode="success", start_at=START_EARLY),
+        "success": _run_natural_day(directory, mode="success", start_at=START_OPEN),
         "zero": _run_natural_day(directory, mode="zero", scenario_label="zero"),
         "holdings_only": _run_natural_day(directory, mode="holdings_only"),
         "luna_timeout": _run_natural_day(directory, mode="success", runner_failure=True, scenario_label="luna_timeout"),
@@ -944,6 +1100,19 @@ def _run_scenarios(directory: Path) -> dict[str, dict[str, object]]:
         "restart_recovery": _run_natural_day(
             directory, mode="transient_recovery", dispatches=2,
             restart_between_attempts=True, scenario_label="restart_recovery",
+        ),
+        "restart_10_17": _run_natural_day(
+            directory, mode="success", start_at=START_EARLY,
+            scenario_label="restart_10_17",
+        ),
+        "lunch_start": _run_natural_day(
+            directory, mode="success", start_at=START_LUNCH,
+            scenario_label="lunch_start",
+        ),
+        "afternoon_restart": _run_natural_day(
+            directory, mode="success",
+            start_at=datetime(2026, 8, 25, 4, 57, tzinfo=timezone.utc),
+            scenario_label="afternoon_restart",
         ),
         "start_phase_mid": _run_natural_day(
             directory, mode="success", start_at=START_MID,
@@ -961,6 +1130,73 @@ def _run_scenarios(directory: Path) -> dict[str, dict[str, object]]:
             directory, mode="success", start_at=START_AFTER_CUTOFF,
             scenario_label="post_cutoff",
         ),
+    }
+
+
+def _proposal_cadence_matrix() -> dict[str, dict[str, object]]:
+    """Prove the real Scheduler phase grid without invoking a callback."""
+
+    from src.scheduler import Scheduler
+
+    cases = {
+        "08:00": START_OPEN,
+        "10:17": START_EARLY,
+        "11:31": START_LUNCH,
+        "12:57": datetime(2026, 8, 25, 4, 57, tzinfo=timezone.utc),
+        "14:44": START_NEAR_DUE,
+    }
+    expected = {
+        "08:00": "09:30",
+        "10:17": "10:20",
+        "11:31": "11:40",
+        "12:57": "13:00",
+        "14:44": "14:50",
+    }
+    matrix = {}
+    for label, registration in cases.items():
+        last_run = Scheduler._initial_background_last_run(
+            registration.timestamp(),
+            interval_seconds=600,
+            daily_due_time="09:30",
+            daily_due_timezone="Asia/Shanghai",
+        )
+        due = datetime.fromtimestamp(last_run + 600, tz=timezone.utc)
+        local_due = due.astimezone(ZoneInfo("Asia/Shanghai"))
+        _require(local_due.strftime("%H:%M") == expected[label], f"proposal cadence drifted for {label}")
+        matrix[label] = {
+            "registration": registration.isoformat(),
+            "next_natural_due": due.isoformat(),
+            "next_natural_due_bjt": local_due.strftime("%H:%M"),
+            "expected": expected[label],
+            "screening_due_bjt": "14:45",
+            "screening_phase_lock": False,
+            "lunch_outcome": "SESSION_GATED_ZERO_WORK" if label == "11:31" else None,
+        }
+    return matrix
+
+
+def _screening_retry_contract() -> dict[str, object]:
+    from src.investment.screening_scheduler import (
+        RETRY_DELAYS_SECONDS,
+        SESSION_CUTOFF_TIME,
+        SCHEDULE_TIME,
+    )
+
+    due = datetime(2026, 8, 25, SCHEDULE_TIME.hour, SCHEDULE_TIME.minute, tzinfo=ZoneInfo("Asia/Shanghai"))
+    cumulative = 0
+    attempts = []
+    for attempt, delay in enumerate(RETRY_DELAYS_SECONDS, start=1):
+        cumulative += delay if attempt > 1 else 0
+        observed = due + timedelta(seconds=cumulative)
+        attempts.append({"attempt": attempt, "delay_before_seconds": delay, "natural_at": observed.isoformat()})
+    cutoff = due.replace(hour=SESSION_CUTOFF_TIME.hour, minute=SESSION_CUTOFF_TIME.minute)
+    _require(all(_parse_time(item["natural_at"]) < cutoff.astimezone(timezone.utc) for item in attempts), "screening retry reaches beyond session cutoff")
+    return {
+        "due_bjt": SCHEDULE_TIME.strftime("%H:%M"),
+        "cutoff_bjt": SESSION_CUTOFF_TIME.strftime("%H:%M"),
+        "declared_delays_seconds": list(RETRY_DELAYS_SECONDS),
+        "reachable_attempts": attempts,
+        "post_close_catchup": "FORBIDDEN",
     }
 
 
@@ -982,6 +1218,16 @@ def main() -> int:
             "primary harness did not use the configured ten-minute proposal interval",
         )
         _require(
+            [item["name"] for item in success["natural_runtime"]["registered_responsibilities"]]
+            == ["single_brain_proposal_handoff", "single_brain_screening_producer"],
+            "proposal and screening responsibilities did not share the single runtime authority",
+        )
+        _require(
+            success["natural_runtime"]["registered_responsibilities"][0]["daily_due_time"] == "09:30"
+            and success["natural_runtime"]["registered_responsibilities"][1]["daily_due_time"] == "14:45",
+            "proposal and screening responsibilities did not retain independent due anchors",
+        )
+        _require(
             len(success["natural_runtime"]["dispatch_log"]) >= 1
             and all(item["dispatched"] for item in success["natural_runtime"]["dispatch_log"]),
             "primary harness did not use the natural interval/due dispatcher",
@@ -998,22 +1244,54 @@ def main() -> int:
                 and scenarios[phase_name]["proposal_ids"],
                 f"{phase_name} did not reach the natural proposal path",
             )
+        _require(
+            scenarios["restart_10_17"]["natural_runtime"]["dispatch_log"][0]["scheduled_for"]
+            == "2026-08-25T02:20:00+00:00",
+            "10:17 restart phase-locked the proposal task instead of using the 10-minute grid",
+        )
+        _require(
+            scenarios["lunch_start"]["natural_runtime"]["lunch_gate"]["persisted"] is True
+            and scenarios["lunch_start"]["natural_runtime"]["lunch_gate"]["status"] == "SKIPPED"
+            and scenarios["lunch_start"]["natural_runtime"]["lunch_gate"]["terminal_reason_code"] == "OUTSIDE_TRADING_SESSION",
+            "lunch session gate did not persist a truthful zero-work terminal cycle",
+        )
+        _require(
+            scenarios["afternoon_restart"]["natural_runtime"]["dispatch_log"][0]["scheduled_for"]
+            == "2026-08-25T05:00:00+00:00",
+            "12:57 restart did not align to the next legal 13:00 grid slot",
+        )
         for recovery_name in ("transient_recovery", "quality_recovery", "restart_recovery"):
             recovery = scenarios[recovery_name]
             _require(
                 recovery["status"] == "SUCCEEDED"
                 and recovery["proposal_ids"]
-                and len(recovery["natural_runtime"]["dispatch_log"]) == 2,
-                f"{recovery_name} did not recover through a later natural attempt",
+                and [item["attempt"] for item in recovery["natural_runtime"]["screening_attempts"]] == [1, 2]
+                and [item["at"] for item in recovery["natural_runtime"]["screening_attempts"]]
+                == ["2026-08-25T06:45:00+00:00", "2026-08-25T06:45:30+00:00"],
+                f"{recovery_name} did not recover through later natural screening attempts",
             )
         _require(
             scenarios["restart_recovery"]["natural_runtime"]["restart_state_path_reused"],
             "restart recovery did not reuse the persisted screening state",
         )
         _require(
-            success["natural_runtime"]["dispatch_log"][0]["scheduled_for"] == SCREENING_DUE.isoformat()
+            success["natural_runtime"]["dispatch_log"][0]["scheduled_for"] == "2026-08-25T01:30:00+00:00"
             and success["natural_runtime"]["dispatch_log"][0]["phase_locked"] is True,
-            "primary dispatch did not prove the existing 14:45 phase-locked due point",
+            "primary dispatch did not prove the 09:30 anchored proposal grid",
+        )
+        cadence_matrix = _proposal_cadence_matrix()
+        retry_contract = _screening_retry_contract()
+        _require(
+            {label: item["next_natural_due_bjt"] for label, item in cadence_matrix.items()}
+            == {"08:00": "09:30", "10:17": "10:20", "11:31": "11:40", "12:57": "13:00", "14:44": "14:50"},
+            "proposal cadence matrix did not use the session grid",
+        )
+        _require(
+            retry_contract["due_bjt"] == "14:45"
+            and retry_contract["cutoff_bjt"] == "15:00"
+            and retry_contract["post_close_catchup"] == "FORBIDDEN"
+            and retry_contract["reachable_attempts"][-1]["natural_at"] == "2026-08-25T14:57:30+08:00",
+            "screening retry contract did not remain bounded before the session cutoff",
         )
         _require(
             success["timing_contract"] == {
@@ -1043,10 +1321,10 @@ def main() -> int:
             )
         _require(
             scenarios["post_due"]["natural_runtime"]["dispatch_log"][-1]["scheduled_for"]
-            == (SCREENING_DUE + timedelta(minutes=10)).isoformat()
+            == "2026-08-25T06:50:00+00:00"
             and scenarios["post_due"]["status"] == "SUCCEEDED"
             and scenarios["post_due"]["proposal_ids"],
-            "post-14:45 natural phase-lock retry did not complete legally",
+            "post-due natural grid retry did not complete legally",
         )
         _require(
             scenarios["post_cutoff"]["status"] == "SKIPPED"
@@ -1093,17 +1371,26 @@ def main() -> int:
         )
         payload = {
             "repo": "DSA", "harness": "PALLAS_SYSTEM_REASSEMBLY_GOLDEN_PATH",
-            "schema_version": "pallas-system-reassembly-harness-v4", "fixed_clock": NOW.isoformat(),
+            "schema_version": "pallas-system-reassembly-harness-v5", "fixed_clock": NOW.isoformat(),
             "synthetic_trading_day": {
                 "natural_entry": "RuntimeSchedulerService",
                 "scheduler_dispatch_path": "Scheduler._run_background_tasks",
                 "screening_due_at": SCREENING_DUE.isoformat(),
                 "configured_interval_seconds": success["natural_runtime"]["configured_interval_seconds"],
                 "phase_lock": {
-                    "daily_due_time": "14:45",
+                    "daily_due_time": "09:30",
                     "daily_due_timezone": "Asia/Shanghai",
                     "first_dispatch_is_scheduler_due": True,
                 },
+                "screening_responsibility": {
+                    "task_name": "single_brain_screening_producer",
+                    "daily_due_time": "14:45",
+                    "daily_due_timezone": "Asia/Shanghai",
+                    "same_runtime_authority": True,
+                },
+                "registered_responsibilities": success["natural_runtime"]["registered_responsibilities"],
+                "proposal_cadence_matrix": cadence_matrix,
+                "screening_retry_contract": retry_contract,
                 "direct_callback_invocation": False,
                 "manual_run_now": False,
                 "legal_session": True, "complete": True,

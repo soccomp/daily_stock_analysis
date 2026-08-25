@@ -32,6 +32,9 @@ SCHEDULER_MODE_FULL = "FULL"
 SCHEDULER_MODE_M2_SHADOW_ONLY = "M2_SHADOW_ONLY"
 SCHEDULER_MODE_M3_SIMULATION_EXECUTION_ONLY = "M3_SIMULATION_EXECUTION_ONLY"
 SCHEDULER_MODE_PROPOSAL_HANDOFF_ONLY = "PROPOSAL_HANDOFF_ONLY"
+PROPOSAL_SESSION_GRID_ANCHOR = "09:30"
+SCREENING_TASK_NAME = "single_brain_screening_producer"
+SCREENING_TICK_INTERVAL_SECONDS = 30
 _RUNTIME_ANALYSIS_LOCK = threading.Lock()
 SCHEDULE_ARGS_OVERRIDE_KEYS = {
     "no_notify",
@@ -336,31 +339,6 @@ def build_single_brain_m2_background_tasks(
                 )
                 release_cycle_ref["cycle_id"] = expected_cycle_id
 
-                # Screening remains the existing DailyScreeningScheduler
-                # semantics, but its due check is now a callback owned by this
-                # one RuntimeSchedulerService task.  No second thread or
-                # LaunchAgent is registered.
-                if bool(getattr(loaded_config, "single_brain_m2_screening_enabled", False)):
-                    try:
-                        from src.investment.screening_scheduler import run_due_screening
-                        from src.storage import DatabaseManager
-
-                        screening_result = run_due_screening(
-                            config=loaded_config,
-                            db_manager=DatabaseManager.get_instance(),
-                            now=task_started_at,
-                        )
-                        logger.info(
-                            "Single Brain screening producer: status=%s run_id=%s",
-                            screening_result.get("status"),
-                            screening_result.get("run_id"),
-                        )
-                    except Exception as exc:
-                        # Candidate discovery will classify the persisted
-                        # artifact as unavailable/failed; never fabricate a
-                        # fresh result or turn this into a NO_ACTION outcome.
-                        logger.warning("Single Brain screening producer failed closed: %s", exc)
-
                 result = ProposalHandoffLoopService.from_config(loaded_config).run_cycle(
                     scheduled_for=scheduled_for,
                     started_at=task_started_at,
@@ -444,16 +422,57 @@ def build_single_brain_m2_background_tasks(
         "name": task_name,
     }
     if execution_mode == "PROPOSAL_HANDOFF":
-        # Screening remains owned by this one proposal task.  Phase-locking
-        # the existing interval to the canonical 14:45 CN due slot prevents a
-        # normal process start at (for example) 10:17 from shifting every
-        # hourly tick beyond the legal session.
-        from src.investment.screening_scheduler import SCHEDULE_TIME
-
+        # Anchor proposal cadence to the existing A-share morning session grid.
+        # Screening has its own task below, so its 14:45 producer due time can
+        # never phase-lock or suppress the ordinary proposal/NO_ACTION loop.
         task_definition.update({
-            "daily_due_time": SCHEDULE_TIME.strftime("%H:%M"),
+            "daily_due_time": PROPOSAL_SESSION_GRID_ANCHOR,
             "daily_due_timezone": "Asia/Shanghai",
         })
+
+        if bool(getattr(config, "single_brain_m2_screening_enabled", False)):
+            def screening_producer_task(
+                scheduled_for: datetime | None = None,
+                started_at: datetime | None = None,
+            ) -> None:
+                observed_at = started_at or scheduled_for or datetime.now(timezone.utc)
+                current_config = config_provider()
+                if not getattr(current_config, "single_brain_m2_screening_enabled", False):
+                    return
+                try:
+                    from src.investment.screening_scheduler import run_due_screening
+                    from src.storage import DatabaseManager
+
+                    screening_result = run_due_screening(
+                        config=current_config,
+                        db_manager=DatabaseManager.get_instance(),
+                        now=observed_at,
+                    )
+                    logger.info(
+                        "Single Brain screening producer: status=%s run_id=%s",
+                        screening_result.get("status"),
+                        screening_result.get("run_id"),
+                    )
+                except Exception as exc:
+                    # Candidate discovery will classify the persisted artifact
+                    # as unavailable/failed; never fabricate a fresh result or
+                    # turn this into a NO_ACTION outcome.
+                    logger.warning("Single Brain screening producer failed closed: %s", exc)
+
+            screening_producer_task.accepts_scheduler_timestamps = True
+            screening_task_definition = {
+                "task": screening_producer_task,
+                "interval_seconds": SCREENING_TICK_INTERVAL_SECONDS,
+                "run_immediately": False,
+                "name": SCREENING_TASK_NAME,
+            }
+            from src.investment.screening_scheduler import SCHEDULE_TIME
+
+            screening_task_definition.update({
+                "daily_due_time": SCHEDULE_TIME.strftime("%H:%M"),
+                "daily_due_timezone": "Asia/Shanghai",
+            })
+            return [task_definition, screening_task_definition]
     return [task_definition]
 
 
@@ -461,11 +480,15 @@ def _restricted_single_brain_scheduler_mode(
     background_tasks: List[Dict[str, Any]],
 ) -> str:
     names = [entry.get("name") for entry in background_tasks]
+    name_set = set(names)
     if names == ["single_brain_m2_shadow"]:
         return SCHEDULER_MODE_M2_SHADOW_ONLY
     if names == ["single_brain_m3_simulation_execution"]:
         return SCHEDULER_MODE_M3_SIMULATION_EXECUTION_ONLY
-    if names == ["single_brain_proposal_handoff"]:
+    if (
+        "single_brain_proposal_handoff" in name_set
+        and name_set <= {"single_brain_proposal_handoff", SCREENING_TASK_NAME}
+    ):
         return SCHEDULER_MODE_PROPOSAL_HANDOFF_ONLY
     return SCHEDULER_MODE_OFF
 

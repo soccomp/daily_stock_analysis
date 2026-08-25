@@ -11,7 +11,7 @@ import src.investment.screening_scheduler as sched_mod
 from src.investment.screening_scheduler import DailyScreeningScheduler
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
-TRADING_DAY = datetime(2026, 8, 18, 15, 5, 0, tzinfo=CN_TZ)  # Tuesday
+TRADING_DAY = datetime(2026, 8, 18, 14, 50, 0, tzinfo=CN_TZ)  # Tuesday
 
 
 class _FakeDB:
@@ -224,4 +224,21 @@ def test_before_schedule_time_does_not_run(tmp_path, monkeypatch):
     result = s.tick()
 
     assert result["status"] == "BEFORE_SCHEDULE_TIME"
+    assert calls == []
+
+
+def test_after_session_cutoff_does_not_catch_up_screening(tmp_path, monkeypatch):
+    monkeypatch.setattr(sched_mod, "is_market_open", lambda m, d: True)
+    calls = []
+
+    def run_screen(**kwargs):
+        calls.append(kwargs)
+        return {"run_id": "late"}
+
+    late = TRADING_DAY.replace(hour=15, minute=1)
+    s = _scheduler(tmp_path, run_screen=run_screen, now=late)
+    result = s.tick()
+
+    assert result["status"] == "AFTER_SESSION_CUTOFF"
+    assert result["zero_work"] is True
     assert calls == []

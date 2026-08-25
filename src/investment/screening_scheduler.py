@@ -34,6 +34,7 @@ CN_TZ = ZoneInfo("Asia/Shanghai")
 # the legal XSHG session. The screening pipeline uses the latest completed
 # prior-session bar when the current session is not closed.
 SCHEDULE_TIME = time(14, 45)
+SESSION_CUTOFF_TIME = time(15, 0)
 DEFAULT_STRATEGY = "capital_heat"
 DEFAULT_MARKET = "cn"
 DEFAULT_MAX_RESULTS = 3
@@ -67,6 +68,7 @@ class DailyScreeningScheduler:
         market: str = DEFAULT_MARKET,
         max_results: int = DEFAULT_MAX_RESULTS,
         schedule_time: time = SCHEDULE_TIME,
+        session_cutoff_time: time = SESSION_CUTOFF_TIME,
         db_manager: Any | None = None,
     ) -> None:
         self._state_path = Path(state_path)
@@ -77,6 +79,7 @@ class DailyScreeningScheduler:
         self._market = market
         self._max_results = max_results
         self._schedule_time = schedule_time
+        self._session_cutoff_time = session_cutoff_time
         self._db_manager = db_manager
 
     def tick(self) -> dict[str, Any]:
@@ -86,6 +89,15 @@ class DailyScreeningScheduler:
 
         if not is_market_open(self._market, today):
             return {"status": "NON_TRADING_DAY", "run_key": run_key, "date": today.isoformat()}
+
+        if now.time() >= self._session_cutoff_time:
+            return {
+                "status": "AFTER_SESSION_CUTOFF",
+                "run_key": run_key,
+                "date": today.isoformat(),
+                "cutoff_time": self._session_cutoff_time.isoformat(),
+                "zero_work": True,
+            }
 
         if now.time() < self._schedule_time:
             return {
