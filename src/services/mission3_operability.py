@@ -7,14 +7,29 @@ from typing import Any
 
 from src.investment.m2.natural_admission import evaluate_natural_cycle_admission
 from src.services.dependency_health import get_dependency_health_store
+from src.services.runtime_scheduler import RuntimeSchedulerService
 from src.services.single_brain_m2_readiness_service import SingleBrainM2ReadinessService
 
 
 class Mission3OperabilityService:
     """Expose DSA facts without starting a cycle or refreshing a provider."""
 
-    def __init__(self, *, readiness_service=None, health_store=None, canonical_repository=None, clock=None):
-        self._readiness = readiness_service or SingleBrainM2ReadinessService()
+    def __init__(
+        self,
+        *,
+        readiness_service=None,
+        runtime_scheduler: RuntimeSchedulerService | None = None,
+        health_store=None,
+        canonical_repository=None,
+        clock=None,
+    ):
+        # The Mission-3 surface and the direct M2 readiness route must observe
+        # the same app-owned scheduler.  Without this injection the readiness
+        # service deliberately reports its safe OFF/null fallback, which is
+        # a different fact from the live scheduler projection.
+        self._readiness = readiness_service or SingleBrainM2ReadinessService(
+            runtime_scheduler=runtime_scheduler,
+        )
         self._health = health_store or get_dependency_health_store()
         self._canonical = canonical_repository
         self._clock = clock or (lambda: datetime.now(timezone.utc))
@@ -73,6 +88,7 @@ class Mission3OperabilityService:
                 "enabled": scheduler.get("enabled"),
                 "mode": scheduler.get("mode"),
                 "next_run_at": scheduler.get("next_run_at"),
+                "source": "RuntimeSchedulerService",
             },
             "natural_work_admission": {
                 "allowed": admission.allowed,
@@ -81,6 +97,7 @@ class Mission3OperabilityService:
                 "observed_at": observed_at.isoformat(),
                 "source": "evaluate_natural_cycle_admission",
             },
+            "observed_at": observed_at.isoformat(),
             "source": "DSA_SINGLE_BRAIN_READINESS_AND_DEPENDENCY_STORE",
         }
 
