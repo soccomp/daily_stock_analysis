@@ -987,6 +987,7 @@ class ResearchTriggerCoordinator:
             screening_scheduler_run_id=str(scope.get("screening_scheduler_run_id") or screening_run),
             screening_run_id=screening_run,
             portfolio_snapshot_id=snapshot.snapshot_id,
+            strategy_evidence=scope.get("strategy_evidence"),
         )
 
     def _manual_trigger(self, *, symbol: str, snapshot: PortfolioSnapshot, cycle_id: str, now: datetime, policy_version: str) -> ResearchTrigger:

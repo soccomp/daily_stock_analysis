@@ -143,6 +143,7 @@ class DailyMarketContextService:
         current_query_id: Optional[str] = None,
         require_query_id_match: bool = False,
         decision_as_of: Optional[datetime | str] = None,
+        max_age_seconds: float | None = None,
     ) -> Optional[DailyMarketContext]:
         normalized_region = _normalize_context_region(region)
         if normalized_region is None:
@@ -176,6 +177,10 @@ class DailyMarketContextService:
             if cached is not None and self._is_query_scoped_cache_compatible(
                 cached,
                 current_query_id=current_query_id,
+            ) and self._is_context_fresh(
+                cached,
+                decision_as_of=decision_as_of,
+                max_age_seconds=max_age_seconds,
             ):
                 return cached
 
@@ -201,6 +206,7 @@ class DailyMarketContextService:
                 require_query_id_match=require_query_id_match,
                 report_language=report_language,
                 decision_as_of=decision_as_of,
+                max_age_seconds=max_age_seconds,
             )
             if history_context is not None:
                 self._cache[cache_key] = history_context
@@ -219,6 +225,7 @@ class DailyMarketContextService:
                         require_query_id_match=require_query_id_match,
                         report_language=report_language,
                         decision_as_of=decision_as_of,
+                        max_age_seconds=max_age_seconds,
                     )
                     if history_context is not None:
                         self._cache[cache_key] = history_context
@@ -231,6 +238,10 @@ class DailyMarketContextService:
                 if cached is not None and self._is_query_scoped_cache_compatible(
                     cached,
                     current_query_id=current_query_id,
+                ) and self._is_context_fresh(
+                    cached,
+                    decision_as_of=decision_as_of,
+                    max_age_seconds=max_age_seconds,
                 ):
                     return cached
                 if cached is not None:
@@ -253,6 +264,7 @@ class DailyMarketContextService:
                     require_query_id_match=require_query_id_match,
                     report_language=report_language,
                     decision_as_of=decision_as_of,
+                    max_age_seconds=max_age_seconds,
                 )
                 if history_context is not None:
                     self._cache[cache_key] = history_context
@@ -269,6 +281,7 @@ class DailyMarketContextService:
                 current_query_id=current_query_id,
                 require_query_id_match=require_query_id_match,
                 decision_as_of=decision_as_of,
+                max_age_seconds=max_age_seconds,
             )
             if generated is not None:
                 self._cache[cache_key] = generated
@@ -283,6 +296,7 @@ class DailyMarketContextService:
         require_query_id_match: bool = False,
         report_language: str = "zh",
         decision_as_of: Optional[datetime | str] = None,
+        max_age_seconds: float | None = None,
     ) -> Optional[DailyMarketContext]:
         try:
             history_days = _history_lookup_days(
@@ -356,6 +370,12 @@ class DailyMarketContextService:
                 decision_as_of=decision_as_of,
             )
             if context is not None:
+                if not self._is_context_fresh(
+                    context,
+                    decision_as_of=decision_as_of,
+                    max_age_seconds=max_age_seconds,
+                ):
+                    continue
                 if decision_as_of is None:
                     return context
                 if newest_created_at is None or record_created_at > newest_created_at:
@@ -379,6 +399,26 @@ class DailyMarketContextService:
             return False
 
         return cached_query_id == current_query_id.strip()
+
+    @staticmethod
+    def _is_context_fresh(
+        context: DailyMarketContext,
+        *,
+        decision_as_of: Optional[datetime | str],
+        max_age_seconds: float | None,
+    ) -> bool:
+        """Apply the proposal-loop freshness contract to cache/history hits."""
+        if max_age_seconds is None:
+            return True
+        try:
+            cutoff = require_decision_cutoff(decision_as_of)
+            observed_at = require_decision_cutoff(
+                context.decision_as_of or context.created_at,
+            )
+        except (TypeError, ValueError):
+            return False
+        age = (cutoff - observed_at).total_seconds()
+        return 0 <= age <= max(0.0, float(max_age_seconds))
 
     @staticmethod
     def _cache_key(
@@ -464,6 +504,7 @@ class DailyMarketContextService:
         require_query_id_match: bool = False,
         lock_token: Optional[Any] = None,
         decision_as_of: Optional[datetime | str] = None,
+        max_age_seconds: float | None = None,
     ) -> Optional[DailyMarketContext]:
         owns_lock = lock_token is None
         if lock_token is None:
@@ -494,6 +535,7 @@ class DailyMarketContextService:
                 search_service=search_service,
                 persist_market_review_history=persist_market_review_history,
                 decision_as_of=decision_as_of,
+                max_age_seconds=max_age_seconds,
             )
 
         caller_query_id = (
@@ -594,6 +636,7 @@ class DailyMarketContextService:
         search_service: Any = None,
         persist_market_review_history: bool = True,
         decision_as_of: Optional[datetime | str] = None,
+        max_age_seconds: float | None = None,
     ) -> Optional[DailyMarketContext]:
         wait_interval = _MARKET_REVIEW_LOCK_WAIT_INITIAL_INTERVAL_SECONDS
         for attempt in range(_MARKET_REVIEW_LOCK_WAIT_MAX_ATTEMPTS):
@@ -604,6 +647,7 @@ class DailyMarketContextService:
                 require_query_id_match=require_query_id_match,
                 report_language=report_language,
                 decision_as_of=decision_as_of,
+                max_age_seconds=max_age_seconds,
             )
             if context is not None:
                 self._cache[cache_key] = context
@@ -619,6 +663,7 @@ class DailyMarketContextService:
                         require_query_id_match=require_query_id_match,
                         report_language=report_language,
                         decision_as_of=decision_as_of,
+                        max_age_seconds=max_age_seconds,
                     )
                     if context is not None:
                         self._cache[cache_key] = context
@@ -635,6 +680,7 @@ class DailyMarketContextService:
                         require_query_id_match=require_query_id_match,
                         lock_token=lock_token,
                         decision_as_of=decision_as_of,
+                        max_age_seconds=max_age_seconds,
                     )
                     if generated is not None:
                         self._cache[cache_key] = generated

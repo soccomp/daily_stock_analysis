@@ -29,7 +29,10 @@ from src.core.trading_calendar import is_market_open
 logger = logging.getLogger(__name__)
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
-SCHEDULE_TIME = time(15, 5)
+# The producer must become due while the canonical proposal loop is still in
+# the legal XSHG session. The screening pipeline uses the latest completed
+# prior-session bar when the current session is not closed.
+SCHEDULE_TIME = time(14, 45)
 DEFAULT_STRATEGY = "capital_heat"
 DEFAULT_MARKET = "cn"
 DEFAULT_MAX_RESULTS = 3

@@ -800,6 +800,7 @@ class RuntimeSchedulerService:
 
     def status(self) -> Dict[str, Any]:
         scheduler = self._scheduler
+        thread_alive = bool(self._thread is not None and self._thread.is_alive())
         jobs = scheduler.schedule.get_jobs() if scheduler is not None else []
         next_run = None
         if jobs:
@@ -883,6 +884,7 @@ class RuntimeSchedulerService:
         return {
             "enabled": self._enabled,
             "mode": self._mode,
+            "thread_alive": thread_alive,
             "running": running,
             "schedule_times": schedule_times,
             "next_run_at": next_run,

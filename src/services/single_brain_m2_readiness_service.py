@@ -46,6 +46,11 @@ class SingleBrainM2ReadinessService:
                 "next_run_at": None,
             }
         status = self._runtime_scheduler.status()
+        thread_alive = status.get("thread_alive")
+        # Small read-only test doubles from older callers may not publish the
+        # field; the real RuntimeSchedulerService always does.
+        if thread_alive is None:
+            thread_alive = bool(status.get("enabled"))
         tasks = [
             task
             for task in status.get("background_tasks", [])
@@ -57,9 +62,10 @@ class SingleBrainM2ReadinessService:
         ]
         task = tasks[0] if len(tasks) == 1 else None
         return {
-            "enabled": bool(status.get("enabled")) and task is not None,
+            "enabled": bool(status.get("enabled")) and bool(thread_alive) and task is not None,
             "mode": status.get("mode", "OFF"),
             "authority_count": len(tasks),
+            "thread_alive": bool(thread_alive),
             "interval_seconds": task.get("interval_seconds") if task else None,
             "next_run_at": task.get("next_run_at") if task else None,
         }

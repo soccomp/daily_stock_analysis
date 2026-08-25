@@ -160,6 +160,7 @@ class ProposalHandoffLoopService:
                 current_query_id=cycle_id,
                 require_query_id_match=False,
                 decision_as_of=now,
+                max_age_seconds=max(60, interval_minutes * 60),
             )
             context, _reason = MarketReviewLinkageRepository(db).resolve_market_context(
                 trade_date=now.astimezone(timezone.utc).date(),

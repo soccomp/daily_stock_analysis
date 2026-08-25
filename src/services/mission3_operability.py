@@ -13,8 +13,10 @@ from src.services.single_brain_m2_readiness_service import SingleBrainM2Readines
 class Mission3OperabilityService:
     """Expose DSA facts without starting a cycle or refreshing a provider."""
 
-    def __init__(self, *, readiness_service=None, health_store=None, canonical_repository=None, clock=None):
-        self._readiness = readiness_service or SingleBrainM2ReadinessService()
+    def __init__(self, *, readiness_service=None, health_store=None, canonical_repository=None, runtime_scheduler=None, clock=None):
+        self._readiness = readiness_service or SingleBrainM2ReadinessService(
+            runtime_scheduler=runtime_scheduler,
+        )
         self._health = health_store or get_dependency_health_store()
         self._canonical = canonical_repository
         self._clock = clock or (lambda: datetime.now(timezone.utc))
@@ -75,6 +77,7 @@ class Mission3OperabilityService:
                 "enabled": scheduler.get("enabled"),
                 "mode": scheduler.get("mode"),
                 "authority_count": scheduler.get("authority_count"),
+                "thread_alive": scheduler.get("thread_alive"),
                 "next_run_at": scheduler.get("next_run_at"),
                 "owner": "RuntimeSchedulerService",
                 "registered_task": "single_brain_proposal_handoff",

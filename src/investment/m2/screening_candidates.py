@@ -59,6 +59,7 @@ class ScreeningCandidate:
     intraday_prefilter_observed_at: str | None = None
     intraday_prefilter_reference: str | None = None
     evidence_hash: str | None = None
+    strategy_evidence: dict[str, Any] | None = None
 
     def as_scope(self) -> dict[str, Any]:
         """Project to the M2 research-object shape with source lineage."""
@@ -80,6 +81,8 @@ class ScreeningCandidate:
             value = getattr(self, key)
             if value is not None:
                 scope[key] = value
+        if self.strategy_evidence is not None:
+            scope["strategy_evidence"] = dict(self.strategy_evidence)
         return scope
 
 
@@ -370,6 +373,11 @@ def _project_candidate(
         intraday_prefilter_observed_at=_as_text(item.get("intraday_prefilter_observed_at")),
         intraday_prefilter_reference=_as_text(item.get("intraday_prefilter_reference")),
         evidence_hash=_as_text(item.get("evidence_hash")),
+        strategy_evidence=(
+            dict(item["strategy_evidence"])
+            if isinstance(item.get("strategy_evidence"), dict)
+            else None
+        ),
     )
 
 
