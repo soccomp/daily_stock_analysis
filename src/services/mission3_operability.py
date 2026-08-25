@@ -49,6 +49,8 @@ class Mission3OperabilityService:
         admission = evaluate_natural_cycle_admission(observed_at)
         return {
             "schema_version": 1,
+            "status": "AVAILABLE",
+            "observed_at": observed_at.isoformat(),
             "read_only": True,
             "simulation_only": True,
             "LIVE_TRADING": False,
@@ -72,7 +74,10 @@ class Mission3OperabilityService:
             "recurring_scheduler": {
                 "enabled": scheduler.get("enabled"),
                 "mode": scheduler.get("mode"),
+                "authority_count": scheduler.get("authority_count"),
                 "next_run_at": scheduler.get("next_run_at"),
+                "owner": "RuntimeSchedulerService",
+                "registered_task": "single_brain_proposal_handoff",
             },
             "natural_work_admission": {
                 "allowed": admission.allowed,

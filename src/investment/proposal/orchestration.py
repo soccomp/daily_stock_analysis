@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Callable
+from typing import Any, Callable
 
 from src.config import Config
 from src.investment.canonical_cycle import (
@@ -20,6 +20,9 @@ from src.investment.m2.orchestration import DSAAnalysisCompletionRunner
 from src.investment.m2.natural_admission import CycleBudget, build_cycle_budget
 from src.investment.m2.screening_candidates import (
     DatabaseScreeningCandidateSource,
+    DISCOVERY_NO_FRESH_CANDIDATES,
+    DISCOVERY_VALID,
+    ScreeningDiscoveryResult,
     ScreeningCandidateSource,
 )
 from src.investment.m2.research_trigger import ResearchTriggerCoordinator
@@ -38,6 +41,7 @@ from src.repositories.market_review_linkage_repo import (
     MarketReviewLinkageConflictError,
     MarketReviewLinkageRepository,
 )
+from src.market_review_contract import validate_market_context_for_slot
 from src.storage import DatabaseManager
 
 
@@ -64,6 +68,9 @@ class ProposalHandoffRunResult:
     deferred_count: int = 0
     candidate_outcomes: tuple[dict[str, object], ...] = ()
     canonical_cycle: dict[str, object] | None = None
+    candidate_discovery_status: str = "DISABLED"
+    candidate_discovery_reason: str = ""
+    market_context_admission: str = "UNVERIFIED"
 
 
 class _NoopCanonicalCycleRepository:
@@ -103,6 +110,7 @@ class ProposalHandoffLoopService:
         snapshot_source: PortfolioSnapshotSource,
         screening_candidate_source: ScreeningCandidateSource | None = None,
         trigger_coordinator: ResearchTriggerCoordinator | None = None,
+        market_context_provider: Callable[..., Mapping[str, object] | None] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._config = config
@@ -112,6 +120,7 @@ class ProposalHandoffLoopService:
         self._screening_candidate_source = screening_candidate_source
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._trigger_coordinator = trigger_coordinator
+        self._market_context_provider = market_context_provider
 
     @classmethod
     def from_config(cls, config: Config) -> "ProposalHandoffLoopService":
@@ -132,6 +141,33 @@ class ProposalHandoffLoopService:
             if bool(getattr(config, "single_brain_m2_screening_enabled", False))
             else None
         )
+        from src.core.market_review_runtime import build_market_review_runtime
+        from src.services.daily_market_context import DailyMarketContextService
+
+        notifier, analyzer, search_service = build_market_review_runtime(config)
+        context_service = DailyMarketContextService(db)
+
+        def produce_market_context(*, now: datetime, cycle_id: str, interval_minutes: int):
+            context_service.get_context(
+                region=str(getattr(config, "market_review_region", "cn") or "cn").split(",")[0],
+                config=config,
+                notifier=notifier,
+                analyzer=analyzer,
+                search_service=search_service,
+                allow_generate=True,
+                persist_market_review_history=True,
+                target_date=now.astimezone(timezone.utc).date(),
+                current_query_id=cycle_id,
+                require_query_id_match=False,
+                decision_as_of=now,
+            )
+            context, _reason = MarketReviewLinkageRepository(db).resolve_market_context(
+                trade_date=now.astimezone(timezone.utc).date(),
+                as_of=now,
+                max_age_seconds=max(60, interval_minutes * 60),
+            )
+            return context
+
         return cls(
             config=config,
             analysis_runner=DSAAnalysisCompletionRunner(
@@ -154,6 +190,7 @@ class ProposalHandoffLoopService:
                 db,
                 screening_candidate_source=screening_candidate_source,
             ),
+            market_context_provider=produce_market_context,
         )
 
     def run_cycle(
@@ -329,17 +366,66 @@ class ProposalHandoffLoopService:
         budget: CycleBudget,
     ) -> ProposalHandoffRunResult:
         linkage_repository = MarketReviewLinkageRepository()
-        resolved_market_context = (
-            dict(market_review_context)
-            if market_review_context is not None
-            else linkage_repository.latest_market_context(
+        context_admission = "UNVERIFIED"
+        context_reason = "MISSING"
+        if market_review_context is not None:
+            resolved_market_context = dict(market_review_context)
+            valid, context_reason = validate_market_context_for_slot(
+                resolved_market_context,
                 trade_date=now.astimezone(timezone.utc).date(),
                 as_of=now,
+                max_age_seconds=max(60, interval * 60),
             )
-        )
+            context_admission = context_reason
+            if not valid:
+                resolved_market_context = None
+        else:
+            resolved_market_context, context_reason = linkage_repository.resolve_market_context(
+                trade_date=now.astimezone(timezone.utc).date(),
+                as_of=now,
+                max_age_seconds=max(60, interval * 60),
+            )
+            context_admission = context_reason if resolved_market_context is not None else "UNAVAILABLE"
+            if resolved_market_context is None and self._market_context_provider is not None:
+                try:
+                    resolved_market_context = self._market_context_provider(
+                        now=now,
+                        cycle_id=cycle,
+                        interval_minutes=interval,
+                    )
+                except Exception as exc:
+                    logger.warning("scheduler-owned MarketContext producer failed: %s", exc)
+                    context_reason = "PERSISTENCE_FAILED"
+                    context_admission = "PERSISTENCE_FAILED"
+                if resolved_market_context is not None:
+                    valid, context_reason = validate_market_context_for_slot(
+                        resolved_market_context,
+                        trade_date=now.astimezone(timezone.utc).date(),
+                        as_of=now,
+                        max_age_seconds=max(60, interval * 60),
+                    )
+                    context_admission = context_reason
+                    if not valid:
+                        resolved_market_context = None
         if market_review_context is not None:
+            if resolved_market_context is None:
+                for stage in ("MARKET_REVIEW", "MARKET_CONTEXT"):
+                    canonical.set_stage(
+                        cycle_id=cycle,
+                        stage=stage,
+                        state="BLOCKED",
+                        reason_code=f"MARKET_CONTEXT_{context_reason}",
+                        reason_detail="market context failed the scheduler admission contract",
+                        at=now,
+                    )
+                return ProposalHandoffRunResult(
+                    cycle,
+                    "FAILED_CLOSED",
+                    blocked_reasons=(f"market context admission failed: {context_reason}",),
+                    market_context_admission=context_reason,
+                )
             try:
-                linkage_repository.validate_context(resolved_market_context or {})
+                linkage_repository.validate_context(resolved_market_context)
             except (TypeError, ValueError) as exc:
                 for stage in ("MARKET_REVIEW", "MARKET_CONTEXT"):
                     canonical.set_stage(
@@ -368,6 +454,7 @@ class ProposalHandoffLoopService:
                     cycle,
                     "FAILED_CLOSED",
                     blocked_reasons=(f"market review identity linkage failed: {exc}",),
+                    market_context_admission=context_reason,
                 )
         if resolved_market_context is None:
             for stage in ("MARKET_REVIEW", "MARKET_CONTEXT"):
@@ -375,8 +462,8 @@ class ProposalHandoffLoopService:
                     cycle_id=cycle,
                     stage=stage,
                     state="NOT_ENTERED",
-                    reason_code="NO_PERSISTED_MARKET_CONTEXT",
-                    reason_detail="no causal MarketContext was available at the cycle cutoff",
+                    reason_code=f"MARKET_CONTEXT_{context_reason or 'MISSING'}",
+                    reason_detail="no admissible causal MarketContext was available at the cycle cutoff",
                     at=now,
                 )
             if require_market_review_context:
@@ -398,8 +485,9 @@ class ProposalHandoffLoopService:
                     cycle,
                     "FAILED_CLOSED",
                     blocked_reasons=(
-                        "market review context is required for canonical proposal handoff",
+                        f"market review context is required for canonical proposal handoff: {context_reason}",
                     ),
+                    market_context_admission=context_reason,
                 )
         else:
             from src.services.dependency_health import (
@@ -443,6 +531,7 @@ class ProposalHandoffLoopService:
                             "DSA research admission blocked: "
                             + "; ".join(admission.get("blocked_reasons") or ("UNKNOWN",)),
                         ),
+                        market_context_admission=context_admission,
                     )
             canonical.update_identity_and_counts(
                 cycle_id=cycle,
@@ -471,9 +560,11 @@ class ProposalHandoffLoopService:
         acknowledgements: list[AthenaProposalAcknowledgement] = []
         blocked: list[str] = []
         candidate_outcomes: list[dict[str, object]] = []
+        discovery = ScreeningDiscoveryResult("DISABLED")
         try:
             authoritative_snapshot = self._snapshot_source.capture_snapshot()
-            screening_candidates = self._load_screening_candidates()
+            discovery = self._load_screening_candidates(now=now)
+            screening_candidates = [candidate.as_scope() for candidate in discovery.candidates]
             if self._trigger_coordinator is None:
                 from src.investment.m2.selection import select_m2_research_objects
                 scopes = select_m2_research_objects(
@@ -515,6 +606,9 @@ class ProposalHandoffLoopService:
                 cycle,
                 "FAILED_CLOSED",
                 blocked_reasons=(f"authoritative research selection failed: {exc}",),
+                candidate_discovery_status=discovery.status,
+                candidate_discovery_reason=discovery.reason,
+                market_context_admission=context_admission,
             )
         researched = tuple(f"{scope['symbol']}:{scope['source']}" for scope in scopes)
         trigger_ids = tuple(
@@ -525,10 +619,19 @@ class ProposalHandoffLoopService:
         canonical.set_stage(
             cycle_id=cycle,
             stage="CANDIDATE_EVALUATION",
-            state="SUCCEEDED" if scopes else "NO_ACTION",
-            reason_code="CANDIDATE_SELECTION_COMPLETE" if scopes else "NO_CANDIDATES",
+            state=(
+                "PARTIAL" if scopes and discovery.status not in {"VALID", "DISABLED"}
+                else "SUCCEEDED" if scopes else "NO_ACTION"
+            ),
+            reason_code=(
+                f"{discovery.status}_HOLDINGS_OR_OVERRIDE_CONTINUED"
+                if scopes and discovery.status not in {"VALID", "DISABLED"}
+                else "CANDIDATE_SELECTION_COMPLETE" if scopes else discovery.status
+            ),
             reason_detail=(
-                None if scopes else "no candidate satisfied strategy-evidence threshold"
+                discovery.reason
+                if scopes and discovery.status not in {"VALID", "DISABLED"}
+                else None if scopes else "no candidate satisfied strategy-evidence threshold"
             ),
             at=now,
         )
@@ -553,10 +656,32 @@ class ProposalHandoffLoopService:
             at=now,
         )
         if not scopes:
+            if discovery.status not in {"NO_FRESH_CANDIDATES", "DISABLED"}:
+                for stage in ("RESEARCH_BUNDLE", "INVESTMENT_PROPOSAL", "ATHENA_HANDOFF_ACK"):
+                    canonical.set_stage(
+                        cycle_id=cycle,
+                        stage=stage,
+                        state="NOT_ENTERED",
+                        reason_code=discovery.status,
+                        reason_detail=discovery.reason,
+                        at=now,
+                    )
+                return ProposalHandoffRunResult(
+                    cycle,
+                    "FAILED_CLOSED",
+                    blocked_reasons=(
+                        f"screening discovery did not prove a fresh result: {discovery.status}; "
+                        f"{discovery.reason}"
+                    ,),
+                    candidate_discovery_status=discovery.status,
+                    candidate_discovery_reason=discovery.reason,
+                    market_context_admission=context_admission,
+                )
             no_action = MarketReviewOutcomeRepository().persist_no_action(
                 source_task_id=cycle,
                 trade_date=now.astimezone(timezone.utc).date(),
                 reason="no candidate satisfied strategy-evidence threshold",
+                persisted_at=now,
             )
             linkage = None
             if resolved_market_context is not None:
@@ -594,6 +719,9 @@ class ProposalHandoffLoopService:
                 no_action_outcome=no_action,
                 market_review_linkage=linkage,
                 candidate_count=0,
+                candidate_discovery_status=discovery.status,
+                candidate_discovery_reason=discovery.reason,
+                market_context_admission=context_admission,
             )
         research_trigger_ids: list[str] = []
         deferred_count = 0
@@ -747,7 +875,7 @@ class ProposalHandoffLoopService:
                 blocked.append(f"market review identity linkage failed: {exc}")
         status = (
             "PARTIAL"
-            if deferred_count
+            if deferred_count or discovery.status not in {"VALID", "DISABLED"}
             else "COMPLETED"
             if proposal_ids and not blocked
             else "PARTIAL"
@@ -832,11 +960,14 @@ class ProposalHandoffLoopService:
             failed_count=len(blocked),
             deferred_count=deferred_count,
             candidate_outcomes=tuple(candidate_outcomes),
+            candidate_discovery_status=discovery.status,
+            candidate_discovery_reason=discovery.reason,
+            market_context_admission=context_admission,
         )
 
-    def _load_screening_candidates(self) -> list[dict[str, object]]:
+    def _load_screening_candidates(self, *, now: datetime) -> ScreeningDiscoveryResult:
         if self._screening_candidate_source is None:
-            return []
+            return ScreeningDiscoveryResult("DISABLED")
         max_candidates = min(
             50,
             max(1, int(getattr(self._config, "single_brain_m2_screening_max_candidates", 3))),
@@ -846,6 +977,15 @@ class ProposalHandoffLoopService:
             int(getattr(self._config, "single_brain_m2_screening_max_age_hours", 72)),
         )
         try:
+            latest_result = getattr(self._screening_candidate_source, "latest_result", None)
+            if callable(latest_result):
+                return latest_result(
+                    max_candidates=max_candidates,
+                    max_age=timedelta(hours=max_age_hours),
+                    now=now,
+                    strategy=str(getattr(self._config, "single_brain_m2_screening_strategy", "capital_heat") or "capital_heat"),
+                    market=str(getattr(self._config, "single_brain_m2_screening_market", "cn") or "cn"),
+                )
             candidates = self._screening_candidate_source.latest(
                 max_candidates=max_candidates,
                 max_age=timedelta(hours=max_age_hours),
@@ -856,8 +996,11 @@ class ProposalHandoffLoopService:
                 "falling back to holdings/allowlist: %s",
                 exc,
             )
-            return []
-        return [candidate.as_scope() for candidate in candidates]
+            return ScreeningDiscoveryResult("DISCOVERY_UNAVAILABLE", reason=f"{type(exc).__name__}: {exc}")
+        return ScreeningDiscoveryResult(
+            "VALID" if candidates else "NO_FRESH_CANDIDATES",
+            tuple(candidates),
+        )
 
 
 def _candidate_provenance(scope: dict[str, object]) -> CandidateProvenance:

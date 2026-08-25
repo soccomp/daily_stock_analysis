@@ -195,6 +195,16 @@ def screen(
     snapshot_count = len(snapshot_df)
     snapshot_source = str(snapshot_df.attrs.get("snapshot_source", ""))
     source_errors = [str(item) for item in snapshot_df.attrs.get("source_errors", [])]
+    latest_completed_trade_date = snapshot_df.attrs.get("latest_completed_trade_date")
+    if latest_completed_trade_date is None:
+        latest_completed_trade_date = decision_cutoff.date().isoformat()
+    completion_status = str(
+        snapshot_df.attrs.get("daily_completion_status") or "CLOSE_CONFIRMED"
+    )
+    completion_basis = str(snapshot_df.attrs.get("daily_completion_basis") or "SNAPSHOT_CUTOFF")
+    quantitative_input_reference = str(
+        snapshot_df.attrs.get("source_reference") or snapshot_source or "DSA_SCREENING_SNAPSHOT"
+    )
     degradation.extend(f"Snapshot source fallback: {item}" for item in source_errors)
     if bool(snapshot_df.attrs.get("fallback_used")):
         stale_age = snapshot_df.attrs.get("stale_age_hours")
@@ -338,6 +348,11 @@ def screen(
             post_analyzers=analyzer_names,
             daily_enriched=daily_enriched,
             daily_enrich_count=daily_enrich_count,
+            decision_cutoff=canonical_utc(decision_cutoff),
+            latest_completed_trade_date=str(latest_completed_trade_date),
+            completion_status=completion_status,
+            completion_basis=completion_basis,
+            quantitative_input_reference=quantitative_input_reference,
             risk_enabled=config.risk_enabled,
             portfolio_diversity_enabled=config.portfolio_diversity_enabled,
         )
@@ -594,6 +609,10 @@ def screen(
         result_variant_pool_size=selection_variant.pool_size,
         result_variant_rotated_slots=selection_variant.rotated_slots,
         decision_cutoff=canonical_utc(decision_cutoff),
+        latest_completed_trade_date=str(latest_completed_trade_date),
+        completion_status=completion_status,
+        completion_basis=completion_basis,
+        quantitative_input_reference=quantitative_input_reference,
     )
 
 

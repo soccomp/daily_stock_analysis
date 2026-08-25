@@ -9,6 +9,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 from src.storage import AnalysisHistory, DatabaseManager, MarketReviewLineageRecord, to_utc_naive_datetime
+from src.market_review_contract import validate_market_context_for_slot
 
 
 def _canonical(payload: Mapping[str, Any]) -> bytes:
@@ -222,12 +223,25 @@ class MarketReviewLinkageRepository:
         trade_date: date,
         as_of: datetime | None = None,
     ) -> dict[str, Any] | None:
-        """Resolve one explicit causal MarketContext for a cycle.
+        """Resolve one causal context, retaining the legacy value-only API."""
+        context, _reason = self.resolve_market_context(
+            trade_date=trade_date,
+            as_of=as_of,
+        )
+        return context
 
-        The old resolver treated multiple same-day contexts as inherently
-        ambiguous and returned ``None``.  A cycle now supplies its observation
-        cutoff, so the resolver chooses the newest real context at or before
-        that cutoff.  Equal-time distinct contexts remain fail-closed.
+    def resolve_market_context(
+        self,
+        *,
+        trade_date: date,
+        as_of: datetime | None = None,
+        max_age_seconds: float | None = None,
+    ) -> tuple[dict[str, Any] | None, str]:
+        """Resolve and classify the latest persisted causal MarketContext.
+
+        The resolver owns no second state authority.  ``reason`` is returned
+        so the scheduler can distinguish MISSING, STALE, PIT and structural
+        quality failures without translating every failure into a fake NO_ACTION.
         """
         with self.db.session_scope() as session:
             snapshots = (
@@ -272,10 +286,20 @@ class MarketReviewLinkageRepository:
                     (item_as_of, created, (task_id, context_id), dict(item), item_hash)
                 )
         if not candidates:
-            return None
+            return None, "MISSING"
         candidates.sort(key=lambda item: (item[0], item[1], item[2]))
         latest_as_of = candidates[-1][0]
         latest = [item for item in candidates if item[0] == latest_as_of]
         if len({item[2] for item in latest}) != 1:
-            return None
-        return dict(latest[-1][3])
+            return None, "AMBIGUOUS"
+        context = dict(latest[-1][3])
+        if as_of is not None and max_age_seconds is not None:
+            valid, reason = validate_market_context_for_slot(
+                context,
+                trade_date=trade_date,
+                as_of=as_of,
+                max_age_seconds=max_age_seconds,
+            )
+            if not valid:
+                return None, reason
+        return context, "VALID"

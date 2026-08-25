@@ -529,6 +529,7 @@ class DailyMarketContextService:
                 save_report_file=False,
                 persist_history=persist_market_review_history,
                 trigger_source="daily_market_context",
+                context_as_of=decision_as_of,
             )
 
             if (
@@ -541,6 +542,18 @@ class DailyMarketContextService:
                 payload = {"region": region, "markdown_report": result}
                 fallback_summary = result
             else:
+                return None
+
+            persistence_status = getattr(result, "persistence_status", None)
+            if (
+                persist_market_review_history
+                and persistence_status is not None
+                and persistence_status == "PERSISTENCE_FAILED"
+            ):
+                logger.warning(
+                    "大盘复盘上下文未形成持久化证据: status=%s",
+                    persistence_status,
+                )
                 return None
 
             return self._build_context_from_payload(

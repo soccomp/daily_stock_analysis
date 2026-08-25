@@ -16,7 +16,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from inspect import getattr_static
 from typing import Optional, Dict, Any, List, Callable
 
@@ -956,6 +956,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 limit_available = overview.limit_up_count + overview.limit_down_count > 0
                 has_breadth_data = bool(breadth_available or limit_available)
 
+        collection_cutoff = datetime.now(timezone.utc).isoformat()
         payload = {
             "version": 1,
             "kind": "market_review",
@@ -967,7 +968,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 "green_up",
             ),
             "title": title,
-            "generated_at": datetime.now().isoformat(),
+            "generated_at": collection_cutoff,
             "date": overview.date,
             "market_scope": self._get_market_scope_name(language),
             "indices": [idx.to_dict() for idx in overview.indices],
@@ -1004,6 +1005,14 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             "news": [self._normalize_news_item(item) for item in (news or [])[:8]],
             "sections": sections,
             "markdown_report": report,
+            "component_provenance": {
+                component: {
+                    "status": "PIT_VALIDATED",
+                    "observed_at": collection_cutoff,
+                    "reference": f"DSA:MarketAnalyzer:{self.region}:{component}",
+                }
+                for component in ("indices", "breadth", "sectors", "concepts")
+            },
         }
 
         if light is not None:
@@ -1021,6 +1030,40 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             }
 
         return payload
+
+    def run_structured_market_review_with_snapshot(
+        self,
+        *,
+        narrative_reason: str = "LUNA_NARRATIVE_UNAVAILABLE",
+    ) -> MarketLightReviewResult:
+        """Return the existing structured contract when narrative generation fails.
+
+        The machine context is built from the same MarketOverview and market
+        data path as the normal review.  Only the explanatory prose falls back
+        to the deterministic local template; no numeric signal is inferred
+        from the fallback text.
+        """
+
+        overview = self.get_market_overview()
+        try:
+            news = self.search_market_news()
+        except Exception as exc:  # news is advisory; structural data remains authoritative
+            logger.warning("[大盘] structured-only context news failed: %s", exc)
+            news = []
+        report = self._generate_template_review(overview, news)
+        snapshot = self.build_market_light_snapshot(overview) if self._supports_market_light() else None
+        payload = self.build_market_review_payload(overview, news, report, snapshot)
+        payload["narrative"] = {
+            "status": "FAILED_CLOSED_STRUCTURED_CONTEXT_USABLE",
+            "reason": str(narrative_reason or "LUNA_NARRATIVE_UNAVAILABLE"),
+            "machine_authority": "STRUCTURED_MARKET_DATA",
+        }
+        return MarketLightReviewResult(
+            overview=overview,
+            report=report,
+            market_light_snapshot=snapshot,
+            structured_payload=payload,
+        )
 
     def _supports_market_light(self) -> bool:
         return self.region in MARKET_LIGHT_REGIONS

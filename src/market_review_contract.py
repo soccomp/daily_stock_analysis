@@ -6,7 +6,7 @@ LLM prose is retained as explanation, never converted into a numeric signal.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Mapping
 
 from src.services.screening.temporal import (
@@ -28,6 +28,8 @@ _COMPONENT_TIMESTAMP_KEYS = (
     "evidence_timestamp",
     "timestamp",
 )
+
+MARKET_CONTEXT_ADMISSION_CONTRACT = "pallas-009-market-context-admission-v1"
 
 
 def _clamp(value: float, lower: float = -1.0, upper: float = 1.0) -> float:
@@ -279,6 +281,7 @@ def build_market_context(
         "market_strength": derive_market_strength(component_payload),
         "component_timing_status": component_timing_status,
         "component_provenance": component_evidence,
+        "admission_contract": MARKET_CONTEXT_ADMISSION_CONTRACT,
         "provenance": {
             "source": "DSA MarketAnalyzer",
             "source_payload_kind": payload.get("kind", "market_review"),
@@ -287,6 +290,83 @@ def build_market_context(
         },
     }
     return context
+
+
+def validate_market_context_for_slot(
+    context: Mapping[str, Any],
+    *,
+    trade_date: date,
+    as_of: datetime,
+    max_age_seconds: float,
+) -> tuple[bool, str]:
+    """Apply the one scheduler-owned MarketContext admission contract.
+
+    This is deliberately a pure validator over the existing persisted context;
+    it does not create a readiness record or perform provider I/O.  Narrative
+    fields are intentionally absent from the checks: structured, persisted
+    point-in-time data remains machine-usable when Luna prose generation fails.
+    """
+
+    if not isinstance(context, Mapping):
+        return False, "INVALID"
+    required_identity = ("source_task_id", "market_review_id", "context_id", "trade_date", "as_of")
+    if any(not str(context.get(key) or "").strip() for key in required_identity):
+        return False, "INVALID"
+    if context.get("market_review_id") != context.get("source_task_id"):
+        return False, "IDENTITY_CONFLICT"
+    if context.get("persistence_status") == "PERSISTENCE_FAILED":
+        return False, "PERSISTENCE_FAILED"
+    try:
+        expected_date = date.fromisoformat(str(trade_date))
+        context_date = date.fromisoformat(str(context.get("trade_date")))
+        cutoff = require_decision_cutoff(as_of).astimezone(timezone.utc)
+        observed = require_decision_cutoff(context.get("as_of")).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return False, "INVALID_PIT"
+    if context_date != expected_date:
+        return False, "IDENTITY_CONFLICT"
+    if observed > cutoff:
+        return False, "FUTURE_DATED"
+    age_seconds = (cutoff - observed).total_seconds()
+    if age_seconds < 0:
+        return False, "FUTURE_DATED"
+    if age_seconds > max(0.0, float(max_age_seconds)):
+        return False, "STALE"
+
+    completeness = context.get("source_completeness")
+    if not isinstance(completeness, Mapping):
+        # Legacy direct unit fixtures are still accepted by the old linkage
+        # validator, but every current producer emits this contract and is
+        # checked strictly below.
+        return True, "LEGACY_UNVERIFIED"
+    required = {str(value) for value in completeness.get("requested") or ()}
+    available = {str(value) for value in completeness.get("available") or ()}
+    missing = tuple(completeness.get("missing") or ())
+    failed = tuple(completeness.get("failed") or ())
+    if (
+        completeness.get("status") != "complete"
+        or (required and not required.issubset(available))
+        or missing
+        or failed
+    ):
+        return False, "DEGRADED_STRUCTURAL"
+
+    if context.get("component_timing_status") != "PIT_VALIDATED":
+        return False, "INVALID_PIT"
+    provenance = context.get("component_provenance")
+    if not isinstance(provenance, Mapping) or any(
+        not isinstance(provenance.get(component), Mapping)
+        or provenance[component].get("status") != "PIT_VALIDATED"
+        for component in _MARKET_COMPONENTS
+    ):
+        return False, "INVALID_PIT"
+    decision_as_of = context.get("decision_as_of")
+    try:
+        if decision_as_of is None or require_decision_cutoff(decision_as_of).astimezone(timezone.utc) > cutoff:
+            return False, "INVALID_PIT"
+    except (TypeError, ValueError):
+        return False, "INVALID_PIT"
+    return True, "VALID"
 
 
 def no_action_outcome(*, task_id: str, reason: str, candidate_count: int = 0) -> dict[str, Any]:

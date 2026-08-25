@@ -1298,9 +1298,17 @@ class ScreeningService:
             "result_variant_applied": bool(raw_data.get("result_variant_applied")),
             "result_variant_pool_size": raw_data.get("result_variant_pool_size") or 0,
             "result_variant_rotated_slots": raw_data.get("result_variant_rotated_slots") or 0,
+            "decision_cutoff": raw_data.get("decision_cutoff") or "",
+            "latest_completed_trade_date": raw_data.get("latest_completed_trade_date"),
+            "completion_status": raw_data.get("completion_status") or "",
+            "completion_basis": raw_data.get("completion_basis") or "",
+            "quantitative_input_reference": raw_data.get("quantitative_input_reference") or "",
         }
         if self.db_manager is not None:
-            self.db_manager.save_screening_run(response)
+            saved = self.db_manager.save_screening_run(response)
+            response["persistence_status"] = "PERSISTED" if saved else "PERSISTENCE_FAILED"
+        else:
+            response["persistence_status"] = "NOT_REQUESTED"
         return response
 
 
@@ -3797,6 +3805,11 @@ def _normalize_candidate(raw: Any, rank: int) -> Dict[str, Any]:
         "dsa_analysis_summary": dsa_analysis_summary,
         "post_analysis_summaries": item.get("post_analysis_summaries") or source.get("post_analysis_summaries") or {},
         "post_analysis_tags": item.get("post_analysis_tags") or source.get("post_analysis_tags") or [],
+        "latest_completed_trade_date": item.get("latest_completed_trade_date") or source.get("latest_completed_trade_date"),
+        "decision_cutoff": item.get("decision_cutoff") or source.get("decision_cutoff"),
+        "completion_status": item.get("completion_status") or source.get("completion_status"),
+        "completion_basis": item.get("completion_basis") or source.get("completion_basis"),
+        "quantitative_input_reference": item.get("quantitative_input_reference") or source.get("quantitative_input_reference"),
         "raw": source,
     }
 

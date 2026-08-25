@@ -33,6 +33,7 @@ SCHEDULE_TIME = time(15, 5)
 DEFAULT_STRATEGY = "capital_heat"
 DEFAULT_MARKET = "cn"
 DEFAULT_MAX_RESULTS = 3
+DEFAULT_STATE_PATH = Path(__file__).resolve().parents[2] / "data" / "screening" / "scheduler_state.json"
 # delays applied *before* each attempt (attempt 1 fires immediately).
 RETRY_DELAYS_SECONDS = (0, 30, 120, 600)
 
@@ -119,6 +120,8 @@ class DailyScreeningScheduler:
                 run_id = str(result.get("run_id") or "").strip()
                 if not run_id:
                     raise ValueError("screening service returned an empty run_id")
+                if result.get("persistence_status") == "PERSISTENCE_FAILED":
+                    raise RuntimeError("screening producer persistence failed")
                 return {
                     "status": "COMPLETED",
                     "run_id": run_id,
@@ -213,3 +216,35 @@ def build_scheduler(state_path: Path, *, now: Callable[[], datetime] | None = No
         market=market,
         max_results=max_results,
     )
+
+
+def run_due_screening(
+    *,
+    config: Any,
+    db_manager: Any,
+    now: datetime,
+    state_path: Path | None = None,
+) -> dict[str, Any]:
+    """Run the existing daily screening producer as a scheduler-owned step.
+
+    The returned object is observational.  This helper creates no thread and
+    registers no independent task; ``RuntimeSchedulerService`` remains the
+    only DSA process-level scheduler authority.
+    """
+
+    from src.services.screening_service import ScreeningService
+
+    service = ScreeningService(config=config, db_manager=db_manager)
+    strategy = (os.getenv("DSA_SCREENING_SCHEDULER_STRATEGY") or DEFAULT_STRATEGY).strip() or DEFAULT_STRATEGY
+    market = (os.getenv("DSA_SCREENING_SCHEDULER_MARKET") or DEFAULT_MARKET).strip() or DEFAULT_MARKET
+    max_results = int(os.getenv("DSA_SCREENING_SCHEDULER_MAX_RESULTS") or DEFAULT_MAX_RESULTS)
+    scheduler = DailyScreeningScheduler(
+        state_path=state_path or DEFAULT_STATE_PATH,
+        run_screen=lambda **kwargs: service.screen(**kwargs),
+        now=lambda: now,
+        strategy=strategy,
+        market=market,
+        max_results=max_results,
+        db_manager=db_manager,
+    )
+    return scheduler.tick()

@@ -242,6 +242,10 @@ class ScreenResult:
     result_variant_pool_size: int = 0
     result_variant_rotated_slots: int = 0
     decision_cutoff: str = ""
+    latest_completed_trade_date: str | None = None
+    completion_status: str = ""
+    completion_basis: str = ""
+    quantitative_input_reference: str = ""
     saved_path: str = ""
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
 

@@ -335,6 +335,31 @@ def build_single_brain_m2_background_tasks(
                 )
                 release_cycle_ref["cycle_id"] = expected_cycle_id
 
+                # Screening remains the existing DailyScreeningScheduler
+                # semantics, but its due check is now a callback owned by this
+                # one RuntimeSchedulerService task.  No second thread or
+                # LaunchAgent is registered.
+                if bool(getattr(loaded_config, "single_brain_m2_screening_enabled", False)):
+                    try:
+                        from src.investment.screening_scheduler import run_due_screening
+                        from src.storage import DatabaseManager
+
+                        screening_result = run_due_screening(
+                            config=loaded_config,
+                            db_manager=DatabaseManager.get_instance(),
+                            now=task_started_at,
+                        )
+                        logger.info(
+                            "Single Brain screening producer: status=%s run_id=%s",
+                            screening_result.get("status"),
+                            screening_result.get("run_id"),
+                        )
+                    except Exception as exc:
+                        # Candidate discovery will classify the persisted
+                        # artifact as unavailable/failed; never fabricate a
+                        # fresh result or turn this into a NO_ACTION outcome.
+                        logger.warning("Single Brain screening producer failed closed: %s", exc)
+
                 result = ProposalHandoffLoopService.from_config(loaded_config).run_cycle(
                     scheduled_for=scheduled_for,
                     started_at=task_started_at,

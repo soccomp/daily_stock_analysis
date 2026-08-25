@@ -77,6 +77,9 @@ class MarketReviewRunResult:
 
     report: str
     market_review_payload: Dict[str, Any] = field(default_factory=dict)
+    history_id: Optional[int] = None
+    persistence_status: str = "NOT_REQUESTED"
+    narrative_status: str = "GENERATED"
 
 
 def _refresh_market_review_history_diagnostics(*, query_id: str) -> None:
@@ -205,6 +208,7 @@ def run_market_review(
     persist_history: bool = True,
     trigger_source: str = "cli",
     progress_callback: Optional[Callable[..., Any]] = None,
+    context_as_of: Optional[datetime | str] = None,
 ) -> Optional[str] | Optional[MarketReviewRunResult]:
     """
     执行大盘复盘分析
@@ -298,7 +302,19 @@ def run_market_review(
                     config=runtime_config,
                     progress_callback=report_progress,
                 )
-                review_result = mkt_analyzer.run_daily_review_with_snapshot()
+                try:
+                    review_result = mkt_analyzer.run_daily_review_with_snapshot()
+                except Exception as exc:
+                    if isinstance(exc, GenerationError) and not exc.fallbackable:
+                        raise
+                    fallback = getattr(mkt_analyzer, "run_structured_market_review_with_snapshot", None)
+                    if not callable(fallback):
+                        raise
+                    logger.warning(
+                        "[MarketReview] narrative generation failed; preserving structured context: %s",
+                        exc,
+                    )
+                    review_result = fallback(narrative_reason=type(exc).__name__)
                 mkt_report = review_result.report
                 _collect_market_light_snapshot(
                     market_light_snapshots,
@@ -338,7 +354,23 @@ def run_market_review(
                 config=runtime_config,
                 progress_callback=report_progress,
             )
-            review_result = market_analyzer.run_daily_review_with_snapshot()
+            try:
+                review_result = market_analyzer.run_daily_review_with_snapshot()
+            except Exception as exc:
+                if isinstance(exc, GenerationError) and not exc.fallbackable:
+                    raise
+                fallback = getattr(
+                    market_analyzer,
+                    "run_structured_market_review_with_snapshot",
+                    None,
+                )
+                if not callable(fallback):
+                    raise
+                logger.warning(
+                    "[MarketReview] narrative generation failed; preserving structured context: %s",
+                    exc,
+                )
+                review_result = fallback(narrative_reason=type(exc).__name__)
             review_report = review_result.report
             market_light_snapshots = {}
             _collect_market_light_snapshot(
@@ -362,6 +394,7 @@ def run_market_review(
                 language=getattr(runtime_config, "report_language", "zh"),
                 root_title=review_text["root_title"],
                 source_task_id=history_query_id,
+                context_as_of=context_as_of,
             )
             markdown_report = _render_market_review_payload_markdown(
                 market_review_payload,
@@ -391,9 +424,10 @@ def run_market_review(
                     filepath,
                 )
 
+            persisted_history_id = None
             if persist_history:
                 report_progress(94, "PERSISTENCE", "Persisting market review history")
-                _persist_market_review_history(
+                persisted_history_id = _persist_market_review_history(
                     review_report=review_report,
                     markdown_report=markdown_report,
                     region=persist_region,
@@ -497,6 +531,19 @@ def run_market_review(
                 return MarketReviewRunResult(
                     report=review_report,
                     market_review_payload=market_review_payload,
+                    history_id=persisted_history_id,
+                    persistence_status=(
+                        "PERSISTED" if persisted_history_id else "PERSISTENCE_FAILED"
+                    ) if persist_history else "NOT_REQUESTED",
+                    narrative_status=(
+                        "STRUCTURED_FALLBACK"
+                        if any(
+                            isinstance(payload, dict)
+                            and (payload.get("narrative") or {}).get("status")
+                            for payload in market_review_payloads.values()
+                        )
+                        else "GENERATED"
+                    ),
                 )
             if merge_notification:
                 return merge_markdown_report
@@ -550,6 +597,7 @@ def _build_combined_market_review_payload(
     language: str,
     root_title: str,
     source_task_id: Optional[str] = None,
+    context_as_of: Optional[datetime | str] = None,
 ) -> Dict[str, Any]:
     normalized_language = normalize_report_language(language)
     title = root_title.lstrip("#").strip()
@@ -565,6 +613,7 @@ def _build_combined_market_review_payload(
             payload,
             task_id=source_task_id or "unknown",
             market_review_id=source_task_id,
+            as_of=context_as_of or payload.get("generated_at"),
         )
         return payload
     combined = {
@@ -582,6 +631,7 @@ def _build_combined_market_review_payload(
             market_payload,
             task_id=source_task_id or "unknown",
             market_review_id=source_task_id,
+            as_of=context_as_of or market_payload.get("generated_at"),
         )
         for market, market_payload in payloads.items()
         if isinstance(market_payload, dict)
