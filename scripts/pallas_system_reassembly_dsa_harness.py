@@ -482,6 +482,44 @@ def _calendar_fault_probe() -> dict[str, object]:
     return {"allowed": admission.allowed, "reason": admission.reason_code}
 
 
+def _ambiguous_linkage_probe() -> dict[str, object]:
+    from src.analyzer import AnalysisResult
+    from src.repositories.market_review_linkage_repo import MarketReviewLinkageRepository
+    from src.storage import DatabaseManager
+
+    db = DatabaseManager.get_instance()
+    first = _context()
+    second = {
+        **first,
+        "context_id": "market-context:fixture-other",
+        "market_review_id": "fixture-review-other",
+        "source_task_id": "fixture-review-other",
+        "provenance": {"source_task_id": "fixture-review-other"},
+    }
+    for query_id, context in (("ambiguous-a", first), ("ambiguous-b", second)):
+        db.save_analysis_history(
+            result=AnalysisResult(
+                code="__market_review__",
+                name="Fixture Market Review",
+                sentiment_score=50,
+                trend_prediction="fixture",
+                operation_advice="fixture",
+                analysis_summary="fixture",
+            ),
+            query_id=query_id,
+            report_type="market_review",
+            news_content="fixture",
+            context_snapshot={"market_review_payload": {"market_context": context}},
+            save_snapshot=True,
+        )
+    context, reason = MarketReviewLinkageRepository(db).resolve_market_context(
+        trade_date=NOW.date(),
+        as_of=NOW,
+        max_age_seconds=3600,
+    )
+    return {"context_resolved": context is not None, "reason": reason}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--scenario", choices=("success", "zero", "holdings_only"), default="success")
@@ -522,6 +560,7 @@ def main() -> int:
                     else {"status": "NOT_ENTERED", "reason": "no proposal in scenario"}
                 ),
                 "calendar_fault": _calendar_fault_probe(),
+                "ambiguous_linkage": _ambiguous_linkage_probe(),
                 "research_trigger_ids": list(result.research_trigger_ids),
                 "candidate_outcomes": list(result.candidate_outcomes),
                 "proposal_ids": list(result.proposal_ids),
