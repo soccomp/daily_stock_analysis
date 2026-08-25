@@ -192,6 +192,53 @@ def test_budget_reserves_configured_timeouts_and_next_interval_guard():
     assert not delayed.admits_candidate(NOW + timedelta(minutes=58))
 
 
+def test_target_budget_contract_is_admissible_and_unsafe_config_fails_closed(isolated_db):
+    target = SimpleNamespace(
+        single_brain_m2_interval_minutes=10,
+        single_brain_m2_cycle_guard_seconds=120,
+        generation_backend_timeout_seconds=300,
+        single_brain_m2_snapshot_timeout_seconds=5,
+        single_brain_proposal_timeout_seconds=5,
+    )
+    budget = build_cycle_budget(started_at=NOW, config=target)
+    assert budget.interval_seconds == 600
+    assert budget.guard_seconds == 120
+    assert budget.usable_cycle_budget_seconds == 480
+    assert budget.candidate_reserve_seconds == 310
+    assert budget.configuration_admissible
+
+    unsafe = SimpleNamespace(
+        single_brain_m2_enabled=True,
+        single_brain_m2_interval_minutes=10,
+        single_brain_m2_cycle_guard_seconds=300,
+        generation_backend_timeout_seconds=300,
+        single_brain_m2_snapshot_timeout_seconds=5,
+        single_brain_proposal_timeout_seconds=5,
+        single_brain_m2_readiness_gate_enabled=False,
+    )
+    unsafe_budget = build_cycle_budget(started_at=NOW, config=unsafe)
+    assert unsafe_budget.usable_cycle_budget_seconds == 300
+    assert not unsafe_budget.configuration_admissible
+
+    calls = {"snapshot": 0, "research": 0}
+    result = ProposalHandoffLoopService(
+        config=unsafe,
+        analysis_runner=SimpleNamespace(
+            complete=lambda **_kwargs: calls.__setitem__("research", calls["research"] + 1)
+        ),
+        publisher=SimpleNamespace(publish=lambda _proposal: None),
+        snapshot_source=SimpleNamespace(
+            capture_snapshot=lambda: calls.__setitem__("snapshot", calls["snapshot"] + 1)
+        ),
+        clock=lambda: NOW,
+    ).run_cycle(scheduled_for=NOW, lock_acquired_at=NOW)
+    assert result.status == "FAILED_CLOSED"
+    assert "configuration is inadmissible" in result.blocked_reasons[0]
+    assert result.canonical_cycle["status"] == "BLOCKED"
+    assert result.canonical_cycle["terminal_reason_code"] == "REQUIRED_DEPENDENCY_BLOCKED"
+    assert calls == {"snapshot": 0, "research": 0}
+
+
 def test_partial_workload_defers_remaining_candidate_and_persists_deadline(isolated_db, monkeypatch):
     scopes = [
         {"symbol": "000001", "source": "HOLDING"},

@@ -233,12 +233,23 @@ class ProposalHandoffLoopService:
             scheduled_for=actual_scheduled_for,
             config=self._config,
         )
+        budget_configuration_reason = (
+            "required cycle budget configuration is inadmissible: "
+            f"usable={budget.usable_cycle_budget_seconds}s "
+            f"< required_reserve={int(budget.candidate_reserve_seconds)}s"
+        )
         canonical_enabled = (
             lock_acquired_at is not None
             or market_review_context is not None
             or require_market_review_context
         )
         if not canonical_enabled:
+            if not budget.configuration_admissible:
+                return ProposalHandoffRunResult(
+                    cycle,
+                    "FAILED_CLOSED",
+                    blocked_reasons=(budget_configuration_reason,),
+                )
             return self._run_cycle_body(
                 scheduled_for=scheduled_for,
                 market_review_context=market_review_context,
@@ -291,17 +302,48 @@ class ProposalHandoffLoopService:
                 at=lock_acquired_at,
             )
         try:
-            result = self._run_cycle_body(
-                scheduled_for=scheduled_for,
-                market_review_context=market_review_context,
-                now=now,
-                slot=slot,
-                cycle=cycle,
-                interval=interval,
-                canonical=canonical,
-                require_market_review_context=require_market_review_context,
-                budget=budget,
-            )
+            if not budget.configuration_admissible:
+                for stage in (
+                    "MARKET_REVIEW",
+                    "MARKET_CONTEXT",
+                    "RESEARCH_TRIGGER",
+                    "RESEARCH_BUNDLE",
+                    "INVESTMENT_PROPOSAL",
+                    "ATHENA_HANDOFF_ACK",
+                ):
+                    canonical.set_stage(
+                        cycle_id=cycle,
+                        stage=stage,
+                        state="NOT_ENTERED",
+                        reason_code="CYCLE_BUDGET_CONFIGURATION_INADMISSIBLE",
+                        reason_detail=budget_configuration_reason,
+                        at=cycle_started_at,
+                    )
+                canonical.set_stage(
+                    cycle_id=cycle,
+                    stage="CANDIDATE_EVALUATION",
+                    state="BLOCKED",
+                    reason_code="CYCLE_BUDGET_CONFIGURATION_INADMISSIBLE",
+                    reason_detail=budget_configuration_reason,
+                    at=cycle_started_at,
+                )
+                result = ProposalHandoffRunResult(
+                    cycle,
+                    "FAILED_CLOSED",
+                    blocked_reasons=(budget_configuration_reason,),
+                )
+            else:
+                result = self._run_cycle_body(
+                    scheduled_for=scheduled_for,
+                    market_review_context=market_review_context,
+                    now=now,
+                    slot=slot,
+                    cycle=cycle,
+                    interval=interval,
+                    canonical=canonical,
+                    require_market_review_context=require_market_review_context,
+                    budget=budget,
+                )
         except Exception as exc:
             canonical.finish_cycle(
                 cycle_id=cycle,
@@ -759,7 +801,7 @@ class ProposalHandoffLoopService:
                 stage="CANDIDATE_EVALUATION",
                 symbol_or_scope=current_scope,
                 work_state="RUNNING",
-                at=datetime.now(timezone.utc),
+                at=budget_observed_at,
             )
             logger.info(
                 "Issue #9 research object selected: symbol=%s source=%s",
@@ -772,7 +814,7 @@ class ProposalHandoffLoopService:
                     cycle_id=cycle,
                     symbol=symbol,
                     query_id=query_id,
-                    current_time=slot,
+                    current_time=budget_observed_at,
                 )
                 # The durable report completion time keeps recovery canonical
                 # without making a long-running analysis expire at handoff.
@@ -820,7 +862,7 @@ class ProposalHandoffLoopService:
                     stage="CANDIDATE_EVALUATION",
                     symbol_or_scope=current_scope,
                     work_state="SUCCEEDED",
-                    at=datetime.now(timezone.utc),
+                    at=proposal_time,
                 )
                 logger.info(
                     "Issue #9 proposal accepted: proposal_id=%s acknowledgement_id=%s "
@@ -849,7 +891,7 @@ class ProposalHandoffLoopService:
                     stage="CANDIDATE_EVALUATION",
                     symbol_or_scope=current_scope,
                     work_state="FAILED",
-                    at=datetime.now(timezone.utc),
+                    at=budget_observed_at,
                 )
                 if self._trigger_coordinator is not None and scope.get("research_trigger"):
                     try:

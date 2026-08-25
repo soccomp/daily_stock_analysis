@@ -1197,7 +1197,7 @@ class Config:
     single_brain_m2_run_immediately: bool = False
     single_brain_m2_natural_session_gate_enabled: bool = True
     single_brain_m2_readiness_gate_enabled: bool = True
-    single_brain_m2_cycle_guard_seconds: int = 300
+    single_brain_m2_cycle_guard_seconds: int = 120
     single_brain_m2_snapshot_url: Optional[str] = None
     single_brain_m2_snapshot_timeout_seconds: float = 5.0
     single_brain_m2_risk_policy_path: Optional[str] = None
@@ -2273,7 +2273,7 @@ class Config:
             ),
             single_brain_m2_cycle_guard_seconds=parse_env_int(
                 os.getenv('DSA_SINGLE_BRAIN_M2_CYCLE_GUARD_SECONDS'),
-                300,
+                120,
                 field_name='DSA_SINGLE_BRAIN_M2_CYCLE_GUARD_SECONDS',
                 minimum=0,
                 maximum=3600,

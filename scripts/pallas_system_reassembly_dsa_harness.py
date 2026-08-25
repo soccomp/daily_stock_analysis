@@ -28,6 +28,8 @@ SCREENING_DUE = NOW + timedelta(hours=4, minutes=45)  # 14:45 BJT, legal session
 START_EARLY = datetime(2026, 8, 25, 2, 17, tzinfo=timezone.utc)  # 10:17 BJT
 START_MID = datetime(2026, 8, 25, 5, 17, tzinfo=timezone.utc)  # 13:17 BJT
 START_NEAR_DUE = datetime(2026, 8, 25, 6, 44, tzinfo=timezone.utc)  # 14:44 BJT
+START_POST_DUE = datetime(2026, 8, 25, 6, 46, tzinfo=timezone.utc)  # 14:46 BJT
+START_AFTER_CUTOFF = datetime(2026, 8, 25, 7, 1, tzinfo=timezone.utc)  # 15:01 BJT
 PRIOR_COMPLETED_TRADE_DATE = "2026-08-24"
 
 
@@ -156,7 +158,7 @@ class _DiscoveryDB:
         }
 
 
-def _snapshot(*, holdings: bool = False):
+def _snapshot(*, holdings: bool = False, as_of: datetime = NOW):
     from src.investment.contracts.portfolio_snapshot import PortfolioSnapshot, Position
 
     positions = ()
@@ -165,12 +167,12 @@ def _snapshot(*, holdings: bool = False):
             symbol="600519", market="CN", quantity=100, available_quantity=100,
             avg_cost=Decimal("90"), last_price=Decimal("100"),
             market_value=Decimal("10000"), unrealized_pnl=Decimal("1000"),
-            price_as_of=NOW, price_source="fixture:quote",
+            price_as_of=as_of, price_source="fixture:quote",
         ),)
     return PortfolioSnapshot.build(
-        snapshot_id="snapshot:fixture", trace_id="trace:fixture", created_at=NOW,
+        snapshot_id="snapshot:fixture", trace_id="trace:fixture", created_at=as_of,
         producer="ATHENA_GOLDEN_PATH_FIXTURE", account_id="athena-sim",
-        broker="FIXTURE_WORKER", account_mode="SIMULATION", as_of=NOW, revision=1,
+        broker="FIXTURE_WORKER", account_mode="SIMULATION", as_of=as_of, revision=1,
         currency="CNY", equity=Decimal("1000000.00"), cash=Decimal("1000000.00"),
         available_cash=Decimal("1000000.00"), reserved_cash=Decimal("0.00"),
         positions=positions, active_orders=(), realized_pnl=Decimal("0"),
@@ -180,8 +182,15 @@ def _snapshot(*, holdings: bool = False):
 
 
 class _Runner:
-    def __init__(self, *, fail: bool = False, **_kwargs):
+    def __init__(
+        self,
+        *,
+        fail: bool = False,
+        completion_events: list[datetime] | None = None,
+        **_kwargs,
+    ):
         self.fail = fail
+        self.completion_events = completion_events if completion_events is not None else []
 
     def complete(self, *, symbol, current_time, **_kwargs):
         if self.fail:
@@ -200,13 +209,14 @@ class _Runner:
                 "ideal_buy": 95, "secondary_buy": 100, "stop_loss": 80, "take_profit": 130,
             }}},
         )
+        self.completion_events.append(current_time)
         return AnalysisCompletion(
             result=result,
             context_snapshot={
                 "source": "fixture:DSAAnalysisCompletionRunner",
                 "price_plan": {
                     "source_event_time": "2026-08-24T07:00:00+00:00",
-                    "retrieved_at": NOW.isoformat(),
+                    "retrieved_at": current_time.isoformat(),
                     "provider": "fixture:daily-close",
                     "source_reference": "fixture:daily-close:600519:2026-08-24",
                     "completion_status": "CLOSE_CONFIRMED",
@@ -219,13 +229,22 @@ class _Runner:
 
 
 class _Publisher:
-    def __init__(self, *_, **__):
+    def __init__(
+        self,
+        *,
+        clock=None,
+        publish_events: list[datetime] | None = None,
+        **_kwargs,
+    ):
         self.proposals = []
+        self.clock = clock or (lambda: NOW)
+        self.publish_events = publish_events if publish_events is not None else []
 
     def publish(self, proposal):
         from src.investment.proposal.transport import AthenaProposalAcknowledgement
 
         self.proposals.append(proposal)
+        self.publish_events.append(self.clock())
         return AthenaProposalAcknowledgement(
             proposal_id=proposal.proposal_id, proposal_hash=proposal.content_hash,
             acknowledgement_id=f"ack:{proposal.content_hash[:24]}",
@@ -234,18 +253,29 @@ class _Publisher:
 
 
 class _SnapshotSource:
-    def __init__(self, *, holdings=False, **_kwargs):
+    def __init__(self, *, holdings=False, clock=None, **_kwargs):
         self.holdings = holdings
+        self.clock = clock or (lambda: NOW)
 
     def capture_snapshot(self):
-        return _snapshot(holdings=self.holdings)
+        return _snapshot(holdings=self.holdings, as_of=self.clock())
 
 
 class _FixtureScreeningService:
-    def __init__(self, *, config, db_manager, mode, attempt_number=1, **_kwargs):
+    def __init__(
+        self,
+        *,
+        config,
+        db_manager,
+        mode,
+        attempt_number=1,
+        observed_at=NOW,
+        **_kwargs,
+    ):
         self.db = db_manager
         self.mode = mode
         self.attempt_number = attempt_number
+        self.observed_at = observed_at
 
     def screen(self, *, strategy, market, max_results):
         if self.mode == "failed" or (
@@ -256,10 +286,10 @@ class _FixtureScreeningService:
             "code": "600519", "name": "贵州茅台", "rank": 1,
             "screen_score": 88.0, "score": 88.0,
             "latest_completed_trade_date": PRIOR_COMPLETED_TRADE_DATE,
-            "decision_cutoff": NOW.isoformat(), "completion_status": "CLOSE_CONFIRMED",
+            "decision_cutoff": self.observed_at.isoformat(), "completion_status": "CLOSE_CONFIRMED",
             "completion_basis": "PRIOR_PROVIDER_RETURNED_SESSION",
             "quantitative_input_reference": "fixture:daily-close:600519:2026-08-24",
-            "strategy_evidence": _pallas008_evidence(decision_cutoff=NOW),
+            "strategy_evidence": _pallas008_evidence(decision_cutoff=self.observed_at),
         }]
         source_errors = []
         if self.mode == "quality_recovery" and self.attempt_number == 1:
@@ -271,7 +301,7 @@ class _FixtureScreeningService:
             "after_filter_count": len(candidates), "candidate_count": len(candidates),
             "llm_ranked": False, "daily_enriched": True,
             "latest_completed_trade_date": PRIOR_COMPLETED_TRADE_DATE,
-            "decision_cutoff": NOW.isoformat(), "completion_status": "CLOSE_CONFIRMED",
+            "decision_cutoff": self.observed_at.isoformat(), "completion_status": "CLOSE_CONFIRMED",
             "completion_basis": "PRIOR_PROVIDER_RETURNED_SESSION",
             "quantitative_input_reference": "fixture:daily-close:600519:2026-08-24",
             "candidates": candidates, "source_errors": source_errors, "warnings": [],
@@ -350,17 +380,37 @@ def _runtime_config(*, holdings: bool) -> SimpleNamespace:
         schedule_enabled=True, schedule_time="23:59", schedule_times=["23:59"],
         single_brain_m2_enabled=True, single_brain_execution_mode="PROPOSAL_HANDOFF",
         single_brain_simulation_execution_authorized=False, single_brain_m2_interval_minutes=10,
-        single_brain_m2_cycle_guard_seconds=0, single_brain_m2_run_immediately=False,
+        single_brain_m2_cycle_guard_seconds=120, single_brain_m2_run_immediately=False,
         single_brain_m2_natural_session_gate_enabled=True, single_brain_m2_screening_enabled=True,
         single_brain_m2_screening_max_candidates=3, single_brain_m2_screening_max_age_hours=72,
         single_brain_m2_screening_strategy="capital_heat", single_brain_m2_screening_market="cn",
         single_brain_m2_max_symbols=1, single_brain_m2_holdings_limit=1 if holdings else 0,
         single_brain_m2_symbols=[], single_brain_m2_review_policy_version="pallas-004-research-trigger-v1",
-        generation_backend_timeout_seconds=1, single_brain_m2_snapshot_timeout_seconds=1,
-        single_brain_proposal_timeout_seconds=1, single_brain_proposal_url="http://fixture.invalid/athena",
+        generation_backend_timeout_seconds=300, single_brain_m2_snapshot_timeout_seconds=5,
+        single_brain_proposal_timeout_seconds=5, single_brain_proposal_url="http://fixture.invalid/athena",
         single_brain_m2_snapshot_url="http://fixture.invalid/portfolio", market_review_region="cn",
         report_language="zh", single_brain_m2_readiness_gate_enabled=False,
     )
+
+
+def _timing_contract(config: object) -> dict[str, object]:
+    from src.investment.m2.natural_admission import build_cycle_budget
+
+    budget = build_cycle_budget(
+        started_at=NOW,
+        scheduled_for=SCREENING_DUE,
+        config=config,
+    )
+    return {
+        "interval_seconds": budget.interval_seconds,
+        "cycle_guard_seconds": budget.guard_seconds,
+        "usable_cycle_budget_seconds": budget.usable_cycle_budget_seconds,
+        "required_candidate_reserve_seconds": int(budget.candidate_reserve_seconds),
+        "generation_backend_timeout_seconds": int(getattr(config, "generation_backend_timeout_seconds")),
+        "snapshot_timeout_seconds": float(getattr(config, "single_brain_m2_snapshot_timeout_seconds")),
+        "proposal_timeout_seconds": float(getattr(config, "single_brain_proposal_timeout_seconds")),
+        "configuration_admissible": budget.configuration_admissible,
+    }
 
 
 def _scheduler_poll(
@@ -436,6 +486,49 @@ def _run_scheduler_until_dispatch(
     )
 
 
+def _causal_timeline(
+    *,
+    dispatch_log: list[dict[str, object]],
+    research_completions: list[datetime],
+    proposal_raw: dict[str, object] | None,
+    proposal_publications: list[datetime],
+) -> dict[str, str] | None:
+    if proposal_raw is None:
+        return None
+    _require(dispatch_log, "proposal exists without a natural scheduler dispatch")
+    _require(research_completions, "proposal exists without a research completion event")
+    _require(proposal_publications, "proposal exists without a publication observation")
+
+    def parse(value: object) -> datetime:
+        text = str(value).replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(text)
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+    scheduler_scheduled_for = parse(dispatch_log[-1]["scheduled_for"])
+    scheduler_started_at = parse(dispatch_log[-1]["started_at"])
+    research_completed_at = research_completions[-1]
+    proposal_produced_at = parse(proposal_raw["created_at"])
+    proposal_published_at = proposal_publications[-1]
+    ordered = (
+        scheduler_scheduled_for,
+        scheduler_started_at,
+        research_completed_at,
+        proposal_produced_at,
+        proposal_published_at,
+    )
+    _require(
+        all(left <= right for left, right in zip(ordered, ordered[1:])),
+        "DSA causal timeline is not monotonic",
+    )
+    return {
+        "scheduler_scheduled_for": scheduler_scheduled_for.isoformat(),
+        "scheduler_started_at": scheduler_started_at.isoformat(),
+        "research_completed_at": research_completed_at.isoformat(),
+        "proposal_produced_at": proposal_produced_at.isoformat(),
+        "proposal_published_at": proposal_published_at.isoformat(),
+    }
+
+
 def _run_natural_day(
     directory: Path,
     *,
@@ -463,6 +556,8 @@ def _run_natural_day(
     generated_contexts: list[str] = []
     screening_calls: list[str] = []
     screening_attempts: list[dict[str, object]] = []
+    research_completions: list[datetime] = []
+    proposal_publications: list[datetime] = []
     publishers: list[_Publisher] = []
     screening_mode = {
         "success": "valid", "zero": "zero", "holdings_only": "failed",
@@ -479,14 +574,41 @@ def _run_natural_day(
             "warnings": [], "degradation": [],
         })
     config = _runtime_config(holdings=mode == "holdings_only")
+    timing_contract = _timing_contract(config)
+    _require(
+        timing_contract["configuration_admissible"] is True,
+        "natural harness target timing configuration is inadmissible before work",
+    )
+    _require(
+        timing_contract == {
+            "interval_seconds": 600,
+            "cycle_guard_seconds": 120,
+            "usable_cycle_budget_seconds": 480,
+            "required_candidate_reserve_seconds": 310,
+            "generation_backend_timeout_seconds": 300,
+            "snapshot_timeout_seconds": 5.0,
+            "proposal_timeout_seconds": 5.0,
+            "configuration_admissible": True,
+        },
+        f"harness timing contract drifted: {timing_contract}",
+    )
 
     def publisher_factory(*args, **kwargs):
-        publisher = _Publisher(*args, **kwargs)
+        publisher = _Publisher(
+            *args,
+            clock=lambda: natural_clock["now"],
+            publish_events=proposal_publications,
+            **kwargs,
+        )
         publishers.append(publisher)
         return publisher
 
     def runner_factory(*args, **kwargs):
-        return _Runner(fail=runner_failure, **kwargs)
+        return _Runner(
+            fail=runner_failure,
+            completion_events=research_completions,
+            **kwargs,
+        )
 
     def screening_factory(*args, **kwargs):
         attempt_number = len(screening_attempts) + 1
@@ -497,7 +619,11 @@ def _run_natural_day(
             "at": natural_clock["now"].isoformat(),
         })
         return _FixtureScreeningService(
-            *args, mode=screening_mode, attempt_number=attempt_number, **kwargs
+            *args,
+            mode=screening_mode,
+            attempt_number=attempt_number,
+            observed_at=natural_clock["now"],
+            **kwargs,
         )
 
     original_from_config = orchestration_module.ProposalHandoffLoopService.from_config
@@ -540,7 +666,7 @@ def _run_natural_day(
     try:
         with patch.object(orchestration_module, "DSAAnalysisCompletionRunner", runner_factory), \
              patch.object(orchestration_module, "CanonicalHttpInvestmentProposalPublisher", publisher_factory), \
-             patch.object(orchestration_module, "CanonicalHttpPortfolioSnapshotSource", lambda *a, **k: _SnapshotSource(holdings=mode == "holdings_only")), \
+             patch.object(orchestration_module, "CanonicalHttpPortfolioSnapshotSource", lambda *a, **k: _SnapshotSource(holdings=mode == "holdings_only", clock=lambda: natural_clock["now"])), \
              patch("src.core.market_review_runtime.build_market_review_runtime", return_value=(None, None, None)), \
              patch("src.services.daily_market_context.run_market_review", side_effect=fake_review), \
              patch("src.services.screening_service.ScreeningService", screening_factory), \
@@ -607,10 +733,17 @@ def _run_natural_day(
     )
     due_publisher = publishers[-1] if publishers else None
     proposals = list(due_publisher.proposals) if due_publisher is not None else []
+    causal_timeline = _causal_timeline(
+        dispatch_log=dispatch_log,
+        research_completions=research_completions,
+        proposal_raw=json.loads(proposals[-1].canonical_json()) if proposals else None,
+        proposal_publications=proposal_publications,
+    )
     candidate_status = {
         "success": "VALID", "zero": "NO_FRESH_CANDIDATES",
         "holdings_only": "DISCOVERY_FAILED", "transient_recovery": "VALID",
         "quality_recovery": "VALID",
+        "post_due": "VALID", "post_cutoff": "NOT_ENTERED",
     }.get(mode, "DISCOVERY_FAILED")
     DatabaseManager.reset_instance()
     Config.reset_instance()
@@ -621,6 +754,8 @@ def _run_natural_day(
         "proposal_ids": [item.proposal_id for item in proposals],
         "acknowledgement_ids": [f"ack:{item.content_hash[:24]}" for item in proposals],
         "proposals": [json.loads(item.canonical_json()) for item in proposals],
+        "timing_contract": timing_contract,
+        "causal_timeline": causal_timeline,
         "before_due": {
             "natural_entry": "RuntimeSchedulerService",
             "screening_due": "BEFORE_SCHEDULE_TIME",
@@ -754,6 +889,32 @@ def _calendar_fault_probe() -> dict[str, object]:
     return {"allowed": admission.allowed, "reason": admission.reason_code}
 
 
+def _unsafe_budget_probe() -> dict[str, object]:
+    from src.investment.proposal.orchestration import ProposalHandoffLoopService
+
+    unsafe_values = vars(_runtime_config(holdings=False)).copy()
+    unsafe_values["single_brain_m2_cycle_guard_seconds"] = 300
+    unsafe = SimpleNamespace(**unsafe_values)
+    calls = {"snapshot": 0, "research": 0}
+    result = ProposalHandoffLoopService(
+        config=unsafe,
+        analysis_runner=SimpleNamespace(
+            complete=lambda **_kwargs: calls.__setitem__("research", calls["research"] + 1)
+        ),
+        publisher=SimpleNamespace(publish=lambda _proposal: None),
+        snapshot_source=SimpleNamespace(
+            capture_snapshot=lambda: calls.__setitem__("snapshot", calls["snapshot"] + 1)
+        ),
+        clock=lambda: NOW,
+    ).run_cycle(scheduled_for=NOW)
+    return {
+        "timing_contract": _timing_contract(unsafe),
+        "status": result.status,
+        "blocked_reasons": list(result.blocked_reasons),
+        "work_started": calls,
+    }
+
+
 def _ambiguous_linkage_probe() -> dict[str, object]:
     from src.analyzer import AnalysisResult
     from src.repositories.market_review_linkage_repo import MarketReviewLinkageRepository
@@ -791,6 +952,14 @@ def _run_scenarios(directory: Path) -> dict[str, dict[str, object]]:
         "start_phase_near_due": _run_natural_day(
             directory, mode="success", start_at=START_NEAR_DUE,
             scenario_label="start_phase_near_due",
+        ),
+        "post_due": _run_natural_day(
+            directory, mode="success", start_at=START_POST_DUE,
+            scenario_label="post_due",
+        ),
+        "post_cutoff": _run_natural_day(
+            directory, mode="success", start_at=START_AFTER_CUTOFF,
+            scenario_label="post_cutoff",
         ),
     }
 
@@ -847,6 +1016,47 @@ def main() -> int:
             "primary dispatch did not prove the existing 14:45 phase-locked due point",
         )
         _require(
+            success["timing_contract"] == {
+                "interval_seconds": 600,
+                "cycle_guard_seconds": 120,
+                "usable_cycle_budget_seconds": 480,
+                "required_candidate_reserve_seconds": 310,
+                "generation_backend_timeout_seconds": 300,
+                "snapshot_timeout_seconds": 5.0,
+                "proposal_timeout_seconds": 5.0,
+                "configuration_admissible": True,
+            },
+            "primary Golden Path did not use the exact admissible target timing contract",
+        )
+        for causal_name in (
+            "success",
+            "start_phase_mid",
+            "start_phase_near_due",
+            "post_due",
+            "transient_recovery",
+            "quality_recovery",
+            "restart_recovery",
+        ):
+            _require(
+                scenarios[causal_name]["causal_timeline"] is not None,
+                f"{causal_name} lacks a monotonic causal timeline",
+            )
+        _require(
+            scenarios["post_due"]["natural_runtime"]["dispatch_log"][-1]["scheduled_for"]
+            == (SCREENING_DUE + timedelta(minutes=10)).isoformat()
+            and scenarios["post_due"]["status"] == "SUCCEEDED"
+            and scenarios["post_due"]["proposal_ids"],
+            "post-14:45 natural phase-lock retry did not complete legally",
+        )
+        _require(
+            scenarios["post_cutoff"]["status"] == "SKIPPED"
+            and not scenarios["post_cutoff"]["proposal_ids"]
+            and not scenarios["post_cutoff"]["natural_runtime"]["screening_attempts"]
+            and scenarios["post_cutoff"]["canonical_projection"]["last_terminal_reason"]["code"]
+            == "OUTSIDE_TRADING_SESSION",
+            "post-cutoff natural entry did not persist a truthful zero-work outcome",
+        )
+        _require(
             all(
                 recovery["natural_runtime"]["screening_attempts"][0]["attempt"] == 1
                 and recovery["natural_runtime"]["screening_attempts"][1]["attempt"] == 2
@@ -874,9 +1084,16 @@ def main() -> int:
             and "TimeoutError" in str(scenarios["luna_timeout"]["canonical_projection"].get("last_error")),
             "Luna timeout did not terminate the cycle fail-closed",
         )
+        unsafe_budget = _unsafe_budget_probe()
+        _require(
+            unsafe_budget["timing_contract"]["configuration_admissible"] is False
+            and unsafe_budget["status"] == "FAILED_CLOSED"
+            and unsafe_budget["work_started"] == {"snapshot": 0, "research": 0},
+            "unsafe target timing configuration did not fail closed before work",
+        )
         payload = {
             "repo": "DSA", "harness": "PALLAS_SYSTEM_REASSEMBLY_GOLDEN_PATH",
-            "schema_version": "pallas-system-reassembly-harness-v3", "fixed_clock": NOW.isoformat(),
+            "schema_version": "pallas-system-reassembly-harness-v4", "fixed_clock": NOW.isoformat(),
             "synthetic_trading_day": {
                 "natural_entry": "RuntimeSchedulerService",
                 "scheduler_dispatch_path": "Scheduler._run_background_tasks",
@@ -891,11 +1108,14 @@ def main() -> int:
                 "manual_run_now": False,
                 "legal_session": True, "complete": True,
             },
+            "timing_contract": success["timing_contract"],
+            "causal_timeline": success["causal_timeline"],
             "scenarios": scenarios,
             "evidence": {
                 "context_fault_matrix": _context_fault_matrix(), "narrative_failure": _narrative_failure_probe(),
                 "screening_fault_matrix": screening_faults, "proposal_transport_fault": _proposal_transport_fault_probe(success["proposals"][0]),
-                "calendar_fault": _calendar_fault_probe(), "ambiguous_linkage": _ambiguous_linkage_probe(),
+                "calendar_fault": _calendar_fault_probe(), "unsafe_budget": unsafe_budget,
+                "ambiguous_linkage": _ambiguous_linkage_probe(),
                 "p008_strategy_evidence": success["proposals"][0].get("strategy_evidence"), "luna_timeout": scenarios.get("luna_timeout"),
             },
             "runtime_contract": {"model": "gpt-5.6-luna", "reasoning_effort": "max", "fallback_used": False, "invocation": "DETERMINISTIC_STUB_ONLY"},

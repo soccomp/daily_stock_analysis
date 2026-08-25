@@ -33,6 +33,15 @@ def evaluate_natural_cycle_admission(started_at: datetime) -> NaturalCycleAdmiss
 class CycleBudget:
     deadline: datetime
     candidate_reserve_seconds: float
+    interval_seconds: int
+    guard_seconds: int
+    usable_cycle_budget_seconds: int
+
+    @property
+    def configuration_admissible(self) -> bool:
+        """Whether one candidate can fit under the configured timeout contract."""
+
+        return self.usable_cycle_budget_seconds >= self.candidate_reserve_seconds
 
     def remaining_seconds(self, observed_at: datetime) -> float:
         return max(0.0, (self.deadline - observed_at).total_seconds())
@@ -45,7 +54,7 @@ def build_cycle_budget(
     *, started_at: datetime, config: object, scheduled_for: datetime | None = None
 ) -> CycleBudget:
     interval_seconds = max(60, int(getattr(config, "single_brain_m2_interval_minutes", 10)) * 60)
-    guard_seconds = max(0, int(getattr(config, "single_brain_m2_cycle_guard_seconds", 300)))
+    guard_seconds = max(0, int(getattr(config, "single_brain_m2_cycle_guard_seconds", 120)))
     usable_seconds = max(0, interval_seconds - guard_seconds)
     reserve = (
         max(1, int(getattr(config, "generation_backend_timeout_seconds", 300)))
@@ -57,4 +66,7 @@ def build_cycle_budget(
     return CycleBudget(
         deadline=min(start_deadline, due_deadline),
         candidate_reserve_seconds=reserve,
+        interval_seconds=interval_seconds,
+        guard_seconds=guard_seconds,
+        usable_cycle_budget_seconds=usable_seconds,
     )
