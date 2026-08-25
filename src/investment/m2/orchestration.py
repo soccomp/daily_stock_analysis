@@ -338,7 +338,7 @@ class M2ShadowLoopService:
         account_id = str(getattr(self._config, "single_brain_m2_account_id", "") or "").strip()
         if not account_id:
             return M2ShadowRunResult(cycle_id=None, status="FAILED_CLOSED", blocked_reasons=("M2 account_id is required",))
-        interval = int(getattr(self._config, "single_brain_m2_interval_minutes", 60))
+        interval = int(getattr(self._config, "single_brain_m2_interval_minutes", 10))
         slot = cycle_slot(scheduled_for or now, interval_minutes=interval)
         cycle = build_cycle_id(account_id=account_id, scheduled_for=slot)
         try:
@@ -819,13 +819,28 @@ class M2ShadowLoopService:
             50,
             max(1, int(getattr(self._config, "single_brain_m2_screening_max_candidates", 3))),
         )
-        max_age_hours = max(
-            1,
-            int(getattr(self._config, "single_brain_m2_screening_max_age_hours", 72)),
-        )
         try:
+            latest_result = getattr(self._screening_candidate_source, "latest_result", None)
+            if callable(latest_result):
+                discovery = latest_result(
+                    max_candidates=max_candidates,
+                    # The canonical adapter validates the latest completed CN
+                    # session and PIT close; wall-clock age is legacy-only.
+                    max_age=None,
+                    now=self._aware_now(),
+                    strategy=str(getattr(self._config, "single_brain_m2_screening_strategy", "capital_heat") or "capital_heat"),
+                    market=str(getattr(self._config, "single_brain_m2_screening_market", "cn") or "cn"),
+                )
+                if getattr(discovery, "status", None) != "VALID":
+                    return []
+                return [item.as_scope() for item in discovery.candidates]
+            max_age_hours = max(
+                1,
+                int(getattr(self._config, "single_brain_m2_screening_max_age_hours", 72)),
+            )
             candidates = self._screening_candidate_source.latest(
                 max_candidates=max_candidates,
+                # Compatibility for a non-canonical test/legacy source only.
                 max_age=timedelta(hours=max_age_hours),
             )
         except Exception as exc:  # screening scope is best-effort; never fail the loop
@@ -851,7 +866,7 @@ class M2ShadowLoopService:
             research_id=research_id,
             proposal_id=proposal_id,
             reviewed_at=reviewed_at,
-            interval_minutes=int(getattr(self._config, "single_brain_m2_interval_minutes", 60)),
+            interval_minutes=int(getattr(self._config, "single_brain_m2_interval_minutes", 10)),
         )
 
     def _mark_trigger_failure(self, *, scope: dict[str, Any], now: datetime) -> None:

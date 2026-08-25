@@ -224,7 +224,7 @@ class ProposalHandoffLoopService:
                 "FAILED_CLOSED",
                 blocked_reasons=("canonical cycle start must be timezone-aware",),
             )
-        interval = int(getattr(self._config, "single_brain_m2_interval_minutes", 60))
+        interval = int(getattr(self._config, "single_brain_m2_interval_minutes", 10))
         actual_scheduled_for = scheduled_for or now
         slot = cycle_slot(actual_scheduled_for, interval_minutes=interval)
         cycle = build_cycle_id(account_id="dsa-proposal-authority", scheduled_for=slot)
@@ -973,22 +973,27 @@ class ProposalHandoffLoopService:
             50,
             max(1, int(getattr(self._config, "single_brain_m2_screening_max_candidates", 3))),
         )
-        max_age_hours = max(
-            1,
-            int(getattr(self._config, "single_brain_m2_screening_max_age_hours", 72)),
-        )
         try:
             latest_result = getattr(self._screening_candidate_source, "latest_result", None)
             if callable(latest_result):
                 return latest_result(
                     max_candidates=max_candidates,
-                    max_age=timedelta(hours=max_age_hours),
+                    # Canonical screening freshness is the latest completed
+                    # CN trading session at this cutoff.  Wall-clock hours
+                    # are only a legacy compatibility fallback inside the
+                    # source adapter.
+                    max_age=None,
                     now=now,
                     strategy=str(getattr(self._config, "single_brain_m2_screening_strategy", "capital_heat") or "capital_heat"),
                     market=str(getattr(self._config, "single_brain_m2_screening_market", "cn") or "cn"),
                 )
+            max_age_hours = max(
+                1,
+                int(getattr(self._config, "single_brain_m2_screening_max_age_hours", 72)),
+            )
             candidates = self._screening_candidate_source.latest(
                 max_candidates=max_candidates,
+                # Compatibility for a non-canonical test/legacy source only.
                 max_age=timedelta(hours=max_age_hours),
             )
         except Exception as exc:  # screening is best-effort; holdings still run

@@ -21,12 +21,19 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
 from data_provider.base import canonical_stock_code, normalize_stock_code
 
 from src.core.trading_calendar import get_market_for_stock
+from src.services.screening.temporal import (
+    CLOSE_CONFIRMED,
+    SESSION_CLOSE,
+    authoritative_cn_trading_calendar,
+    daily_completion,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -112,60 +119,22 @@ class DatabaseScreeningCandidateSource:
         self._db = db_manager
 
     def latest(self, *, max_candidates: int, max_age: timedelta) -> list[ScreeningCandidate]:
-        if max_candidates <= 0:
-            return []
-        runs = self._db.list_screening_runs(limit=1)
-        if not runs:
-            return []
-        latest = runs[0]
-        run_id = str(latest.get("run_id") or "")
-        if not run_id:
-            return []
-        detail = self._db.get_screening_run(run_id)
-        if not detail:
-            return []
-        result = detail.get("result") or {}
-        candidates = result.get("candidates") or []
-        if not isinstance(candidates, list):
-            return []
-
-        selected_at = _selected_at(detail)
-        if selected_at is None:
-            return []
-        now = datetime.now(timezone.utc)
-        if (now - selected_at) > max_age:
-            logger.info(
-                "latest screening run %s is older than %s; skipping screening scope",
-                run_id, max_age,
-            )
-            return []
-
-        strategy = str(detail.get("strategy") or "")
-        projected: list[ScreeningCandidate] = []
-        seen: set[str] = set()
-        for item in candidates:
-            candidate = _project_candidate(
-                run_id=run_id,
-                item=item,
-                selected_at=selected_at,
-                strategy=strategy,
-            )
-            if candidate is None or candidate.symbol in seen:
-                continue
-            seen.add(candidate.symbol)
-            projected.append(candidate)
-            if len(projected) >= max_candidates:
-                break
-        return projected
+        result = self.latest_result(
+            max_candidates=max_candidates,
+            max_age=max_age,
+            now=datetime.now(timezone.utc),
+        )
+        return list(result.candidates) if result.status == DISCOVERY_VALID else []
 
     def latest_result(
         self,
         *,
         max_candidates: int,
-        max_age: timedelta,
+        max_age: timedelta | None,
         now: datetime | None = None,
         strategy: str | None = None,
         market: str | None = None,
+        run_id: str | None = None,
     ) -> ScreeningDiscoveryResult:
         """Resolve the authoritative completed screening artifact.
 
@@ -179,24 +148,29 @@ class DatabaseScreeningCandidateSource:
         observed_at = now or datetime.now(timezone.utc)
         if observed_at.tzinfo is None or observed_at.utcoffset() is None:
             return ScreeningDiscoveryResult(DISCOVERY_UNAVAILABLE, reason="discovery clock must be timezone-aware")
-        try:
-            runs = self._db.list_screening_runs(
-                limit=20,
-                strategy=strategy or None,
-                market=market or None,
-            )
-        except Exception as exc:  # read-only adapter: classify, never rerun
-            return ScreeningDiscoveryResult(
-                DISCOVERY_UNAVAILABLE,
-                reason=f"{type(exc).__name__}: {exc}",
-            )
-        if not runs:
-            return ScreeningDiscoveryResult(DISCOVERY_MISSING, reason="no persisted screening run matched scope")
+        requested_run_id = str(run_id or "").strip()
+        if requested_run_id:
+            latest = {"run_id": requested_run_id}
+        else:
+            try:
+                runs = self._db.list_screening_runs(
+                    limit=20,
+                    strategy=strategy or None,
+                    market=market or None,
+                )
+            except Exception as exc:  # read-only adapter: classify, never rerun
+                return ScreeningDiscoveryResult(
+                    DISCOVERY_UNAVAILABLE,
+                    reason=f"{type(exc).__name__}: {exc}",
+                )
+            if not runs:
+                return ScreeningDiscoveryResult(DISCOVERY_MISSING, reason="no persisted screening run matched scope")
+            latest = runs[0]
 
-        latest = runs[0]
-        run_id = str(latest.get("run_id") or "").strip()
-        if not run_id:
+        resolved_run_id = str(latest.get("run_id") or "").strip()
+        if not resolved_run_id:
             return ScreeningDiscoveryResult(DISCOVERY_QUALITY_FAILED, reason="persisted screening run has no run_id")
+        run_id = resolved_run_id
         try:
             detail = self._db.get_screening_run(run_id)
         except Exception as exc:
@@ -236,7 +210,7 @@ class DatabaseScreeningCandidateSource:
         )
         decision_cutoff = _as_text(merged.get("decision_cutoff"))
         legacy_unverified = False
-        if not latest_trade_date or not decision_cutoff or completion_status not in {"CLOSE_CONFIRMED", "COMPLETED"}:
+        if not latest_trade_date or not decision_cutoff or completion_status != CLOSE_CONFIRMED:
             if latest_trade_date or decision_cutoff or completion_status:
                 return ScreeningDiscoveryResult(
                     DISCOVERY_QUALITY_FAILED,
@@ -272,8 +246,66 @@ class DatabaseScreeningCandidateSource:
             return ScreeningDiscoveryResult(DISCOVERY_STALE, run_id=run_id, reason="screening decision cutoff is future-dated", latest_completed_trade_date=latest_trade_date, decision_cutoff=decision_cutoff)
         if not legacy_unverified and completed_date > observed_utc.date():
             return ScreeningDiscoveryResult(DISCOVERY_QUALITY_FAILED, run_id=run_id, reason="latest completed trade date is future-dated", latest_completed_trade_date=latest_trade_date, decision_cutoff=decision_cutoff)
-        if observed_at.astimezone(timezone.utc) - cutoff > max_age:
-            return ScreeningDiscoveryResult(DISCOVERY_STALE, run_id=run_id, reason="screening decision cutoff is outside the cycle freshness window", latest_completed_trade_date=latest_trade_date, decision_cutoff=decision_cutoff)
+        if not legacy_unverified:
+            try:
+                expected_trade_date, trading_calendar = _latest_completed_session(
+                    observed_utc
+                )
+            except Exception as exc:  # authoritative PIT calendar is fail-closed
+                return ScreeningDiscoveryResult(
+                    DISCOVERY_UNAVAILABLE,
+                    run_id=run_id,
+                    reason=f"authoritative CN trading calendar unavailable: {type(exc).__name__}: {exc}",
+                    latest_completed_trade_date=latest_trade_date,
+                    decision_cutoff=decision_cutoff,
+                )
+            if expected_trade_date is None:
+                return ScreeningDiscoveryResult(
+                    DISCOVERY_UNAVAILABLE,
+                    run_id=run_id,
+                    reason="authoritative CN trading calendar has no completed session",
+                    latest_completed_trade_date=latest_trade_date,
+                    decision_cutoff=decision_cutoff,
+                )
+            if completed_date < expected_trade_date:
+                return ScreeningDiscoveryResult(
+                    DISCOVERY_STALE,
+                    run_id=run_id,
+                    reason="screening artifact is older than the latest completed trading session",
+                    latest_completed_trade_date=latest_trade_date,
+                    decision_cutoff=decision_cutoff,
+                )
+            if completed_date > expected_trade_date:
+                return ScreeningDiscoveryResult(
+                    DISCOVERY_QUALITY_FAILED,
+                    run_id=run_id,
+                    reason="screening artifact is future-dated relative to the proposal cutoff",
+                    latest_completed_trade_date=latest_trade_date,
+                    decision_cutoff=decision_cutoff,
+                )
+            completion, completion_basis = daily_completion(
+                completed_date,
+                cutoff,
+                trading_calendar=trading_calendar,
+            )
+            if completion != CLOSE_CONFIRMED:
+                return ScreeningDiscoveryResult(
+                    DISCOVERY_QUALITY_FAILED,
+                    run_id=run_id,
+                    reason=f"screening artifact is not a completed close: {completion_basis}",
+                    latest_completed_trade_date=latest_trade_date,
+                    decision_cutoff=decision_cutoff,
+                )
+        elif observed_utc - cutoff > (max_age or timedelta(hours=72)):
+            # Legacy rows have no causal completed-session contract.  Keep the
+            # compatibility path bounded until a producer rewrites the row.
+            return ScreeningDiscoveryResult(
+                DISCOVERY_STALE,
+                run_id=run_id,
+                reason="legacy screening decision cutoff is outside the compatibility freshness window",
+                latest_completed_trade_date=latest_trade_date,
+                decision_cutoff=decision_cutoff,
+            )
         quality_reason = _screening_quality_failure(merged)
         if quality_reason:
             return ScreeningDiscoveryResult(DISCOVERY_QUALITY_FAILED, run_id=run_id, reason=quality_reason, latest_completed_trade_date=latest_trade_date, decision_cutoff=decision_cutoff)
@@ -432,6 +464,23 @@ def _screening_quality_failure(payload: dict[str, Any]) -> str | None:
         if any(token in text for token in ("failed", "fallback", "error", "unknown", "stale")):
             return "screening quality is degraded: " + str(value)
     return None
+
+
+def _latest_completed_session(
+    observed_at: datetime,
+) -> tuple[date | None, frozenset[date]]:
+    """Return the latest XSHG session eligible at a causal cutoff."""
+
+    observed_utc = observed_at.astimezone(timezone.utc)
+    calendar = authoritative_cn_trading_calendar(observed_utc)
+    local = observed_utc.astimezone(ZoneInfo("Asia/Shanghai"))
+    eligible = {
+        session
+        for session in calendar
+        if session < local.date()
+        or (session == local.date() and local.time() >= SESSION_CLOSE)
+    }
+    return (max(eligible) if eligible else None), calendar
 
 
 def _as_int(value: Any) -> int | None:

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Tests for Scheduler background task support."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 import sys
 import unittest
 from unittest.mock import MagicMock, patch
@@ -79,6 +79,53 @@ class SchedulerBackgroundTaskTestCase(unittest.TestCase):
                 scheduler._run_background_tasks()
 
         self.assertEqual(calls, [])
+
+    def test_phase_locked_background_task_waits_for_natural_due(self):
+        fake_schedule = _FakeScheduleModule()
+        with patch.dict(sys.modules, {"schedule": fake_schedule}):
+            from src.scheduler import Scheduler
+
+            registration = datetime(2026, 8, 25, 2, 17, tzinfo=timezone.utc).timestamp()
+            before_due = datetime(2026, 8, 25, 6, 44, 30, tzinfo=timezone.utc).timestamp()
+            due = datetime(2026, 8, 25, 6, 45, tzinfo=timezone.utc).timestamp()
+            calls = []
+
+            def task(**timestamps):
+                calls.append(timestamps)
+
+            task.accepts_scheduler_timestamps = True
+            scheduler = Scheduler(register_signals=False)
+
+            def _make_thread(target=None, **kwargs):
+                fake_thread = MagicMock()
+                fake_thread.is_alive.return_value = False
+                fake_thread.start.side_effect = target
+                return fake_thread
+
+            with patch("src.scheduler.threading.Thread", side_effect=_make_thread):
+                with patch("src.scheduler.time.time", return_value=registration):
+                    scheduler.add_background_task(
+                        task,
+                        interval_seconds=600,
+                        run_immediately=False,
+                        name="proposal_handoff",
+                        daily_due_time="14:45",
+                        daily_due_timezone="Asia/Shanghai",
+                    )
+
+                entry = scheduler._background_tasks[0]
+                self.assertTrue(entry["phase_locked"])
+                self.assertAlmostEqual(entry["last_run"] + 600, due)
+
+                with patch("src.scheduler.time.time", return_value=before_due):
+                    scheduler._run_background_tasks()
+                self.assertEqual(calls, [])
+
+                with patch("src.scheduler.time.time", return_value=due):
+                    scheduler._run_background_tasks()
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["scheduled_for"].timestamp(), due)
 
     def test_run_with_schedule_registers_background_tasks_before_immediate_daily_task(self):
         fake_schedule = _FakeScheduleModule()

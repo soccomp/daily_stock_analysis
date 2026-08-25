@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import threading
@@ -72,10 +73,10 @@ def _proposal_handoff_cycle_identity(
     try:
         interval_minutes = max(
             1,
-            min(1440, int(getattr(config, "single_brain_m2_interval_minutes", 60))),
+            min(1440, int(getattr(config, "single_brain_m2_interval_minutes", 10))),
         )
     except (TypeError, ValueError):
-        interval_minutes = 60
+        interval_minutes = 10
     slot = cycle_slot(observed_at, interval_minutes=interval_minutes)
     return (
         build_cycle_id(account_id="dsa-proposal-authority", scheduled_for=slot),
@@ -238,10 +239,10 @@ def build_single_brain_m2_background_tasks(
     try:
         interval_minutes = max(
             1,
-            min(1440, int(getattr(config, "single_brain_m2_interval_minutes", 60))),
+            min(1440, int(getattr(config, "single_brain_m2_interval_minutes", 10))),
         )
     except (TypeError, ValueError):
-        interval_minutes = 60
+        interval_minutes = 10
 
     def m2_shadow_task(
         scheduled_for: datetime | None = None,
@@ -434,14 +435,26 @@ def build_single_brain_m2_background_tasks(
 
     m2_shadow_task.accepts_scheduler_timestamps = True
 
-    return [{
+    task_definition = {
         "task": m2_shadow_task,
         "interval_seconds": interval_minutes * 60,
         "run_immediately": bool(
             getattr(config, "single_brain_m2_run_immediately", False)
         ),
         "name": task_name,
-    }]
+    }
+    if execution_mode == "PROPOSAL_HANDOFF":
+        # Screening remains owned by this one proposal task.  Phase-locking
+        # the existing interval to the canonical 14:45 CN due slot prevents a
+        # normal process start at (for example) 10:17 from shifting every
+        # hourly tick beyond the legal session.
+        from src.investment.screening_scheduler import SCHEDULE_TIME
+
+        task_definition.update({
+            "daily_due_time": SCHEDULE_TIME.strftime("%H:%M"),
+            "daily_due_timezone": "Asia/Shanghai",
+        })
+    return [task_definition]
 
 
 def _restricted_single_brain_scheduler_mode(
@@ -679,6 +692,8 @@ class RuntimeSchedulerService:
                         entry.get("name"),
                         int(entry["interval_seconds"]),
                         bool(entry.get("run_immediately", False)),
+                        entry.get("daily_due_time"),
+                        entry.get("daily_due_timezone"),
                     )
                     for entry in background_tasks
                 )
@@ -711,12 +726,38 @@ class RuntimeSchedulerService:
                 else:
                     scheduler.set_daily_task(self._run_analysis_once, run_immediately=run_immediately)
             for entry in background_tasks:
-                scheduler.add_background_task(
-                    entry["task"],
-                    interval_seconds=entry["interval_seconds"],
-                    run_immediately=entry.get("run_immediately", False),
-                    name=entry.get("name"),
+                background_kwargs = {
+                    "interval_seconds": entry["interval_seconds"],
+                    "run_immediately": entry.get("run_immediately", False),
+                    "name": entry.get("name"),
+                }
+                if entry.get("daily_due_time"):
+                    background_kwargs.update({
+                        "daily_due_time": entry["daily_due_time"],
+                        "daily_due_timezone": entry.get(
+                            "daily_due_timezone", "Asia/Shanghai"
+                        ),
+                    })
+                add_background_task = scheduler.add_background_task
+                try:
+                    parameters = inspect.signature(add_background_task).parameters
+                except (TypeError, ValueError):  # pragma: no cover - opaque scheduler double
+                    parameters = None
+                accepts_extra = parameters is None or any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in parameters.values()
                 )
+                if (
+                    background_kwargs.get("daily_due_time")
+                    and parameters is not None
+                    and not accepts_extra
+                    and "daily_due_time" not in parameters
+                ):
+                    # Keep lightweight scheduler implementations compatible;
+                    # the production Scheduler advertises the phase metadata.
+                    background_kwargs.pop("daily_due_time", None)
+                    background_kwargs.pop("daily_due_timezone", None)
+                add_background_task(entry["task"], **background_kwargs)
             if (
                 not self._m2_shadow_only
                 and run_immediately
@@ -800,7 +841,8 @@ class RuntimeSchedulerService:
 
     def status(self) -> Dict[str, Any]:
         scheduler = self._scheduler
-        thread_alive = bool(self._thread is not None and self._thread.is_alive())
+        thread_probe = getattr(self._thread, "is_alive", None)
+        thread_alive = bool(self._thread is not None and callable(thread_probe) and thread_probe())
         jobs = scheduler.schedule.get_jobs() if scheduler is not None else []
         next_run = None
         if jobs:

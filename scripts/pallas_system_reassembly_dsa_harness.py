@@ -25,6 +25,9 @@ from unittest.mock import patch
 
 NOW = datetime(2026, 8, 25, 2, 0, tzinfo=timezone.utc)
 SCREENING_DUE = NOW + timedelta(hours=4, minutes=45)  # 14:45 BJT, legal session
+START_EARLY = datetime(2026, 8, 25, 2, 17, tzinfo=timezone.utc)  # 10:17 BJT
+START_MID = datetime(2026, 8, 25, 5, 17, tzinfo=timezone.utc)  # 13:17 BJT
+START_NEAR_DUE = datetime(2026, 8, 25, 6, 44, tzinfo=timezone.utc)  # 14:44 BJT
 PRIOR_COMPLETED_TRADE_DATE = "2026-08-24"
 
 
@@ -62,7 +65,12 @@ def _context(*, as_of: datetime = NOW, lineage: str = "fixture", quality: str = 
     }
 
 
-def _pallas008_evidence(*, symbol: str = "600519", decision_cutoff: datetime = NOW) -> dict[str, object]:
+def _pallas008_evidence(
+    *,
+    symbol: str = "600519",
+    decision_cutoff: datetime = NOW,
+    latest_completed_trade_date: str = PRIOR_COMPLETED_TRADE_DATE,
+) -> dict[str, object]:
     from src.investment.contracts.strategy_evidence import build_pallas008_strategy_evidence
 
     return build_pallas008_strategy_evidence(
@@ -77,7 +85,7 @@ def _pallas008_evidence(*, symbol: str = "600519", decision_cutoff: datetime = N
             "market_strength": "0.800000",
         },
         market_strength_raw="0.030000",
-        latest_completed_trade_date=PRIOR_COMPLETED_TRADE_DATE,
+        latest_completed_trade_date=latest_completed_trade_date,
         decision_cutoff=decision_cutoff,
         completion_status="CLOSE_CONFIRMED",
         completion_basis="PRIOR_PROVIDER_RETURNED_SESSION",
@@ -88,8 +96,9 @@ def _pallas008_evidence(*, symbol: str = "600519", decision_cutoff: datetime = N
 class _DiscoveryDB:
     """Read-only adapter fixture used by the focused discovery matrix."""
 
-    def __init__(self, *, mode: str):
+    def __init__(self, *, mode: str, observed_at: datetime = NOW):
         self.mode = mode
+        self.observed_at = observed_at
 
     def list_screening_runs(self, **_kwargs):
         if self.mode == "unavailable":
@@ -100,7 +109,7 @@ class _DiscoveryDB:
 
     def get_screening_run(self, _run_id):
         completed_date = PRIOR_COMPLETED_TRADE_DATE
-        decision_cutoff = NOW
+        decision_cutoff = self.observed_at
         completion_status = "CLOSE_CONFIRMED"
         producer_status = "COMPLETED"
         source_errors = []
@@ -112,6 +121,12 @@ class _DiscoveryDB:
             producer_status = "FAILED"
         elif self.mode == "quality":
             source_errors = ["fixture source failed"]
+        elif self.mode == "future":
+            completed_date = self.observed_at.astimezone(timezone.utc).date().isoformat()
+        elif self.mode == "holiday_prior_close":
+            completed_date = "2026-09-30"
+        elif self.mode == "holiday_one_session_older":
+            completed_date = "2026-09-29"
         candidates = [] if self.mode == "zero" else [{
             "code": "600519", "name": "贵州茅台", "rank": 1,
             "screen_score": 88.0, "score": 88.0,
@@ -120,11 +135,14 @@ class _DiscoveryDB:
             "completion_status": completion_status,
             "completion_basis": "PRIOR_PROVIDER_RETURNED_SESSION",
             "quantitative_input_reference": "fixture:daily-close:600519:2026-08-24",
-            "strategy_evidence": _pallas008_evidence(decision_cutoff=NOW),
+            "strategy_evidence": _pallas008_evidence(
+                decision_cutoff=decision_cutoff,
+                latest_completed_trade_date=completed_date,
+            ),
         }]
         return {
             "run_id": "screen-run-fixture", "strategy": "capital_heat", "market": "cn",
-            "created_at": (NOW - timedelta(minutes=1)).isoformat(), "status": producer_status,
+            "created_at": (self.observed_at - timedelta(minutes=1)).isoformat(), "status": producer_status,
             "result": {
                 "candidates": candidates, "candidate_count": len(candidates),
                 "strategy": "capital_heat", "market": "cn",
@@ -224,12 +242,15 @@ class _SnapshotSource:
 
 
 class _FixtureScreeningService:
-    def __init__(self, *, config, db_manager, mode, **_kwargs):
+    def __init__(self, *, config, db_manager, mode, attempt_number=1, **_kwargs):
         self.db = db_manager
         self.mode = mode
+        self.attempt_number = attempt_number
 
     def screen(self, *, strategy, market, max_results):
-        if self.mode == "failed":
+        if self.mode == "failed" or (
+            self.mode == "transient_recovery" and self.attempt_number == 1
+        ):
             raise OSError("fixture screening producer unavailable")
         candidates = [] if self.mode == "zero" else [{
             "code": "600519", "name": "贵州茅台", "rank": 1,
@@ -240,8 +261,12 @@ class _FixtureScreeningService:
             "quantitative_input_reference": "fixture:daily-close:600519:2026-08-24",
             "strategy_evidence": _pallas008_evidence(decision_cutoff=NOW),
         }]
+        source_errors = []
+        if self.mode == "quality_recovery" and self.attempt_number == 1:
+            source_errors = ["fixture provider quality failed"]
         payload = {
-            "run_id": f"screen-run-{self.mode}", "strategy": strategy, "market": market,
+            "run_id": f"screen-run-{self.mode}-{self.attempt_number}",
+            "strategy": strategy, "market": market,
             "snapshot_source": "fixture:screening-provider", "snapshot_count": len(candidates),
             "after_filter_count": len(candidates), "candidate_count": len(candidates),
             "llm_ranked": False, "daily_enriched": True,
@@ -249,7 +274,7 @@ class _FixtureScreeningService:
             "decision_cutoff": NOW.isoformat(), "completion_status": "CLOSE_CONFIRMED",
             "completion_basis": "PRIOR_PROVIDER_RETURNED_SESSION",
             "quantitative_input_reference": "fixture:daily-close:600519:2026-08-24",
-            "candidates": candidates, "source_errors": [], "warnings": [],
+            "candidates": candidates, "source_errors": source_errors, "warnings": [],
             "degradation": [], "status": "COMPLETED",
         }
         self.db.save_screening_run(payload)
@@ -288,11 +313,43 @@ def _fake_market_review_factory(db, generated: list[str]):
     return fake_run_market_review
 
 
+def _market_context_refresh_probe(db, *, config) -> dict[str, object]:
+    """Exercise the real context cache/history path across a stale cutoff."""
+
+    from src.services.daily_market_context import DailyMarketContextService
+
+    service = DailyMarketContextService(
+        db_manager=db,
+        today_fn=lambda: NOW.date(),
+    )
+    first = service.get_context(
+        region="cn", config=config, notifier=SimpleNamespace(),
+        analyzer=None, search_service=None, force_refresh=True,
+        decision_as_of=NOW, max_age_seconds=3600,
+    )
+    second_cutoff = NOW + timedelta(hours=2)
+    second = service.get_context(
+        region="cn", config=config, notifier=SimpleNamespace(),
+        analyzer=None, search_service=None, force_refresh=False,
+        decision_as_of=second_cutoff, max_age_seconds=3600,
+    )
+    return {
+        "first_generated": first is not None,
+        "second_generated_after_stale_cutoff": second is not None,
+        "first_decision_as_of": first.decision_as_of if first is not None else None,
+        "second_decision_as_of": second.decision_as_of if second is not None else None,
+        "stale_recovery": (
+            first is not None and second is not None
+            and first.decision_as_of != second.decision_as_of
+        ),
+    }
+
+
 def _runtime_config(*, holdings: bool) -> SimpleNamespace:
     return SimpleNamespace(
         schedule_enabled=True, schedule_time="23:59", schedule_times=["23:59"],
         single_brain_m2_enabled=True, single_brain_execution_mode="PROPOSAL_HANDOFF",
-        single_brain_simulation_execution_authorized=False, single_brain_m2_interval_minutes=60,
+        single_brain_simulation_execution_authorized=False, single_brain_m2_interval_minutes=10,
         single_brain_m2_cycle_guard_seconds=0, single_brain_m2_run_immediately=False,
         single_brain_m2_natural_session_gate_enabled=True, single_brain_m2_screening_enabled=True,
         single_brain_m2_screening_max_candidates=3, single_brain_m2_screening_max_age_hours=72,
@@ -306,53 +363,119 @@ def _runtime_config(*, holdings: bool) -> SimpleNamespace:
     )
 
 
-def _dispatch_natural_task(runtime, *, run_at: datetime, natural_clock: dict[str, datetime]) -> None:
+def _scheduler_poll(
+    runtime,
+    *,
+    observed_at: datetime,
+    natural_clock: dict[str, datetime],
+) -> dict[str, object]:
+    """Drive one real scheduler-loop poll with a fixed clock."""
+
     import src.scheduler as scheduler_module
 
-    natural_clock["now"] = run_at
+    natural_clock["now"] = observed_at
     scheduler = runtime._scheduler
     _require(scheduler is not None, "RuntimeSchedulerService did not register Scheduler")
     entries = scheduler._background_tasks
-    _require([entry["name"] for entry in entries] == ["single_brain_proposal_handoff"], "canonical task registration mismatch")
+    _require(
+        [entry["name"] for entry in entries] == ["single_brain_proposal_handoff"],
+        "canonical task registration mismatch",
+    )
     entry = entries[0]
-    real_time = scheduler_module.time.time
-    with patch.object(scheduler_module.time, "time", return_value=run_at.timestamp()):
-        _require(scheduler._start_background_task(entry, scheduled_for_epoch=run_at.timestamp()), "natural background task did not start")
+    before_last_run = float(entry.get("last_run") or 0.0)
+    before_due = entry.get("scheduled_for_epoch")
+    with patch.object(scheduler_module.time, "time", return_value=observed_at.timestamp()):
+        scheduler._run_background_tasks()
     worker = entry.get("thread")
     if worker is not None:
         worker.join(timeout=10)
     _require(not entry.get("running"), "natural background task did not finish")
-    # Keep the interval gate out of the short deterministic replay.  The
-    # scheduler loop itself is held by the harness in an idle state below, so
-    # this is documentary protection rather than a production scheduling path.
-    entry["last_run"] = real_time() + 86400
+    after_last_run = float(entry.get("last_run") or 0.0)
+    after_due = entry.get("scheduled_for_epoch")
+    dispatched = after_last_run != before_last_run or after_due != before_due
+    return {
+        "observed_at": observed_at.isoformat(),
+        "dispatched": dispatched,
+        "scheduled_for": (
+            datetime.fromtimestamp(float(after_due), tz=timezone.utc).isoformat()
+            if dispatched and after_due is not None else None
+        ),
+        "started_at": (
+            datetime.fromtimestamp(float(entry["started_at_epoch"]), tz=timezone.utc).isoformat()
+            if dispatched and entry.get("started_at_epoch") is not None else None
+        ),
+        "interval_seconds": entry["interval_seconds"],
+        "phase_locked": entry.get("phase_locked", False),
+    }
 
 
-def _run_natural_day(directory: Path, *, mode: str, runner_failure: bool = False) -> dict[str, object]:
-    """Run one fixed-clock synthetic day through the actual scheduler entry."""
+def _run_scheduler_until_dispatch(
+    runtime,
+    *,
+    start_at: datetime,
+    natural_clock: dict[str, datetime],
+    dispatch_target: int,
+    dispatch_log: list[dict[str, object]],
+) -> None:
+    """Replay only the existing 30-second scheduler poll, never the callback."""
+
+    observed_at = start_at
+    while observed_at <= SCREENING_DUE + timedelta(minutes=20):
+        event = _scheduler_poll(
+            runtime,
+            observed_at=observed_at,
+            natural_clock=natural_clock,
+        )
+        if event["dispatched"]:
+            dispatch_log.append(event)
+            if len(dispatch_log) >= dispatch_target:
+                return
+        observed_at += timedelta(seconds=30)
+    raise AssertionError(
+        f"scheduler did not naturally dispatch {dispatch_target} task(s): {dispatch_log}"
+    )
+
+
+def _run_natural_day(
+    directory: Path,
+    *,
+    mode: str,
+    runner_failure: bool = False,
+    start_at: datetime = START_EARLY,
+    dispatches: int = 1,
+    restart_between_attempts: bool = False,
+    scenario_label: str | None = None,
+) -> dict[str, object]:
+    """Run one fixed-clock day through real scheduler interval/due decisions."""
 
     from src.config import Config
     from src.investment.proposal import orchestration as orchestration_module
     from src.services.runtime_scheduler import RuntimeSchedulerService, build_single_brain_m2_background_tasks
     from src.storage import DatabaseManager
 
-    os.environ["DATABASE_PATH"] = str(directory / f"{mode}-{('failure' if runner_failure else 'normal')}.db")
-    # Config and DatabaseManager are process singletons; each scenario needs a
-    # fresh candidate-only SQLite authority so identical fixed-clock cycle IDs
-    # remain isolated across the synthetic-day fault branches.
+    label = scenario_label or mode
+    database_path = directory / f"{label}-{('failure' if runner_failure else 'normal')}.db"
+    state_path = directory / f"{label}-screening-state.json"
+    os.environ["DATABASE_PATH"] = str(database_path)
     Config.reset_instance()
     DatabaseManager.reset_instance()
-    db = DatabaseManager.get_instance()
+    db_ref = {"db": DatabaseManager.get_instance()}
     generated_contexts: list[str] = []
     screening_calls: list[str] = []
+    screening_attempts: list[dict[str, object]] = []
     publishers: list[_Publisher] = []
-    screening_mode = "valid" if mode == "success" else "zero" if mode == "zero" else "failed"
+    screening_mode = {
+        "success": "valid", "zero": "zero", "holdings_only": "failed",
+        "transient_recovery": "transient_recovery",
+        "quality_recovery": "quality_recovery",
+    }.get(mode, "failed")
     if mode == "holdings_only":
-        db.save_screening_run({
+        db_ref["db"].save_screening_run({
             "run_id": "screen-run-failed", "strategy": "capital_heat", "market": "cn",
             "candidate_count": 0, "status": "FAILED", "completion_status": "FAILED",
-            "latest_completed_trade_date": PRIOR_COMPLETED_TRADE_DATE, "decision_cutoff": NOW.isoformat(),
-            "candidates": [], "source_errors": ["fixture screening producer unavailable"],
+            "latest_completed_trade_date": PRIOR_COMPLETED_TRADE_DATE,
+            "decision_cutoff": NOW.isoformat(), "candidates": [],
+            "source_errors": ["fixture screening producer unavailable"],
             "warnings": [], "degradation": [],
         })
     config = _runtime_config(holdings=mode == "holdings_only")
@@ -366,29 +489,49 @@ def _run_natural_day(directory: Path, *, mode: str, runner_failure: bool = False
         return _Runner(fail=runner_failure, **kwargs)
 
     def screening_factory(*args, **kwargs):
+        attempt_number = len(screening_attempts) + 1
         screening_calls.append(screening_mode)
-        return _FixtureScreeningService(*args, mode=screening_mode, **kwargs)
+        screening_attempts.append({
+            "attempt": attempt_number,
+            "mode": screening_mode,
+            "at": natural_clock["now"].isoformat(),
+        })
+        return _FixtureScreeningService(
+            *args, mode=screening_mode, attempt_number=attempt_number, **kwargs
+        )
 
     original_from_config = orchestration_module.ProposalHandoffLoopService.from_config
     created_services: list[object] = []
-    natural_clock = {"now": NOW}
+    natural_clock = {"now": start_at}
 
     def capture_from_config(cls, current_config):
         service = original_from_config(current_config)
-        # The production service normally reads the current wall clock.  For
-        # this fixed-clock replay, keep its real run_cycle and all producers on
-        # the scheduler-owned due instant.
         service._clock = lambda: natural_clock["now"]
         created_services.append(service)
         return service
 
-    tasks = lambda current_config: build_single_brain_m2_background_tasks(current_config, config_provider=lambda: config)
-    runtime = RuntimeSchedulerService(config_provider=lambda: config, owns_schedule=True, background_tasks_provider=tasks)
-    fake_review = _fake_market_review_factory(db, generated_contexts)
+    def fake_review(**kwargs):
+        return _fake_market_review_factory(db_ref["db"], generated_contexts)(**kwargs)
+
+    def make_runtime():
+        tasks = lambda current_config: build_single_brain_m2_background_tasks(
+            current_config, config_provider=lambda: config
+        )
+        return RuntimeSchedulerService(
+            config_provider=lambda: config,
+            owns_schedule=True,
+            background_tasks_provider=tasks,
+        )
+
+    runtime = make_runtime()
+    dispatch_log: list[dict[str, object]] = []
+    runtime_status: dict[str, object] = {}
+    restart_status: dict[str, object] | None = None
+    context_refresh_probe: dict[str, object] = {}
     import src.scheduler as scheduler_module
 
     def idle_scheduler_loop(scheduler) -> None:
-        """Keep the real Scheduler thread alive without wall-clock dispatch."""
+        """Keep the real Scheduler thread alive while the fixed clock polls it."""
 
         scheduler._running = True
         while scheduler._running and not scheduler.shutdown_handler.should_shutdown:
@@ -402,45 +545,117 @@ def _run_natural_day(directory: Path, *, mode: str, runner_failure: bool = False
              patch("src.services.daily_market_context.run_market_review", side_effect=fake_review), \
              patch("src.services.screening_service.ScreeningService", screening_factory), \
              patch("src.investment.proposal.orchestration.ProposalHandoffLoopService.from_config", classmethod(capture_from_config)), \
-             patch("src.investment.screening_scheduler.DEFAULT_STATE_PATH", directory / f"{mode}-screening-state.json"), \
+             patch("src.investment.screening_scheduler.DEFAULT_STATE_PATH", state_path), \
              patch("src.investment.screening_scheduler._sleep", lambda _seconds: None), \
              patch.object(scheduler_module.Scheduler, "run", idle_scheduler_loop):
-            runtime.start()
+            with patch.object(scheduler_module.time, "time", return_value=start_at.timestamp()):
+                runtime.start()
             runtime_status = runtime.status()
-            _require(runtime_status["thread_alive"] is True, "natural RuntimeSchedulerService thread is not alive")
-            _dispatch_natural_task(runtime, run_at=NOW, natural_clock=natural_clock)
-            _dispatch_natural_task(runtime, run_at=SCREENING_DUE, natural_clock=natural_clock)
-            due_publisher = publishers[-1] if publishers else None
+            _require(
+                runtime_status["thread_alive"] is True,
+                "natural RuntimeSchedulerService thread is not alive",
+            )
+            _run_scheduler_until_dispatch(
+                runtime,
+                start_at=start_at,
+                natural_clock=natural_clock,
+                dispatch_target=1,
+                dispatch_log=dispatch_log,
+            )
+            if dispatches > 1:
+                if restart_between_attempts:
+                    runtime.stop()
+                    restart_at = datetime.fromisoformat(
+                        str(dispatch_log[-1]["observed_at"])
+                    ) + timedelta(minutes=5)
+                    runtime = make_runtime()
+                    with patch.object(
+                        scheduler_module.time,
+                        "time",
+                        return_value=restart_at.timestamp(),
+                    ):
+                        runtime.start()
+                    restart_status = runtime.status()
+                    _run_scheduler_until_dispatch(
+                        runtime,
+                        start_at=restart_at,
+                        natural_clock=natural_clock,
+                        dispatch_target=dispatches,
+                        dispatch_log=dispatch_log,
+                    )
+                else:
+                    next_poll = datetime.fromisoformat(
+                        str(dispatch_log[-1]["observed_at"])
+                    ) + timedelta(seconds=30)
+                    _run_scheduler_until_dispatch(
+                        runtime,
+                        start_at=next_poll,
+                        natural_clock=natural_clock,
+                        dispatch_target=dispatches,
+                        dispatch_log=dispatch_log,
+                    )
+            context_refresh_probe = _market_context_refresh_probe(
+                db_ref["db"], config=config
+            )
     finally:
         runtime.stop()
 
     from src.investment.canonical_cycle import CanonicalCycleRepository
 
-    projection = CanonicalCycleRepository().scheduler_projection(scheduler_task_name="single_brain_proposal_handoff")
+    projection = CanonicalCycleRepository().scheduler_projection(
+        scheduler_task_name="single_brain_proposal_handoff"
+    )
+    due_publisher = publishers[-1] if publishers else None
     proposals = list(due_publisher.proposals) if due_publisher is not None else []
+    candidate_status = {
+        "success": "VALID", "zero": "NO_FRESH_CANDIDATES",
+        "holdings_only": "DISCOVERY_FAILED", "transient_recovery": "VALID",
+        "quality_recovery": "VALID",
+    }.get(mode, "DISCOVERY_FAILED")
     DatabaseManager.reset_instance()
     Config.reset_instance()
     return {
         "status": projection.get("last_terminal_status") or projection.get("current_status"),
         "cycle_id": projection.get("last_terminal_cycle_id") or projection.get("current_cycle_id"),
-        "candidate_discovery_status": "VALID" if mode == "success" else "NO_FRESH_CANDIDATES" if mode == "zero" else "DISCOVERY_FAILED",
+        "candidate_discovery_status": candidate_status,
         "proposal_ids": [item.proposal_id for item in proposals],
         "acknowledgement_ids": [f"ack:{item.content_hash[:24]}" for item in proposals],
         "proposals": [json.loads(item.canonical_json()) for item in proposals],
-        "before_due": {"natural_entry": "RuntimeSchedulerService", "screening_due": "BEFORE_SCHEDULE_TIME"},
+        "before_due": {
+            "natural_entry": "RuntimeSchedulerService",
+            "screening_due": "BEFORE_SCHEDULE_TIME",
+            "start_at": start_at.isoformat(),
+        },
         "natural_runtime": {
-            "entry": "RuntimeSchedulerService.start -> Scheduler._start_background_task -> single_brain_proposal_handoff",
-            "registered_authority_count": 1, "screening_due_at": SCREENING_DUE.isoformat(),
+            "entry": "RuntimeSchedulerService.start -> Scheduler._run_background_tasks -> single_brain_proposal_handoff",
+            "registered_authority_count": 1,
+            "configured_interval_seconds": config.single_brain_m2_interval_minutes * 60,
+            "screening_due_at": SCREENING_DUE.isoformat(),
             "screening_calls": screening_calls,
+            "screening_attempts": screening_attempts,
+            "dispatch_log": dispatch_log,
             "runtime_scheduler_thread_alive_before_dispatch": runtime_status["thread_alive"],
+            "restart_thread_alive": restart_status.get("thread_alive") if restart_status else None,
+            "restart_state_path_reused": bool(restart_between_attempts),
         },
         "context_refresh": {
-            "generated_count": len(generated_contexts), "generated_as_of": generated_contexts,
-            "stale_before_second_generation": len(generated_contexts) >= 2 and generated_contexts[0] != generated_contexts[1],
+            **context_refresh_probe,
+            "generated_count": len(generated_contexts),
+            "generated_as_of": generated_contexts,
+            "stale_before_second_generation": context_refresh_probe.get(
+                "stale_recovery", False
+            ),
         },
         "canonical_projection": projection,
-        "runtime_contract": {"model": "gpt-5.6-luna", "reasoning_effort": "max", "fallback_used": False, "invocation": "DETERMINISTIC_STUB_ONLY"},
-        "safety": {"simulation_only": True, "LIVE_TRADING": False, "real_provider": False, "real_luna": False, "real_worker": False},
+        "runtime_contract": {
+            "model": "gpt-5.6-luna", "reasoning_effort": "max",
+            "fallback_used": False, "invocation": "DETERMINISTIC_STUB_ONLY",
+        },
+        "safety": {
+            "simulation_only": True, "LIVE_TRADING": False,
+            "real_provider": False, "real_luna": False,
+            "real_worker": False,
+        },
     }
 
 
@@ -483,9 +698,29 @@ def _narrative_failure_probe() -> dict[str, object]:
 def _screening_fault_matrix() -> dict[str, dict[str, object]]:
     from src.investment.m2.screening_candidates import DatabaseScreeningCandidateSource
 
+    holiday_reopen = datetime(2026, 10, 8, 2, 0, tzinfo=timezone.utc)
     matrix = {}
-    for name, mode in {"missing": "missing", "stale": "stale", "failed": "failed", "quality_failed": "quality"}.items():
-        result = DatabaseScreeningCandidateSource(_DiscoveryDB(mode=mode)).latest_result(max_candidates=3, max_age=timedelta(hours=72), now=NOW, strategy="capital_heat", market="cn")
+    cases = {
+        "missing": ("missing", NOW),
+        "stale": ("stale", NOW),
+        "failed": ("failed", NOW),
+        "quality_failed": ("quality", NOW),
+        "current_session_intraday": ("future", NOW),
+        "holiday_prior_close_over_72h": ("holiday_prior_close", holiday_reopen),
+        "holiday_one_session_older": ("holiday_one_session_older", holiday_reopen),
+    }
+    for name, (mode, observed_at) in cases.items():
+        result = DatabaseScreeningCandidateSource(
+            _DiscoveryDB(mode=mode, observed_at=observed_at)
+        ).latest_result(
+            max_candidates=3,
+            # Deliberately smaller than the legacy 72h window: canonical
+            # acceptance must be driven by the completed CN session/PIT close.
+            max_age=timedelta(seconds=1),
+            now=observed_at,
+            strategy="capital_heat",
+            market="cn",
+        )
         matrix[name] = {"status": result.status, "reason": result.reason}
     return matrix
 
@@ -534,7 +769,30 @@ def _ambiguous_linkage_probe() -> dict[str, object]:
 
 
 def _run_scenarios(directory: Path) -> dict[str, dict[str, object]]:
-    return {"success": _run_natural_day(directory, mode="success"), "zero": _run_natural_day(directory, mode="zero"), "holdings_only": _run_natural_day(directory, mode="holdings_only"), "luna_timeout": _run_natural_day(directory, mode="success", runner_failure=True)}
+    return {
+        "success": _run_natural_day(directory, mode="success", start_at=START_EARLY),
+        "zero": _run_natural_day(directory, mode="zero", scenario_label="zero"),
+        "holdings_only": _run_natural_day(directory, mode="holdings_only"),
+        "luna_timeout": _run_natural_day(directory, mode="success", runner_failure=True, scenario_label="luna_timeout"),
+        "transient_recovery": _run_natural_day(
+            directory, mode="transient_recovery", dispatches=2,
+        ),
+        "quality_recovery": _run_natural_day(
+            directory, mode="quality_recovery", dispatches=2,
+        ),
+        "restart_recovery": _run_natural_day(
+            directory, mode="transient_recovery", dispatches=2,
+            restart_between_attempts=True, scenario_label="restart_recovery",
+        ),
+        "start_phase_mid": _run_natural_day(
+            directory, mode="success", start_at=START_MID,
+            scenario_label="start_phase_mid",
+        ),
+        "start_phase_near_due": _run_natural_day(
+            directory, mode="success", start_at=START_NEAR_DUE,
+            scenario_label="start_phase_near_due",
+        ),
+    }
 
 
 def main() -> int:
@@ -550,25 +808,111 @@ def main() -> int:
         _require(success["proposal_ids"], "natural success path lacks proposal")
         _require(success["context_refresh"]["stale_before_second_generation"], "stale context was reused instead of refreshed")
         _require(success["natural_runtime"]["registered_authority_count"] == 1, "scheduler authority count changed")
+        _require(
+            success["natural_runtime"]["configured_interval_seconds"] == 600,
+            "primary harness did not use the configured ten-minute proposal interval",
+        )
+        _require(
+            len(success["natural_runtime"]["dispatch_log"]) >= 1
+            and all(item["dispatched"] for item in success["natural_runtime"]["dispatch_log"]),
+            "primary harness did not use the natural interval/due dispatcher",
+        )
         if "zero" in scenarios:
             _require(scenarios["zero"]["status"] == "NO_ACTION", "zero-candidate path was not durable NO_ACTION")
             _require(not scenarios["zero"]["proposal_ids"], "zero-candidate path emitted a proposal")
         if "holdings_only" in scenarios:
             _require(scenarios["holdings_only"]["status"] in {"PARTIAL", "COMPLETED"}, "holdings-only path did not continue safely")
             _require(scenarios["holdings_only"]["candidate_discovery_status"] == "DISCOVERY_FAILED", "discovery failure was hidden")
+        for phase_name in ("start_phase_mid", "start_phase_near_due"):
+            _require(
+                scenarios[phase_name]["status"] == "SUCCEEDED"
+                and scenarios[phase_name]["proposal_ids"],
+                f"{phase_name} did not reach the natural proposal path",
+            )
+        for recovery_name in ("transient_recovery", "quality_recovery", "restart_recovery"):
+            recovery = scenarios[recovery_name]
+            _require(
+                recovery["status"] == "SUCCEEDED"
+                and recovery["proposal_ids"]
+                and len(recovery["natural_runtime"]["dispatch_log"]) == 2,
+                f"{recovery_name} did not recover through a later natural attempt",
+            )
+        _require(
+            scenarios["restart_recovery"]["natural_runtime"]["restart_state_path_reused"],
+            "restart recovery did not reuse the persisted screening state",
+        )
+        _require(
+            success["natural_runtime"]["dispatch_log"][0]["scheduled_for"] == SCREENING_DUE.isoformat()
+            and success["natural_runtime"]["dispatch_log"][0]["phase_locked"] is True,
+            "primary dispatch did not prove the existing 14:45 phase-locked due point",
+        )
+        _require(
+            all(
+                recovery["natural_runtime"]["screening_attempts"][0]["attempt"] == 1
+                and recovery["natural_runtime"]["screening_attempts"][1]["attempt"] == 2
+                for recovery in (scenarios["transient_recovery"], scenarios["quality_recovery"], scenarios["restart_recovery"])
+            ),
+            "recovery scenarios did not preserve producer attempt identity across natural ticks",
+        )
+        screening_faults = _screening_fault_matrix()
+        expected_screening_faults = {
+            "missing": "DISCOVERY_MISSING",
+            "stale": "DISCOVERY_STALE",
+            "failed": "DISCOVERY_FAILED",
+            "quality_failed": "DISCOVERY_QUALITY_FAILED",
+            "current_session_intraday": "DISCOVERY_QUALITY_FAILED",
+            "holiday_prior_close_over_72h": "VALID",
+            "holiday_one_session_older": "DISCOVERY_STALE",
+        }
+        _require(
+            {name: value["status"] for name, value in screening_faults.items()} == expected_screening_faults,
+            "screening freshness/quality fault matrix did not fail closed by canonical session contract",
+        )
+        _require(
+            scenarios["luna_timeout"]["status"] == "FAILED"
+            and not scenarios["luna_timeout"]["proposal_ids"]
+            and "TimeoutError" in str(scenarios["luna_timeout"]["canonical_projection"].get("last_error")),
+            "Luna timeout did not terminate the cycle fail-closed",
+        )
         payload = {
             "repo": "DSA", "harness": "PALLAS_SYSTEM_REASSEMBLY_GOLDEN_PATH",
-            "schema_version": "pallas-system-reassembly-harness-v2", "fixed_clock": NOW.isoformat(),
-            "synthetic_trading_day": {"natural_entry": "RuntimeSchedulerService", "screening_due_at": SCREENING_DUE.isoformat(), "legal_session": True, "complete": True},
+            "schema_version": "pallas-system-reassembly-harness-v3", "fixed_clock": NOW.isoformat(),
+            "synthetic_trading_day": {
+                "natural_entry": "RuntimeSchedulerService",
+                "scheduler_dispatch_path": "Scheduler._run_background_tasks",
+                "screening_due_at": SCREENING_DUE.isoformat(),
+                "configured_interval_seconds": success["natural_runtime"]["configured_interval_seconds"],
+                "phase_lock": {
+                    "daily_due_time": "14:45",
+                    "daily_due_timezone": "Asia/Shanghai",
+                    "first_dispatch_is_scheduler_due": True,
+                },
+                "direct_callback_invocation": False,
+                "manual_run_now": False,
+                "legal_session": True, "complete": True,
+            },
             "scenarios": scenarios,
             "evidence": {
                 "context_fault_matrix": _context_fault_matrix(), "narrative_failure": _narrative_failure_probe(),
-                "screening_fault_matrix": _screening_fault_matrix(), "proposal_transport_fault": _proposal_transport_fault_probe(success["proposals"][0]),
+                "screening_fault_matrix": screening_faults, "proposal_transport_fault": _proposal_transport_fault_probe(success["proposals"][0]),
                 "calendar_fault": _calendar_fault_probe(), "ambiguous_linkage": _ambiguous_linkage_probe(),
                 "p008_strategy_evidence": success["proposals"][0].get("strategy_evidence"), "luna_timeout": scenarios.get("luna_timeout"),
             },
             "runtime_contract": {"model": "gpt-5.6-luna", "reasoning_effort": "max", "fallback_used": False, "invocation": "DETERMINISTIC_STUB_ONLY"},
-            "safety": {"simulation_only": True, "LIVE_TRADING": False, "production_modified": False, "deployed": False, "restarted": False, "run_now": False, "real_provider": False, "real_luna": False, "real_worker": False, "orders_submitted": False},
+            "safety": {
+                "simulation_only": True,
+                "LIVE_TRADING": False,
+                "production_modified": False,
+                "production_restarted": False,
+                "candidate_fixture_restart_recovery": True,
+                "deployed": False,
+                "run_now": False,
+                "new_mission_created": False,
+                "real_provider": False,
+                "real_luna": False,
+                "real_worker": False,
+                "orders_submitted": False,
+            },
         }
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str))
     return 0

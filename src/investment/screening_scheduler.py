@@ -10,7 +10,8 @@ and records the scheduling outcome.
 Behaviour:
   * runs on trading days only (real exchange calendar, not just weekday<5);
   * fires once per day, idempotent per (date, strategy, market);
-  * bounded retry: 0s -> 30s -> 2m -> 10m, then SCREENING_FAILED_FOR_DAY;
+  * a producer attempt fails closed but remains eligible for a bounded later
+    natural retry; a valid persisted run is still idempotent;
   * fail-soft: on failure it never fabricates candidates and never fakes success.
 """
 
@@ -19,7 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -39,6 +40,13 @@ DEFAULT_MAX_RESULTS = 3
 DEFAULT_STATE_PATH = Path(__file__).resolve().parents[2] / "data" / "screening" / "scheduler_state.json"
 # delays applied *before* each attempt (attempt 1 fires immediately).
 RETRY_DELAYS_SECONDS = (0, 30, 120, 600)
+MAX_NATURAL_ATTEMPTS = len(RETRY_DELAYS_SECONDS)
+
+
+class _ScreeningContractFailure(RuntimeError):
+    def __init__(self, status: str, reason: str) -> None:
+        super().__init__(reason)
+        self.status = status
 
 
 def _utcnow() -> datetime:
@@ -89,13 +97,30 @@ class DailyScreeningScheduler:
         state = self._load_state()
         existing = state.get("runs", {}).get(run_key)
         if existing and existing.get("status") == "COMPLETED":
-            return {"status": "ALREADY_COMPLETED", "run_key": run_key, "run_id": existing.get("run_id")}
-        if existing and existing.get("status") == "FAILED":
-            return {"status": "SCREENING_FAILED_FOR_DAY", "run_key": run_key, "attempts": existing.get("attempts")}
+            persisted = self._persisted_discovery(existing.get("run_id"), now=now)
+            if persisted is None or self._discovery_is_usable(persisted):
+                return {"status": "ALREADY_COMPLETED", "run_key": run_key, "run_id": existing.get("run_id")}
+            existing = {
+                **existing,
+                "status": "RETRYABLE_FAILED",
+                "retryable": True,
+                "failure_kind": persisted.status,
+                "last_error": persisted.reason or persisted.status,
+            }
+            state.setdefault("runs", {})[run_key] = existing
+            self._save_state(state)
+        if existing and existing.get("status") in {"FAILED", "SCREENING_FAILED_FOR_DAY"}:
+            attempts = int(existing.get("attempts") or 0)
+            if attempts >= MAX_NATURAL_ATTEMPTS:
+                return {
+                    "status": "SCREENING_FAILED_FOR_DAY",
+                    "run_key": run_key,
+                    "attempts": attempts,
+                }
 
         # Crash-recovery: if a run was persisted by the screening service but the
         # scheduler state was lost, treat today as already completed.
-        prior = self._find_todays_persisted_run(today)
+        prior = self._find_todays_persisted_run(today, now=now)
         if prior is not None:
             state.setdefault("runs", {})[run_key] = {
                 "status": "COMPLETED", "run_id": prior, "attempts": 0,
@@ -104,45 +129,80 @@ class DailyScreeningScheduler:
             self._save_state(state)
             return {"status": "ALREADY_COMPLETED", "run_key": run_key, "run_id": prior, "recovered": True}
 
-        result = self._run_with_retry(run_key)
+        prior_attempts = int(existing.get("attempts") or 0) if existing else 0
+        result = self._run_with_retry(
+            run_key,
+            prior_attempts=prior_attempts,
+            now=now,
+        )
         state.setdefault("runs", {})[run_key] = result
         self._save_state(state)
         return {**result, "run_key": run_key}
 
-    def _run_with_retry(self, run_key: str) -> dict[str, Any]:
+    def _run_with_retry(
+        self,
+        run_key: str,
+        *,
+        prior_attempts: int,
+        now: datetime,
+    ) -> dict[str, Any]:
+        attempt = prior_attempts + 1
+        if attempt > MAX_NATURAL_ATTEMPTS:
+            return {
+                "status": "FAILED",
+                "attempts": prior_attempts,
+                "retryable": False,
+                "last_error": "bounded natural screening attempts exhausted",
+                "updated_at": _utcnow().isoformat(),
+            }
         last_error: str | None = None
-        for attempt, delay in enumerate(RETRY_DELAYS_SECONDS, start=1):
-            if delay:
-                self._sleep(delay)
-            try:
-                result = self._run_screen(
-                    strategy=self._strategy,
-                    market=self._market,
-                    max_results=self._max_results,
-                )
-                run_id = str(result.get("run_id") or "").strip()
-                if not run_id:
-                    raise ValueError("screening service returned an empty run_id")
-                if result.get("persistence_status") == "PERSISTENCE_FAILED":
-                    raise RuntimeError("screening producer persistence failed")
-                return {
-                    "status": "COMPLETED",
-                    "run_id": run_id,
-                    "attempts": attempt,
-                    "candidate_count": int(result.get("candidate_count") or 0),
-                    "updated_at": _utcnow().isoformat(),
-                }
-            except Exception as exc:  # noqa: BLE001 - bounded retry, then fail-soft
-                last_error = f"{type(exc).__name__}: {exc}"
-                logger.warning("screening scheduler attempt %s failed: %s", attempt, last_error)
+        delay = RETRY_DELAYS_SECONDS[attempt - 1]
+        if delay:
+            self._sleep(delay)
+        try:
+            result = self._run_screen(
+                strategy=self._strategy,
+                market=self._market,
+                max_results=self._max_results,
+            )
+            run_id = str(result.get("run_id") or "").strip()
+            if not run_id:
+                raise ValueError("screening service returned an empty run_id")
+            if result.get("persistence_status") == "PERSISTENCE_FAILED":
+                raise RuntimeError("screening producer persistence failed")
+            persisted = self._persisted_discovery(run_id, now=now)
+            if persisted is not None:
+                if not self._discovery_is_usable(persisted):
+                    raise _ScreeningContractFailure(
+                        persisted.status,
+                        persisted.reason or "persisted screening artifact failed discovery contract",
+                    )
+            else:
+                inline_failure = _inline_quality_failure(result)
+                if inline_failure:
+                    raise _ScreeningContractFailure("DISCOVERY_QUALITY_FAILED", inline_failure)
+            return {
+                "status": "COMPLETED",
+                "run_id": run_id,
+                "attempts": attempt,
+                "candidate_count": int(result.get("candidate_count") or 0),
+                "updated_at": _utcnow().isoformat(),
+            }
+        except Exception as exc:  # noqa: BLE001 - bounded natural retry, then fail-soft
+            last_error = f"{type(exc).__name__}: {exc}"
+            logger.warning("screening scheduler attempt %s failed: %s", attempt, last_error)
+            terminal = attempt >= MAX_NATURAL_ATTEMPTS
+            failure_kind = getattr(exc, "status", "PRODUCER_FAILURE")
         return {
-            "status": "FAILED",
-            "attempts": len(RETRY_DELAYS_SECONDS),
+            "status": "FAILED" if terminal else "RETRYABLE_FAILED",
+            "attempts": attempt,
+            "retryable": not terminal,
+            "failure_kind": failure_kind,
             "last_error": last_error,
             "updated_at": _utcnow().isoformat(),
         }
 
-    def _find_todays_persisted_run(self, today: date) -> str | None:
+    def _find_todays_persisted_run(self, today: date, *, now: datetime) -> str | None:
         """Best-effort crash-recovery: locate a screening run already persisted today."""
         try:
             runs = self._db.list_screening_runs(limit=20, strategy=self._strategy, market=self._market)
@@ -160,8 +220,45 @@ class DailyScreeningScheduler:
                 dt = dt.replace(tzinfo=ZoneInfo("UTC"))
             local = dt.astimezone(CN_TZ)
             if local.date() == today:
-                return str(run.get("run_id") or "")
+                run_id = str(run.get("run_id") or "").strip()
+                if not run_id:
+                    continue
+                persisted = self._persisted_discovery(run_id, now=now)
+                if persisted is None or self._discovery_is_usable(persisted):
+                    return run_id
         return None
+
+    def _persisted_discovery(self, run_id: Any, *, now: datetime):
+        normalized = str(run_id or "").strip()
+        if not normalized or not callable(getattr(self._db, "get_screening_run", None)):
+            return None
+        try:
+            from src.investment.m2.screening_candidates import DatabaseScreeningCandidateSource
+
+            return DatabaseScreeningCandidateSource(self._db).latest_result(
+                max_candidates=max(1, self._max_results),
+                # Canonical rows are accepted by the authoritative completed
+                # CN session/PIT contract.  The adapter retains the bounded
+                # compatibility rule only for legacy rows without that
+                # producer metadata.
+                max_age=None,
+                now=now,
+                strategy=self._strategy,
+                market=self._market,
+                run_id=normalized,
+            )
+        except Exception as exc:  # classification is fail-closed for producer state
+            logger.warning("screening artifact validation failed: %s", exc)
+            from src.investment.m2.screening_candidates import ScreeningDiscoveryResult
+
+            return ScreeningDiscoveryResult(
+                "DISCOVERY_UNAVAILABLE",
+                reason=f"{type(exc).__name__}: {exc}",
+            )
+
+    @staticmethod
+    def _discovery_is_usable(result: Any) -> bool:
+        return getattr(result, "status", None) in {"VALID", "NO_FRESH_CANDIDATES"}
 
     # --- state persistence -------------------------------------------------
 
@@ -193,6 +290,37 @@ def _sleep(seconds: float) -> None:
     import time as _time
 
     _time.sleep(seconds)
+
+
+def _inline_quality_failure(payload: Any) -> str | None:
+    """Validate the producer fields available before a DB read is possible."""
+
+    if not isinstance(payload, dict):
+        return "screening producer response is not an object"
+    for key in ("source_errors", "warnings"):
+        values = payload.get(key) or []
+        if values:
+            return f"screening {key} are present"
+    for value in payload.get("degradation") or ():
+        text = str(value).lower()
+        if any(token in text for token in ("failed", "fallback", "error", "unknown", "stale")):
+            return "screening quality is degraded: " + str(value)
+    metadata = any(
+        payload.get(key) is not None
+        for key in ("latest_completed_trade_date", "decision_cutoff", "completion_status")
+    )
+    if metadata:
+        if payload.get("completion_status") != "CLOSE_CONFIRMED":
+            return "screening completion status is not CLOSE_CONFIRMED"
+        if not payload.get("latest_completed_trade_date") or not payload.get("decision_cutoff"):
+            return "screening causal metadata is incomplete"
+    candidates = payload.get("candidates")
+    if candidates is not None and not isinstance(candidates, list):
+        return "screening candidates payload is not a list"
+    if candidates is not None and payload.get("candidate_count") is not None:
+        if int(payload.get("candidate_count") or 0) != len(candidates):
+            return "screening candidate count does not match persisted payload"
+    return None
 
 
 def build_scheduler(state_path: Path, *, now: Callable[[], datetime] | None = None) -> DailyScreeningScheduler:

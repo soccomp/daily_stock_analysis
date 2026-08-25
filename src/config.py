@@ -1193,7 +1193,7 @@ class Config:
     single_brain_m2_symbols: List[str] = field(default_factory=list)
     single_brain_m2_max_symbols: int = 10
     single_brain_m2_holdings_limit: int = 10
-    single_brain_m2_interval_minutes: int = 60
+    single_brain_m2_interval_minutes: int = 10
     single_brain_m2_run_immediately: bool = False
     single_brain_m2_natural_session_gate_enabled: bool = True
     single_brain_m2_readiness_gate_enabled: bool = True
@@ -2254,7 +2254,7 @@ class Config:
             ),
             single_brain_m2_interval_minutes=parse_env_int(
                 os.getenv('DSA_SINGLE_BRAIN_M2_INTERVAL_MINUTES'),
-                60,
+                10,
                 field_name='DSA_SINGLE_BRAIN_M2_INTERVAL_MINUTES',
                 minimum=1,
                 maximum=1440,

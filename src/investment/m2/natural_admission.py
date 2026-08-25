@@ -44,7 +44,7 @@ class CycleBudget:
 def build_cycle_budget(
     *, started_at: datetime, config: object, scheduled_for: datetime | None = None
 ) -> CycleBudget:
-    interval_seconds = max(60, int(getattr(config, "single_brain_m2_interval_minutes", 60)) * 60)
+    interval_seconds = max(60, int(getattr(config, "single_brain_m2_interval_minutes", 10)) * 60)
     guard_seconds = max(0, int(getattr(config, "single_brain_m2_cycle_guard_seconds", 300)))
     usable_seconds = max(0, interval_seconds - guard_seconds)
     reserve = (

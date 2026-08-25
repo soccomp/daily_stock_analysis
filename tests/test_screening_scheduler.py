@@ -93,10 +93,13 @@ def test_retry_after_first_failure_then_success(tmp_path, monkeypatch):
         return {"run_id": "run-2", "candidate_count": 2}
 
     s = _scheduler(tmp_path, run_screen=run_screen, now=TRADING_DAY)
+    first = s.tick()
     result = s.tick()
 
     assert result["status"] == "COMPLETED"
     assert result["attempts"] == 2
+    assert first["status"] == "RETRYABLE_FAILED"
+    assert first["attempts"] == 1
     assert len(calls) == 2
 
 
@@ -109,12 +112,16 @@ def test_empty_run_id_is_not_reported_as_completed(tmp_path, monkeypatch):
         return {"run_id": "   ", "candidate_count": 3}
 
     s = _scheduler(tmp_path, run_screen=run_screen, now=TRADING_DAY)
-    result = s.tick()
+    results = [s.tick() for _ in range(sched_mod.MAX_NATURAL_ATTEMPTS)]
+    result = results[-1]
+    locked = s.tick()
 
     assert result["status"] == "FAILED"
     assert result["attempts"] == len(sched_mod.RETRY_DELAYS_SECONDS)
     assert len(calls) == len(sched_mod.RETRY_DELAYS_SECONDS)
     assert "empty run_id" in result["last_error"]
+    assert [item["status"] for item in results[:-1]] == ["RETRYABLE_FAILED"] * (len(results) - 1)
+    assert locked["status"] == "SCREENING_FAILED_FOR_DAY"
 
 
 def test_all_retries_exhausted_fails_soft(tmp_path, monkeypatch):
@@ -126,15 +133,19 @@ def test_all_retries_exhausted_fails_soft(tmp_path, monkeypatch):
         raise RuntimeError("down")
 
     s = _scheduler(tmp_path, run_screen=run_screen, now=TRADING_DAY)
-    result = s.tick()
+    results = [s.tick() for _ in range(sched_mod.MAX_NATURAL_ATTEMPTS)]
+    result = results[-1]
+    locked = s.tick()
 
     assert result["status"] == "FAILED"
     assert result["attempts"] == len(sched_mod.RETRY_DELAYS_SECONDS)
     assert len(calls) == len(sched_mod.RETRY_DELAYS_SECONDS)
     assert "down" in result["last_error"]
+    assert [item["status"] for item in results[:-1]] == ["RETRYABLE_FAILED"] * (len(results) - 1)
+    assert locked["status"] == "SCREENING_FAILED_FOR_DAY"
 
 
-def test_failed_day_does_not_rerun(tmp_path, monkeypatch):
+def test_failed_day_self_locks_only_after_bounded_natural_retries(tmp_path, monkeypatch):
     monkeypatch.setattr(sched_mod, "is_market_open", lambda m, d: True)
     calls = []
 
@@ -143,11 +154,38 @@ def test_failed_day_does_not_rerun(tmp_path, monkeypatch):
         raise RuntimeError("down")
 
     s = _scheduler(tmp_path, run_screen=run_screen, now=TRADING_DAY)
-    s.tick()
-    second = s.tick()
+    results = [s.tick() for _ in range(sched_mod.MAX_NATURAL_ATTEMPTS)]
+    locked = s.tick()
 
-    assert second["status"] == "SCREENING_FAILED_FOR_DAY"
-    assert len(calls) == len(sched_mod.RETRY_DELAYS_SECONDS)  # no extra attempts
+    assert results[-1]["status"] == "FAILED"
+    assert locked["status"] == "SCREENING_FAILED_FOR_DAY"
+    assert len(calls) == len(sched_mod.RETRY_DELAYS_SECONDS)
+
+
+def test_retryable_state_survives_scheduler_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(sched_mod, "is_market_open", lambda m, d: True)
+    calls = []
+
+    def first_run(**kwargs):
+        calls.append("first")
+        raise RuntimeError("temporary producer outage")
+
+    first_scheduler = _scheduler(tmp_path, run_screen=first_run, now=TRADING_DAY)
+    first = first_scheduler.tick()
+    assert first["status"] == "RETRYABLE_FAILED"
+    assert first["attempts"] == 1
+
+    def recovered_run(**kwargs):
+        calls.append("recovered")
+        return {"run_id": "run-after-restart", "candidate_count": 0}
+
+    restarted = _scheduler(tmp_path, run_screen=recovered_run, now=TRADING_DAY)
+    recovered = restarted.tick()
+
+    assert recovered["status"] == "COMPLETED"
+    assert recovered["run_id"] == "run-after-restart"
+    assert recovered["attempts"] == 2
+    assert calls == ["first", "recovered"]
 
 
 def test_crash_recovery_uses_persisted_run(tmp_path, monkeypatch):

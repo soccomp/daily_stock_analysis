@@ -14,12 +14,14 @@
 """
 
 import logging
+import math
 import re
 import signal
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
@@ -301,6 +303,8 @@ class Scheduler:
         interval_seconds: int,
         run_immediately: bool = False,
         name: Optional[str] = None,
+        daily_due_time: Optional[str] = None,
+        daily_due_timezone: str = "Asia/Shanghai",
     ) -> None:
         """Register a periodic background task executed inside the scheduler loop.
 
@@ -318,6 +322,14 @@ class Scheduler:
                 name or getattr(task, "__name__", "background_task"),
                 interval_seconds,
             )
+        phase_due_time = (daily_due_time or "").strip()
+        if phase_due_time and not self._is_valid_schedule_time(phase_due_time):
+            logger.warning(
+                "后台任务 %s 的 daily_due_time=%r 无效，忽略 phase lock",
+                name or getattr(task, "__name__", "background_task"),
+                daily_due_time,
+            )
+            phase_due_time = ""
         entry = {
             "task": task,
             "interval_seconds": clamped_interval,
@@ -330,9 +342,18 @@ class Scheduler:
             ),
             "scheduled_for_epoch": None,
             "started_at_epoch": None,
+            "daily_due_time": phase_due_time or None,
+            "daily_due_timezone": daily_due_timezone,
+            "phase_locked": bool(phase_due_time),
         }
         if not run_immediately:
-            entry["last_run"] = time.time()
+            registration_time = time.time()
+            entry["last_run"] = self._initial_background_last_run(
+                registration_time,
+                interval_seconds=clamped_interval,
+                daily_due_time=phase_due_time,
+                daily_due_timezone=daily_due_timezone,
+            )
         self._background_tasks.append(entry)
         logger.info(
             "已注册后台任务: %s（间隔 %s 秒，立即执行=%s）",
@@ -342,6 +363,38 @@ class Scheduler:
         )
         if run_immediately:
             self._start_background_task(entry)
+
+    @staticmethod
+    def _initial_background_last_run(
+        registration_time: float,
+        *,
+        interval_seconds: int,
+        daily_due_time: str,
+        daily_due_timezone: str,
+    ) -> float:
+        """Anchor a phase-locked interval task at its next natural due point.
+
+        The task is still dispatched only by ``_run_background_tasks``.  The
+        phase lock merely prevents process start time from moving the first
+        interval tick past the existing legal screening slot.
+        """
+        if not daily_due_time:
+            return registration_time
+        try:
+            hour, minute = (int(part) for part in daily_due_time.split(":", 1))
+            local_now = datetime.fromtimestamp(
+                registration_time, tz=timezone.utc
+            ).astimezone(ZoneInfo(daily_due_timezone))
+            due = local_now.replace(
+                hour=hour, minute=minute, second=0, microsecond=0
+            )
+            elapsed = (local_now - due).total_seconds()
+            if elapsed > 0:
+                periods = max(1, math.ceil(elapsed / interval_seconds))
+                due += timedelta(seconds=periods * interval_seconds)
+            return due.timestamp() - interval_seconds
+        except Exception:  # pragma: no cover - invalid runtime timezone/config
+            return registration_time
 
     def _start_background_task(
         self,
@@ -386,8 +439,14 @@ class Scheduler:
 
         entry["scheduled_for_epoch"] = float(scheduled_for_epoch)
         entry["started_at_epoch"] = float(started_at_epoch)
-        # ``last_run`` remains the actual start marker used by interval gating.
-        entry["last_run"] = started_at_epoch
+        # Normal tasks gate from actual start.  Phase-locked tasks gate from
+        # the scheduler-owned due point so the configured interval remains
+        # aligned to the legal screening phase after a delayed worker start.
+        entry["last_run"] = (
+            float(scheduled_for_epoch)
+            if entry.get("phase_locked")
+            else started_at_epoch
+        )
         entry["running"] = True
         worker = threading.Thread(
             target=_runner,
@@ -495,6 +554,8 @@ def run_with_schedule(
             interval_seconds=entry["interval_seconds"],
             run_immediately=entry.get("run_immediately", False),
             name=entry.get("name"),
+            daily_due_time=entry.get("daily_due_time"),
+            daily_due_timezone=entry.get("daily_due_timezone", "Asia/Shanghai"),
         )
     scheduler.set_daily_task(task, run_immediately=run_immediately)
     scheduler.run()

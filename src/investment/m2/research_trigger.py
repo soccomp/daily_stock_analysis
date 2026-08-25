@@ -545,7 +545,7 @@ class ResearchTriggerCoordinator:
         cycle_id: str,
         now: datetime,
     ) -> list[dict[str, Any]]:
-        interval = int(getattr(config, "single_brain_m2_interval_minutes", 60))
+        interval = int(getattr(config, "single_brain_m2_interval_minutes", 10))
         policy_version = str(
             getattr(config, "single_brain_m2_review_policy_version", TRIGGER_POLICY_VERSION)
             or TRIGGER_POLICY_VERSION
@@ -629,6 +629,21 @@ class ResearchTriggerCoordinator:
                     str(scope.get("screening_run_id") or ""),
                 )
                 if screening_key in pending_keys:
+                    continue
+                screening_dedup_key = (
+                    f"screening:{scope.get('screening_run_id') or ''}:{symbol}"
+                )
+                existing_screening_trigger = self.ledger.get_by_dedup_key(
+                    screening_dedup_key
+                )
+                if (
+                    existing_screening_trigger is not None
+                    and self._processed(existing_screening_trigger.research_trigger_id)
+                ):
+                    # A later interval tick may still see the same valid
+                    # screening artifact.  Its immutable trigger has already
+                    # reached a terminal state; do not rebuild it with a new
+                    # cycle timestamp/evidence and create a content conflict.
                     continue
                 trigger = self._screening_trigger(
                     scope=scope,
