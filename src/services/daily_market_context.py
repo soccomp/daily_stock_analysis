@@ -96,6 +96,11 @@ class DailyMarketContext:
     decision_as_of: Optional[str] = None
     news_actionability: str = "NO_NEWS"
     news_audit_excluded_count: int = 0
+    canonical_context: Optional[Dict[str, Any]] = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def to_safe_dict(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -760,6 +765,10 @@ class DailyMarketContextService:
             scoped_payload=scoped_payload,
             fallback_full_report=fallback_full_report,
         )
+        canonical_context = _canonical_market_context_for_region(
+            payload,
+            normalized_region,
+        )
         timing_payload = (
             scoped_payload.get("market_context")
             if isinstance(scoped_payload.get("market_context"), Mapping)
@@ -806,6 +815,7 @@ class DailyMarketContextService:
             decision_as_of=canonical_cutoff,
             news_actionability=news_actionability,
             news_audit_excluded_count=excluded_count,
+            canonical_context=canonical_context,
         )
 
 
@@ -1110,6 +1120,35 @@ def _payload_for_region(payload: Mapping[str, Any], region: str) -> Mapping[str,
         if isinstance(market_payload, Mapping):
             return market_payload
     return payload
+
+
+def _canonical_market_context_for_region(
+    payload: Mapping[str, Any],
+    region: str,
+) -> Optional[Dict[str, Any]]:
+    """Return the persisted canonical context carried by one review payload."""
+
+    def canonical_copy(value: Mapping[str, Any]) -> Dict[str, Any]:
+        context = dict(value)
+        try:
+            context["as_of"] = canonical_utc(require_decision_cutoff(context["as_of"]))
+        except (KeyError, TypeError, ValueError):
+            pass
+        return context
+
+    market_context = payload.get("market_context")
+    if isinstance(market_context, Mapping):
+        if market_context.get("source_task_id"):
+            return canonical_copy(market_context)
+        regional_context = market_context.get(region)
+        if isinstance(regional_context, Mapping) and regional_context.get("source_task_id"):
+            return canonical_copy(regional_context)
+
+    scoped_payload = _payload_for_region(payload, region)
+    scoped_context = scoped_payload.get("market_context")
+    if isinstance(scoped_context, Mapping) and scoped_context.get("source_task_id"):
+        return canonical_copy(scoped_context)
+    return None
 
 
 def _extract_summary(payload: Mapping[str, Any], fallback_summary: Optional[str]) -> str:

@@ -359,13 +359,32 @@ def _persist_market_context(db, context: dict[str, object], *, query_id: str) ->
         ))
 
 
-def _fake_market_review_factory(db, generated: list[str]):
+def _fake_market_review_factory(
+    db,
+    generated: list[str],
+    *,
+    failure_mode: str | None = None,
+):
     def fake_run_market_review(**kwargs):
         as_of = kwargs.get("context_as_of") or NOW
         if isinstance(as_of, str):
             as_of = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+        if failure_mode == "generation":
+            raise RuntimeError("fixture MarketContext generation failure")
+        if failure_mode == "pit":
+            as_of += timedelta(hours=1)
         query_id = str(kwargs.get("query_id") or "fixture-market-review")
         context = _context(as_of=as_of, lineage=hashlib.sha1(query_id.encode()).hexdigest()[:12])
+        if failure_mode == "persistence":
+            generated.append(str(context["as_of"]))
+            return SimpleNamespace(
+                market_review_payload={
+                    "market_context": context,
+                    "summary": "deterministic structured market context",
+                },
+                report="deterministic structured market context",
+                persistence_status="PERSISTENCE_FAILED",
+            )
         _persist_market_context(db, context, query_id=query_id)
         generated.append(str(context["as_of"]))
         return SimpleNamespace(
@@ -655,6 +674,8 @@ def _run_natural_day(
     dispatches: int = 1,
     restart_between_attempts: bool = False,
     scenario_label: str | None = None,
+    market_context_seed: str | None = None,
+    market_context_failure: str | None = None,
 ) -> dict[str, object]:
     """Run one fixed-clock day through real scheduler interval/due decisions."""
 
@@ -671,6 +692,15 @@ def _run_natural_day(
     DatabaseManager.reset_instance()
     db_ref = {"db": DatabaseManager.get_instance()}
     generated_contexts: list[str] = []
+    if market_context_seed == "STALE":
+        _persist_market_context(
+            db_ref["db"],
+            _context(
+                as_of=datetime(2026, 8, 25, 0, 0, tzinfo=timezone.utc),
+                lineage=f"stale-seed-{label}",
+            ),
+            query_id=f"stale-seed-{label}",
+        )
     screening_calls: list[dict[str, object]] = []
     screening_attempts: list[dict[str, object]] = []
     research_completions: list[datetime] = []
@@ -751,7 +781,11 @@ def _run_natural_day(
         return service
 
     def fake_review(**kwargs):
-        return _fake_market_review_factory(db_ref["db"], generated_contexts)(**kwargs)
+        return _fake_market_review_factory(
+            db_ref["db"],
+            generated_contexts,
+            failure_mode=market_context_failure,
+        )(**kwargs)
 
     def make_runtime():
         tasks = lambda current_config: build_single_brain_m2_background_tasks(
@@ -767,6 +801,7 @@ def _run_natural_day(
     dispatch_log: list[dict[str, object]] = []
     screening_dispatch_log: list[dict[str, object]] = []
     all_dispatch_log: list[dict[str, object]] = []
+    initial_cycle_evidence: dict[str, object] = {}
     runtime_status: dict[str, object] = {}
     restart_status: dict[str, object] | None = None
     context_refresh_probe: dict[str, object] = {}
@@ -809,6 +844,28 @@ def _run_natural_day(
                 event for event in all_dispatch_log
                 if event["task_name"] == "single_brain_screening_producer"
             )
+            if dispatch_log:
+                from src.investment.canonical_cycle import CanonicalCycleRepository
+                from src.services.runtime_scheduler import _proposal_handoff_cycle_identity
+
+                first_scheduled_for = _parse_time(dispatch_log[0]["scheduled_for"])
+                first_cycle_id, _, _ = _proposal_handoff_cycle_identity(
+                    config,
+                    first_scheduled_for,
+                )
+                first_cycle = CanonicalCycleRepository().get_cycle(first_cycle_id)
+                first_stages = CanonicalCycleRepository().stage_events(first_cycle_id)
+                initial_cycle_evidence = {
+                    "cycle": first_cycle,
+                    "stages": {
+                        item["stage"]: {
+                            "state": item["state"],
+                            "reason_code": item["reason_code"],
+                            "object_id": item["object_id"],
+                        }
+                        for item in first_stages
+                    },
+                }
             if dispatches > 1:
                 if restart_between_attempts:
                     runtime.stop()
@@ -847,25 +904,26 @@ def _run_natural_day(
                     event for event in all_dispatch_log
                     if event["task_name"] == "single_brain_screening_producer"
                 ]
-            next_poll = datetime.fromisoformat(
-                str(all_dispatch_log[-1]["observed_at"])
-            ) + timedelta(seconds=30)
-            _run_scheduler_until_post_screening(
-                runtime,
-                start_at=next_poll,
-                natural_clock=natural_clock,
-                proposal_dispatch_log=dispatch_log,
-                screening_dispatch_log=screening_dispatch_log,
-                screening_attempts=screening_attempts,
-                all_dispatch_log=all_dispatch_log,
-                required_screening_attempts=(
-                    int(mode.rsplit("_", 1)[-1])
-                    if mode.startswith("retry_") else None
-                ),
-            )
-            context_refresh_probe = _market_context_refresh_probe(
-                db_ref["db"], config=config
-            )
+            if market_context_failure is None:
+                next_poll = datetime.fromisoformat(
+                    str(all_dispatch_log[-1]["observed_at"])
+                ) + timedelta(seconds=30)
+                _run_scheduler_until_post_screening(
+                    runtime,
+                    start_at=next_poll,
+                    natural_clock=natural_clock,
+                    proposal_dispatch_log=dispatch_log,
+                    screening_dispatch_log=screening_dispatch_log,
+                    screening_attempts=screening_attempts,
+                    all_dispatch_log=all_dispatch_log,
+                    required_screening_attempts=(
+                        int(mode.rsplit("_", 1)[-1])
+                        if mode.startswith("retry_") else None
+                    ),
+                )
+                context_refresh_probe = _market_context_refresh_probe(
+                    db_ref["db"], config=config
+                )
     finally:
         runtime.stop()
 
@@ -967,6 +1025,7 @@ def _run_natural_day(
                 "stale_recovery", False
             ),
         },
+        "initial_cycle_evidence": initial_cycle_evidence,
         "canonical_projection": projection,
         "runtime_contract": {
             "model": "gpt-5.6-luna", "reasoning_effort": "max",
@@ -1118,6 +1177,19 @@ def _ambiguous_linkage_probe() -> dict[str, object]:
 def _run_scenarios(directory: Path) -> dict[str, dict[str, object]]:
     return {
         "success": _run_natural_day(directory, mode="success", start_at=START_OPEN),
+        "market_context_missing_refresh": _run_natural_day(
+            directory,
+            mode="success",
+            start_at=START_OPEN,
+            scenario_label="market_context_missing_refresh",
+        ),
+        "market_context_stale_refresh": _run_natural_day(
+            directory,
+            mode="success",
+            start_at=START_OPEN,
+            scenario_label="market_context_stale_refresh",
+            market_context_seed="STALE",
+        ),
         "zero": _run_natural_day(directory, mode="zero", scenario_label="zero"),
         "holdings_only": _run_natural_day(directory, mode="holdings_only"),
         "luna_timeout": _run_natural_day(directory, mode="success", runner_failure=True, scenario_label="luna_timeout"),
@@ -1169,6 +1241,19 @@ def _run_scenarios(directory: Path) -> dict[str, dict[str, object]]:
             directory, mode="success", start_at=START_AFTER_CUTOFF,
             scenario_label="post_cutoff",
         ),
+    }
+
+
+def _market_context_fault_matrix(directory: Path) -> dict[str, dict[str, object]]:
+    return {
+        failure_mode: _run_natural_day(
+            directory,
+            mode="success",
+            start_at=START_OPEN,
+            scenario_label=f"market_context_{failure_mode}",
+            market_context_failure=failure_mode,
+        )
+        for failure_mode in ("generation", "persistence", "pit")
     }
 
 
@@ -1246,6 +1331,11 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="pallas-dsa-system-day-") as temporary:
         directory = Path(temporary)
         scenarios = _run_scenarios(directory) if args.scenario == "system_day" else {args.scenario: _run_natural_day(directory, mode=args.scenario)}
+        market_context_faults = (
+            _market_context_fault_matrix(directory)
+            if args.scenario == "system_day"
+            else {}
+        )
         success = scenarios["success"]
         _require(success["status"] == "SUCCEEDED", "natural success path did not complete")
         _require(success["candidate_discovery_status"] == "VALID", "natural discovery was not valid")
@@ -1256,6 +1346,24 @@ def main() -> int:
             success["natural_runtime"]["configured_interval_seconds"] == 600,
             "primary harness did not use the configured ten-minute proposal interval",
         )
+        for scenario_name in (
+            "market_context_missing_refresh",
+            "market_context_stale_refresh",
+        ):
+            scenario = scenarios[scenario_name]
+            initial = scenario["initial_cycle_evidence"]
+            _require(
+                scenario["status"] == "SUCCEEDED"
+                and scenario["proposal_ids"]
+                and scenario["context_refresh"]["generated_count"] >= 1,
+                f"{scenario_name} did not reach the natural proposal path after context refresh",
+            )
+            _require(
+                initial["stages"]["MARKET_REVIEW"]["state"] == "SUCCEEDED"
+                and initial["stages"]["MARKET_CONTEXT"]["state"] == "SUCCEEDED"
+                and initial["stages"]["RESEARCH_TRIGGER"]["state"] in {"NO_ACTION", "SUCCEEDED"},
+                f"{scenario_name} did not continue from MarketContext into RESEARCH_TRIGGER",
+            )
         _require(
             [item["name"] for item in success["natural_runtime"]["registered_responsibilities"]]
             == ["single_brain_proposal_handoff", "single_brain_screening_producer"],
@@ -1396,6 +1504,30 @@ def main() -> int:
             == "OUTSIDE_TRADING_SESSION",
             "post-cutoff natural entry did not persist a truthful zero-work outcome",
         )
+        for failure_mode, scenario in market_context_faults.items():
+            initial = scenario["initial_cycle_evidence"]
+            _require(
+                scenario["status"] == "BLOCKED"
+                and not scenario["proposal_ids"]
+                and scenario["canonical_projection"]["last_terminal_reason"]["code"]
+                == "REQUIRED_DEPENDENCY_BLOCKED",
+                f"MarketContext {failure_mode} did not block the natural cycle",
+            )
+            _require(
+                initial["stages"]["MARKET_REVIEW"]["state"] == "NOT_ENTERED"
+                and initial["stages"]["MARKET_CONTEXT"]["state"] == "NOT_ENTERED"
+                and all(
+                    initial["stages"][stage]["state"] == "NOT_ENTERED"
+                    for stage in (
+                        "RESEARCH_TRIGGER",
+                        "CANDIDATE_EVALUATION",
+                        "RESEARCH_BUNDLE",
+                        "INVESTMENT_PROPOSAL",
+                        "ATHENA_HANDOFF_ACK",
+                    )
+                ),
+                f"MarketContext {failure_mode} entered downstream work",
+            )
         _require(
             all(
                 recovery["natural_runtime"]["screening_attempts"][0]["attempt"] == 1
@@ -1462,6 +1594,11 @@ def main() -> int:
             "scenarios": scenarios,
             "evidence": {
                 "context_fault_matrix": _context_fault_matrix(), "narrative_failure": _narrative_failure_probe(),
+                "market_context_wiring": {
+                    "missing_refresh": scenarios["market_context_missing_refresh"]["initial_cycle_evidence"],
+                    "stale_refresh": scenarios["market_context_stale_refresh"]["initial_cycle_evidence"],
+                    "fault_matrix": market_context_faults,
+                },
                 "screening_fault_matrix": screening_faults, "proposal_transport_fault": _proposal_transport_fault_probe(success["proposals"][0]),
                 "calendar_fault": _calendar_fault_probe(), "unsafe_budget": unsafe_budget,
                 "ambiguous_linkage": _ambiguous_linkage_probe(),

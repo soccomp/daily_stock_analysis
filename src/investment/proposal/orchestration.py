@@ -148,7 +148,7 @@ class ProposalHandoffLoopService:
         context_service = DailyMarketContextService(db)
 
         def produce_market_context(*, now: datetime, cycle_id: str, interval_minutes: int):
-            context_service.get_context(
+            produced_context = context_service.get_context(
                 region=str(getattr(config, "market_review_region", "cn") or "cn").split(",")[0],
                 config=config,
                 notifier=notifier,
@@ -162,12 +162,13 @@ class ProposalHandoffLoopService:
                 decision_as_of=now,
                 max_age_seconds=max(60, interval_minutes * 60),
             )
-            context, _reason = MarketReviewLinkageRepository(db).resolve_market_context(
-                trade_date=now.astimezone(timezone.utc).date(),
-                as_of=now,
-                max_age_seconds=max(60, interval_minutes * 60),
-            )
-            return context
+            canonical_context = getattr(produced_context, "canonical_context", None)
+            if not isinstance(canonical_context, Mapping):
+                raise RuntimeError(
+                    "scheduler-owned MarketContext producer did not return "
+                    "persisted canonical context"
+                )
+            return dict(canonical_context)
 
         return cls(
             config=config,
