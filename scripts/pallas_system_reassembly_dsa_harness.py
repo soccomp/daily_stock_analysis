@@ -291,31 +291,37 @@ class _FixtureScreeningService:
         self.screening_calls = screening_calls if screening_calls is not None else []
         self.observed_at = observed_at
 
-    def screen(self, *, strategy, market, max_results):
+    def screen(self, *, strategy, market, max_results, decision_as_of=None):
         attempt_number = self.attempt_number
         self.attempt_number += 1
+        attempt_at = decision_as_of or self.observed_at
         self.screening_calls.append({
             "attempt": attempt_number,
             "mode": self.mode,
-            "at": self.observed_at.isoformat(),
+            "at": attempt_at.astimezone(timezone.utc).isoformat(),
+            "at_bjt": attempt_at.isoformat(),
         })
         self.attempt_events.append({
             "attempt": attempt_number,
             "mode": self.mode,
-            "at": self.observed_at.isoformat(),
+            "at": attempt_at.astimezone(timezone.utc).isoformat(),
+            "at_bjt": attempt_at.isoformat(),
         })
+        retry_target = int(self.mode.rsplit("_", 1)[-1]) if self.mode.startswith("retry_") else None
         if self.mode == "failed" or (
             self.mode == "transient_recovery" and attempt_number == 1
+        ) or (
+            retry_target is not None and attempt_number < retry_target
         ):
             raise OSError("fixture screening producer unavailable")
         candidates = [] if self.mode == "zero" else [{
             "code": "600519", "name": "贵州茅台", "rank": 1,
             "screen_score": 88.0, "score": 88.0,
             "latest_completed_trade_date": PRIOR_COMPLETED_TRADE_DATE,
-            "decision_cutoff": self.observed_at.isoformat(), "completion_status": "CLOSE_CONFIRMED",
+            "decision_cutoff": attempt_at.isoformat(), "completion_status": "CLOSE_CONFIRMED",
             "completion_basis": "PRIOR_PROVIDER_RETURNED_SESSION",
             "quantitative_input_reference": "fixture:daily-close:600519:2026-08-24",
-            "strategy_evidence": _pallas008_evidence(decision_cutoff=self.observed_at),
+            "strategy_evidence": _pallas008_evidence(decision_cutoff=attempt_at),
         }]
         source_errors = []
         if self.mode == "quality_recovery" and attempt_number == 1:
@@ -540,7 +546,9 @@ def _run_scheduler_until_post_screening(
     natural_clock: dict[str, datetime],
     proposal_dispatch_log: list[dict[str, object]],
     screening_dispatch_log: list[dict[str, object]],
+    screening_attempts: list[dict[str, object]],
     all_dispatch_log: list[dict[str, object]],
+    required_screening_attempts: int | None = None,
 ) -> None:
     """Drive the one authority through screening due and the next proposal."""
 
@@ -557,7 +565,12 @@ def _run_scheduler_until_post_screening(
                 proposal_dispatch_log.append(event)
             elif event["task_name"] == "single_brain_screening_producer":
                 screening_dispatch_log.append(event)
-        if screening_dispatch_log and proposal_dispatch_log:
+        if (
+            required_screening_attempts is not None
+            and len(screening_attempts) >= required_screening_attempts
+        ):
+            return
+        if required_screening_attempts is None and screening_dispatch_log and proposal_dispatch_log:
             latest_proposal = proposal_dispatch_log[-1]
             eligible_screening = [
                 event for event in screening_dispatch_log
@@ -667,6 +680,7 @@ def _run_natural_day(
         "success": "valid", "zero": "zero", "holdings_only": "failed",
         "transient_recovery": "transient_recovery",
         "quality_recovery": "quality_recovery",
+        "retry_2": "retry_2", "retry_3": "retry_3", "retry_4": "retry_4",
     }.get(mode, "failed")
     if mode == "holdings_only":
         db_ref["db"].save_screening_run({
@@ -774,7 +788,6 @@ def _run_natural_day(
              patch("src.services.screening_service.ScreeningService", screening_factory), \
              patch("src.investment.proposal.orchestration.ProposalHandoffLoopService.from_config", classmethod(capture_from_config)), \
              patch("src.investment.screening_scheduler.DEFAULT_STATE_PATH", state_path), \
-             patch("src.investment.screening_scheduler._sleep", lambda _seconds: None), \
              patch.object(scheduler_module.Scheduler, "run", idle_scheduler_loop):
             with patch.object(scheduler_module.time, "time", return_value=start_at.timestamp()):
                 runtime.start()
@@ -842,7 +855,12 @@ def _run_natural_day(
                 natural_clock=natural_clock,
                 proposal_dispatch_log=dispatch_log,
                 screening_dispatch_log=screening_dispatch_log,
+                screening_attempts=screening_attempts,
                 all_dispatch_log=all_dispatch_log,
+                required_screening_attempts=(
+                    int(mode.rsplit("_", 1)[-1])
+                    if mode.startswith("retry_") else None
+                ),
             )
             context_refresh_probe = _market_context_refresh_probe(
                 db_ref["db"], config=config
@@ -855,6 +873,15 @@ def _run_natural_day(
     projection = CanonicalCycleRepository().scheduler_projection(
         scheduler_task_name="single_brain_proposal_handoff"
     )
+    try:
+        screening_state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        screening_state = {}
+    screening_run_key = (
+        f"{natural_clock['now'].astimezone(ZoneInfo('Asia/Shanghai')).date().isoformat()}"
+        ":capital_heat:cn"
+    )
+    screening_run_state = (screening_state.get("runs") or {}).get(screening_run_key)
     due_publisher = publishers[-1] if publishers else None
     proposals = list(due_publisher.proposals) if due_publisher is not None else []
     causal_timeline = _causal_timeline(
@@ -895,6 +922,7 @@ def _run_natural_day(
         "success": "VALID", "zero": "NO_FRESH_CANDIDATES",
         "holdings_only": "DISCOVERY_FAILED", "transient_recovery": "VALID",
         "quality_recovery": "VALID",
+        "retry_2": "VALID", "retry_3": "VALID", "retry_4": "VALID",
         "post_due": "VALID", "post_cutoff": "NOT_ENTERED",
     }.get(mode, "DISCOVERY_FAILED")
     DatabaseManager.reset_instance()
@@ -903,6 +931,7 @@ def _run_natural_day(
         "status": projection.get("last_terminal_status") or projection.get("current_status"),
         "cycle_id": projection.get("last_terminal_cycle_id") or projection.get("current_cycle_id"),
         "candidate_discovery_status": candidate_status,
+        "screening_run_state": screening_run_state,
         "proposal_ids": [item.proposal_id for item in proposals],
         "acknowledgement_ids": [f"ack:{item.content_hash[:24]}" for item in proposals],
         "proposals": [json.loads(item.canonical_json()) for item in proposals],
@@ -1097,6 +1126,15 @@ def _run_scenarios(directory: Path) -> dict[str, dict[str, object]]:
         "quality_recovery": _run_natural_day(
             directory, mode="quality_recovery", dispatches=2,
         ),
+        "retry_success_2": _run_natural_day(
+            directory, mode="retry_2", scenario_label="retry_success_2",
+        ),
+        "retry_success_3": _run_natural_day(
+            directory, mode="retry_3", scenario_label="retry_success_3",
+        ),
+        "retry_success_4": _run_natural_day(
+            directory, mode="retry_4", scenario_label="retry_success_4",
+        ),
         "restart_recovery": _run_natural_day(
             directory, mode="transient_recovery", dispatches=2,
             restart_between_attempts=True, scenario_label="restart_recovery",
@@ -1269,6 +1307,29 @@ def main() -> int:
                 and [item["at"] for item in recovery["natural_runtime"]["screening_attempts"]]
                 == ["2026-08-25T06:45:00+00:00", "2026-08-25T06:45:30+00:00"],
                 f"{recovery_name} did not recover through later natural screening attempts",
+            )
+        expected_retry_times = [
+            "2026-08-25T06:45:00+00:00",
+            "2026-08-25T06:45:30+00:00",
+            "2026-08-25T06:47:30+00:00",
+            "2026-08-25T06:57:30+00:00",
+        ]
+        for retry_name, expected_attempts in (
+            ("retry_success_2", 2),
+            ("retry_success_3", 3),
+            ("retry_success_4", 4),
+        ):
+            recovery = scenarios[retry_name]
+            actual_attempts = recovery["natural_runtime"]["screening_attempts"]
+            _require(
+                recovery["screening_run_state"]
+                and recovery["screening_run_state"]["status"] == "COMPLETED"
+                and recovery["screening_run_state"]["attempts"] == expected_attempts
+                and [item["attempt"] for item in actual_attempts]
+                == list(range(1, expected_attempts + 1))
+                and [item["at"] for item in actual_attempts]
+                == expected_retry_times[:expected_attempts],
+                f"{retry_name} was not accepted on the natural retry clock",
             )
         _require(
             scenarios["restart_recovery"]["natural_runtime"]["restart_state_path_reused"],

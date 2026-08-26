@@ -1215,6 +1215,7 @@ class ScreeningService:
         max_results: int,
         selection_seed: str = "",
         progress_callback: Callable[[int, str], None] | None = None,
+        decision_as_of: datetime | str | None = None,
     ) -> Dict[str, Any]:
         _ensure_screening_enabled(self.config)
         _ensure_screening_available_for_use()
@@ -1229,6 +1230,7 @@ class ScreeningService:
                 self.config,
                 selection_seed=selection_seed,
                 progress_callback=progress_callback,
+                decision_as_of=decision_as_of,
             )
         except ValueError as exc:
             raise HTTPException(
@@ -1741,6 +1743,7 @@ def _call_screening_screen(
     *,
     selection_seed: str = "",
     progress_callback: Callable[[int, str], None] | None = None,
+    decision_as_of: datetime | str | None = None,
 ) -> Any:
     # Environment bridging is process-global, so keep it brief: materialize an
     # immutable pipeline config while holding the lock, then release it before
@@ -1773,6 +1776,8 @@ def _call_screening_screen(
             "progress_callback": progress_callback,
             "daily_history_fetcher": daily_history_fetcher,
         }
+        if decision_as_of is not None:
+            pipeline_kwargs["decision_as_of"] = decision_as_of
         if is_codex_backend:
             pipeline_kwargs["runtime_config"] = config
         return run_screening_pipeline(

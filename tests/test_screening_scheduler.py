@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, time
+from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -12,6 +12,7 @@ from src.investment.screening_scheduler import DailyScreeningScheduler
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
 TRADING_DAY = datetime(2026, 8, 18, 14, 50, 0, tzinfo=CN_TZ)  # Tuesday
+RETRY_DAY = datetime(2026, 8, 18, 14, 45, 0, tzinfo=CN_TZ)
 
 
 class _FakeDB:
@@ -26,10 +27,17 @@ def _scheduler(tmp_path, *, run_screen, now, db=None):
     return DailyScreeningScheduler(
         state_path=tmp_path / "scheduler_state.json",
         run_screen=run_screen,
-        now=lambda: now,
-        sleep=lambda _s: None,  # no real sleeps in tests
+        now=now if callable(now) else lambda: now,
         db_manager=db if db is not None else _FakeDB(),
     )
+
+
+def _run_all_natural_attempts(scheduler, clock):
+    results = [scheduler.tick()]
+    for delay in sched_mod.RETRY_DELAYS_SECONDS[1:]:
+        clock["now"] += timedelta(seconds=delay)
+        results.append(scheduler.tick())
+    return results
 
 
 def test_trading_day_after_schedule_runs_screening(tmp_path, monkeypatch):
@@ -85,6 +93,7 @@ def test_same_day_rerun_is_idempotent(tmp_path, monkeypatch):
 def test_retry_after_first_failure_then_success(tmp_path, monkeypatch):
     monkeypatch.setattr(sched_mod, "is_market_open", lambda m, d: True)
     calls = []
+    clock = {"now": RETRY_DAY}
 
     def run_screen(**kwargs):
         calls.append(kwargs)
@@ -92,8 +101,9 @@ def test_retry_after_first_failure_then_success(tmp_path, monkeypatch):
             raise RuntimeError("transient")
         return {"run_id": "run-2", "candidate_count": 2}
 
-    s = _scheduler(tmp_path, run_screen=run_screen, now=TRADING_DAY)
+    s = _scheduler(tmp_path, run_screen=run_screen, now=lambda: clock["now"])
     first = s.tick()
+    clock["now"] += timedelta(seconds=30)
     result = s.tick()
 
     assert result["status"] == "COMPLETED"
@@ -101,18 +111,49 @@ def test_retry_after_first_failure_then_success(tmp_path, monkeypatch):
     assert first["status"] == "RETRYABLE_FAILED"
     assert first["attempts"] == 1
     assert len(calls) == 2
+    assert calls[0]["decision_as_of"] == RETRY_DAY
+    assert calls[1]["decision_as_of"] == RETRY_DAY + timedelta(seconds=30)
+
+
+def test_retry_tick_waits_for_persisted_delay_without_sleep(tmp_path, monkeypatch):
+    monkeypatch.setattr(sched_mod, "is_market_open", lambda m, d: True)
+    calls = []
+    clock = {"now": RETRY_DAY}
+
+    def run_screen(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise RuntimeError("transient")
+        return {"run_id": "run-natural", "candidate_count": 1}
+
+    scheduler = _scheduler(tmp_path, run_screen=run_screen, now=lambda: clock["now"])
+    first = scheduler.tick()
+    clock["now"] += timedelta(seconds=29)
+    not_due = scheduler.tick()
+    clock["now"] += timedelta(seconds=1)
+    recovered = scheduler.tick()
+
+    assert first["status"] == "RETRYABLE_FAILED"
+    assert not_due["status"] == "RETRY_NOT_DUE"
+    assert not_due["attempts"] == 1
+    assert recovered["status"] == "COMPLETED"
+    assert [item["decision_as_of"] for item in calls] == [
+        RETRY_DAY,
+        RETRY_DAY + timedelta(seconds=30),
+    ]
 
 
 def test_empty_run_id_is_not_reported_as_completed(tmp_path, monkeypatch):
     monkeypatch.setattr(sched_mod, "is_market_open", lambda m, d: True)
     calls = []
+    clock = {"now": RETRY_DAY}
 
     def run_screen(**kwargs):
         calls.append(kwargs)
         return {"run_id": "   ", "candidate_count": 3}
 
-    s = _scheduler(tmp_path, run_screen=run_screen, now=TRADING_DAY)
-    results = [s.tick() for _ in range(sched_mod.MAX_NATURAL_ATTEMPTS)]
+    s = _scheduler(tmp_path, run_screen=run_screen, now=lambda: clock["now"])
+    results = _run_all_natural_attempts(s, clock)
     result = results[-1]
     locked = s.tick()
 
@@ -127,13 +168,14 @@ def test_empty_run_id_is_not_reported_as_completed(tmp_path, monkeypatch):
 def test_all_retries_exhausted_fails_soft(tmp_path, monkeypatch):
     monkeypatch.setattr(sched_mod, "is_market_open", lambda m, d: True)
     calls = []
+    clock = {"now": RETRY_DAY}
 
     def run_screen(**kwargs):
         calls.append(kwargs)
         raise RuntimeError("down")
 
-    s = _scheduler(tmp_path, run_screen=run_screen, now=TRADING_DAY)
-    results = [s.tick() for _ in range(sched_mod.MAX_NATURAL_ATTEMPTS)]
+    s = _scheduler(tmp_path, run_screen=run_screen, now=lambda: clock["now"])
+    results = _run_all_natural_attempts(s, clock)
     result = results[-1]
     locked = s.tick()
 
@@ -148,13 +190,14 @@ def test_all_retries_exhausted_fails_soft(tmp_path, monkeypatch):
 def test_failed_day_self_locks_only_after_bounded_natural_retries(tmp_path, monkeypatch):
     monkeypatch.setattr(sched_mod, "is_market_open", lambda m, d: True)
     calls = []
+    clock = {"now": RETRY_DAY}
 
     def run_screen(**kwargs):
         calls.append(kwargs)
         raise RuntimeError("down")
 
-    s = _scheduler(tmp_path, run_screen=run_screen, now=TRADING_DAY)
-    results = [s.tick() for _ in range(sched_mod.MAX_NATURAL_ATTEMPTS)]
+    s = _scheduler(tmp_path, run_screen=run_screen, now=lambda: clock["now"])
+    results = _run_all_natural_attempts(s, clock)
     locked = s.tick()
 
     assert results[-1]["status"] == "FAILED"
@@ -165,12 +208,13 @@ def test_failed_day_self_locks_only_after_bounded_natural_retries(tmp_path, monk
 def test_retryable_state_survives_scheduler_restart(tmp_path, monkeypatch):
     monkeypatch.setattr(sched_mod, "is_market_open", lambda m, d: True)
     calls = []
+    clock = {"now": RETRY_DAY}
 
     def first_run(**kwargs):
         calls.append("first")
         raise RuntimeError("temporary producer outage")
 
-    first_scheduler = _scheduler(tmp_path, run_screen=first_run, now=TRADING_DAY)
+    first_scheduler = _scheduler(tmp_path, run_screen=first_run, now=lambda: clock["now"])
     first = first_scheduler.tick()
     assert first["status"] == "RETRYABLE_FAILED"
     assert first["attempts"] == 1
@@ -179,7 +223,8 @@ def test_retryable_state_survives_scheduler_restart(tmp_path, monkeypatch):
         calls.append("recovered")
         return {"run_id": "run-after-restart", "candidate_count": 0}
 
-    restarted = _scheduler(tmp_path, run_screen=recovered_run, now=TRADING_DAY)
+    clock["now"] += timedelta(seconds=30)
+    restarted = _scheduler(tmp_path, run_screen=recovered_run, now=lambda: clock["now"])
     recovered = restarted.tick()
 
     assert recovered["status"] == "COMPLETED"
