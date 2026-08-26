@@ -1,5 +1,5 @@
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pandas as pd
@@ -111,6 +111,154 @@ def test_snapshot_observation_is_captured_after_provider_call_and_late_fetch_fai
             decision_as_of=cutoff,
             clock=lambda: after,
         )
+
+
+def test_screening_service_pipeline_accepts_post_callback_observation_but_rejects_future_artifact(
+    monkeypatch,
+    tmp_path,
+):
+    from src.config import Config
+    from src.investment.m2.screening_candidates import (
+        DISCOVERY_STALE,
+        DISCOVERY_VALID,
+        DatabaseScreeningCandidateSource,
+    )
+    from src.services.screening import pipeline as pipeline_module
+    from src.services.screening import temporal as temporal_module
+    from src.services.screening.ranker import LLMRankingResult
+    from src.services.screening_service import ScreeningService
+    from src.storage import DatabaseManager
+
+    callback_start = datetime(2026, 8, 21, 6, 45, tzinfo=timezone.utc)
+    provider_observed_value = callback_start + timedelta(seconds=3)
+
+    def _as_frozen_datetime(cls, value, tz):
+        return cls(
+            value.year,
+            value.month,
+            value.day,
+            value.hour,
+            value.minute,
+            value.second,
+            value.microsecond,
+            tzinfo=tz or value.tzinfo,
+        )
+
+    class PipelineClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _as_frozen_datetime(cls, callback_start, tz)
+
+    class ProviderClock(PipelineClock):
+        @classmethod
+        def now(cls, tz=None):
+            return _as_frozen_datetime(cls, provider_observed_value, tz)
+
+    provider_observed = _as_frozen_datetime(ProviderClock, provider_observed_value, timezone.utc)
+
+    frame = pd.DataFrame([{
+        "code": "000001",
+        "name": "Ping An",
+        "price": 10.0,
+        "amount": 100_000_000.0,
+        "total_mv": 10_000_000_000.0,
+        "pe_ratio": 10.0,
+        "pb_ratio": 1.0,
+        "change_pct": 0.0,
+        "volume_ratio": 1.5,
+        "turnover_rate": 2.0,
+    }])
+    frame.attrs.update({
+        "latest_completed_trade_date": "2026-08-20",
+        "daily_completion_status": CLOSE_CONFIRMED,
+        "daily_completion_basis": "PRIOR_PROVIDER_RETURNED_SESSION",
+    })
+    annotated_snapshots = []
+
+    monkeypatch.setenv("SCREENING_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("SNAPSHOT_SOURCE_PRIORITY", "efinance")
+    monkeypatch.setenv("SCREENING_SNAPSHOT_CACHE_TTL_SEC", "0")
+    monkeypatch.setenv("DAILY_ENRICH_ENABLED", "false")
+    monkeypatch.setenv("LITELLM_MODEL", "ollama/deterministic-regression")
+    monkeypatch.setattr(
+        "src.services.screening_service._get_screening_status_snapshot",
+        lambda: ({}, True, None),
+    )
+    monkeypatch.setattr(
+        snapshot_module,
+        "fetch_cn_snapshot",
+        lambda _source: frame.copy(),
+    )
+    monkeypatch.setattr(snapshot_module, "datetime", ProviderClock)
+    monkeypatch.setattr(temporal_module, "datetime", PipelineClock)
+    monkeypatch.setattr(
+        snapshot_module,
+        "_write_last_good_snapshot",
+        lambda _path, annotated, **_kwargs: annotated_snapshots.append(annotated.copy()),
+    )
+    monkeypatch.setattr(snapshot_module, "_persist_dependency_observation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline_module, "apply_dsa_provider_context", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        pipeline_module,
+        "rank_candidates_with_metadata",
+        lambda candidates, *args, **kwargs: LLMRankingResult(
+            picks=candidates,
+            ranked=True,
+            coverage=1.0,
+        ),
+    )
+    monkeypatch.setattr(
+        "src.services.screening_service._enrich_candidates_with_dsa",
+        lambda candidates: (
+            candidates,
+            {"enabled": False, "requested_count": 0, "enriched_count": 0, "warnings": []},
+        ),
+    )
+
+    DatabaseManager.reset_instance()
+    db = DatabaseManager(db_url="sqlite:///:memory:")
+    try:
+        response = ScreeningService(
+            Config(screening_enabled=True),
+            db_manager=db,
+        ).screen(strategy="dual_low", market="cn", max_results=1)
+
+        assert response["persistence_status"] == "PERSISTED"
+        assert response["decision_cutoff"] == "2026-08-21T06:45:00Z"
+        assert annotated_snapshots[-1].attrs["decision_cutoff"] == "2026-08-21T06:45:00Z"
+        assert annotated_snapshots[-1].attrs["source_observed_at"] == "2026-08-21T06:45:03Z"
+        assert annotated_snapshots[-1].attrs["source_observed_at"] > annotated_snapshots[-1].attrs["decision_cutoff"]
+
+        monkeypatch.setattr(temporal_module, "datetime", datetime)
+        source = DatabaseScreeningCandidateSource(db)
+        normal = source.latest_result(
+            max_candidates=1,
+            max_age=None,
+            now=provider_observed,
+            strategy="dual_low",
+            market="cn",
+            run_id=response["run_id"],
+        )
+        assert normal.status == DISCOVERY_VALID, normal.reason
+
+        future_payload = {
+            **response,
+            "run_id": "future-screening-evidence",
+            "decision_cutoff": (provider_observed + timedelta(seconds=5)).isoformat(),
+        }
+        assert db.save_screening_run(future_payload) == 1
+        future = source.latest_result(
+            max_candidates=1,
+            max_age=None,
+            now=provider_observed,
+            strategy="dual_low",
+            market="cn",
+            run_id="future-screening-evidence",
+        )
+        assert future.status == DISCOVERY_STALE
+        assert "future-dated" in future.reason
+    finally:
+        DatabaseManager.reset_instance()
 
 
 def test_daily_observation_is_captured_after_provider_call_and_late_fetch_fails_closed(monkeypatch):

@@ -182,20 +182,19 @@ class DailyScreeningScheduler:
                 "updated_at": _utcnow().isoformat(),
             }
         last_error: str | None = None
-        attempt_now = now
         try:
             result = self._run_screen(
                 strategy=self._strategy,
                 market=self._market,
                 max_results=self._max_results,
-                decision_as_of=attempt_now,
             )
             run_id = str(result.get("run_id") or "").strip()
             if not run_id:
                 raise ValueError("screening service returned an empty run_id")
             if result.get("persistence_status") == "PERSISTENCE_FAILED":
                 raise RuntimeError("screening producer persistence failed")
-            persisted = self._persisted_discovery(run_id, now=attempt_now)
+            post_call_now = _utcnow()
+            persisted = self._persisted_discovery(run_id, now=post_call_now)
             if persisted is not None:
                 if not self._discovery_is_usable(persisted):
                     raise _ScreeningContractFailure(

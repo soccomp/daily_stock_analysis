@@ -291,10 +291,10 @@ class _FixtureScreeningService:
         self.screening_calls = screening_calls if screening_calls is not None else []
         self.observed_at = observed_at
 
-    def screen(self, *, strategy, market, max_results, decision_as_of=None):
+    def screen(self, *, strategy, market, max_results):
         attempt_number = self.attempt_number
         self.attempt_number += 1
-        attempt_at = decision_as_of or self.observed_at
+        attempt_at = self.observed_at
         self.screening_calls.append({
             "attempt": attempt_number,
             "mode": self.mode,
@@ -788,6 +788,7 @@ def _run_natural_day(
              patch("src.services.screening_service.ScreeningService", screening_factory), \
              patch("src.investment.proposal.orchestration.ProposalHandoffLoopService.from_config", classmethod(capture_from_config)), \
              patch("src.investment.screening_scheduler.DEFAULT_STATE_PATH", state_path), \
+             patch("src.investment.screening_scheduler._utcnow", lambda: natural_clock["now"].astimezone(timezone.utc)), \
              patch.object(scheduler_module.Scheduler, "run", idle_scheduler_loop):
             with patch.object(scheduler_module.time, "time", return_value=start_at.timestamp()):
                 runtime.start()

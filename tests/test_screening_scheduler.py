@@ -111,8 +111,7 @@ def test_retry_after_first_failure_then_success(tmp_path, monkeypatch):
     assert first["status"] == "RETRYABLE_FAILED"
     assert first["attempts"] == 1
     assert len(calls) == 2
-    assert calls[0]["decision_as_of"] == RETRY_DAY
-    assert calls[1]["decision_as_of"] == RETRY_DAY + timedelta(seconds=30)
+    assert all("decision_as_of" not in call for call in calls)
 
 
 def test_retry_tick_waits_for_persisted_delay_without_sleep(tmp_path, monkeypatch):
@@ -137,10 +136,31 @@ def test_retry_tick_waits_for_persisted_delay_without_sleep(tmp_path, monkeypatc
     assert not_due["status"] == "RETRY_NOT_DUE"
     assert not_due["attempts"] == 1
     assert recovered["status"] == "COMPLETED"
-    assert [item["decision_as_of"] for item in calls] == [
-        RETRY_DAY,
-        RETRY_DAY + timedelta(seconds=30),
-    ]
+    assert all("decision_as_of" not in call for call in calls)
+
+
+def test_completed_artifact_discovery_uses_post_call_wall_clock(tmp_path, monkeypatch):
+    monkeypatch.setattr(sched_mod, "is_market_open", lambda m, d: True)
+    post_call_now = RETRY_DAY + timedelta(seconds=3)
+    discovery_times = []
+
+    def run_screen(**_kwargs):
+        return {"run_id": "run-post-call", "candidate_count": 1}
+
+    scheduler = _scheduler(tmp_path, run_screen=run_screen, now=RETRY_DAY)
+
+    def discover(_run_id, *, now):
+        discovery_times.append(now)
+        return None
+
+    monkeypatch.setattr(sched_mod, "_utcnow", lambda: post_call_now)
+    monkeypatch.setattr(scheduler, "_persisted_discovery", discover)
+
+    result = scheduler.tick()
+
+    assert result["status"] == "COMPLETED"
+    assert discovery_times == [post_call_now]
+    assert result["updated_at"] == RETRY_DAY.isoformat()
 
 
 def test_empty_run_id_is_not_reported_as_completed(tmp_path, monkeypatch):
