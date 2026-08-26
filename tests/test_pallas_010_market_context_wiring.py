@@ -8,7 +8,10 @@ from src.config import Config
 from src.investment.canonical_cycle import CanonicalCycleRepository
 from src.investment.proposal import orchestration as orchestration_module
 from src.investment.proposal.orchestration import ProposalHandoffLoopService
-from src.market_review_contract import build_market_context
+from src.market_review_contract import (
+    build_market_context,
+    validate_market_context_for_slot,
+)
 from src.repositories.market_review_linkage_repo import MarketReviewLinkageRepository
 from src.storage import DatabaseManager
 
@@ -17,11 +20,20 @@ UTC = timezone.utc
 NOW = datetime(2026, 8, 25, 2, 0, tzinfo=UTC)
 
 
-def _canonical_context(*, source_task_id: str, as_of: datetime) -> dict[str, object]:
+def _canonical_context(
+    *,
+    source_task_id: str,
+    as_of: datetime,
+    component_observed_at: dict[str, datetime] | None = None,
+) -> dict[str, object]:
     iso = as_of.astimezone(UTC).isoformat()
     component_provenance = {
         component: {
-            "observed_at": iso,
+            "observed_at": (
+                (component_observed_at or {}).get(component, as_of)
+                .astimezone(UTC)
+                .isoformat()
+            ),
             "reference": f"fixture:{component}",
         }
         for component in ("indices", "breadth", "sectors", "concepts")
@@ -107,16 +119,26 @@ def _config() -> SimpleNamespace:
     )
 
 
-def _patch_scheduler_owned_runtime(monkeypatch, *, db, mode, generated):
+def _patch_scheduler_owned_runtime(
+    monkeypatch,
+    *,
+    db,
+    mode,
+    generated,
+    live_context_factory=None,
+):
     def fake_run_market_review(**kwargs):
         if mode == "generation":
             raise RuntimeError("fixture market review generation failure")
 
-        as_of = kwargs["context_as_of"]
-        if mode == "pit":
-            as_of = as_of + timedelta(hours=1)
         source_task_id = str(kwargs["query_id"])
-        context = _canonical_context(source_task_id=source_task_id, as_of=as_of)
+        if live_context_factory is not None and kwargs.get("context_as_of") is None:
+            context = live_context_factory(source_task_id, kwargs)
+        else:
+            as_of = kwargs.get("context_as_of") or NOW
+            if mode == "pit":
+                as_of = as_of + timedelta(hours=1)
+            context = _canonical_context(source_task_id=source_task_id, as_of=as_of)
         generated.append(context)
         if mode == "persistence":
             return SimpleNamespace(
@@ -177,6 +199,117 @@ def _patch_scheduler_owned_runtime(monkeypatch, *, db, mode, generated):
         lambda **_kwargs: SimpleNamespace(capture_snapshot=lambda: object()),
     )
     monkeypatch.setattr(orchestration_module, "ResearchTriggerCoordinator", EmptyCoordinator)
+
+
+@pytest.mark.parametrize("evidence_case", ["post_call", "late"])
+def test_scheduler_owned_live_market_context_uses_post_call_admission_cutoff_and_preserves_fixed_pit(
+    isolated_db,
+    monkeypatch,
+    evidence_case,
+):
+    cycle_start = datetime(2026, 8, 25, 5, 0, 0, tzinfo=UTC)  # 13:00:00 BJT
+    clock = {"now": cycle_start}
+    timing: list[dict[str, datetime]] = []
+    generated: list[dict[str, object]] = []
+
+    def live_context_factory(source_task_id, kwargs):
+        assert kwargs.get("context_as_of") is None
+        callback_start = clock["now"]
+        finalization = callback_start + timedelta(seconds=5)
+        offsets = (2, 3, 4, 5) if evidence_case == "post_call" else (2, 3, 4, 7)
+        observations = {
+            component: callback_start + timedelta(seconds=offset)
+            for component, offset in zip(
+                ("indices", "breadth", "sectors", "concepts"),
+                offsets,
+            )
+        }
+        clock["now"] = callback_start + timedelta(seconds=6)
+        timing.append({
+            "callback_start": callback_start,
+            "finalization": finalization,
+            "admission": clock["now"],
+            "last_provider_observation": max(observations.values()),
+        })
+        return _canonical_context(
+            source_task_id=source_task_id,
+            as_of=finalization,
+            component_observed_at=observations,
+        )
+
+    _patch_scheduler_owned_runtime(
+        monkeypatch,
+        db=isolated_db,
+        mode="success",
+        generated=generated,
+        live_context_factory=live_context_factory,
+    )
+
+    service = ProposalHandoffLoopService.from_config(_config())
+    service._clock = lambda: clock["now"]
+    result = service.run_cycle(
+        scheduled_for=cycle_start,
+        started_at=cycle_start,
+        lock_acquired_at=cycle_start,
+        require_market_review_context=True,
+    )
+
+    assert timing[0]["callback_start"] == cycle_start
+    assert timing[0]["callback_start"].astimezone(
+        timezone(timedelta(hours=8))
+    ).strftime("%H:%M:%S") == "13:00:00"
+    assert timing[0]["finalization"] < timing[0]["admission"]
+    assert timing[0]["last_provider_observation"] == (
+        timing[0]["finalization"]
+        if evidence_case == "post_call"
+        else timing[0]["admission"] + timedelta(seconds=1)
+    )
+    assert generated[0]["decision_as_of"] == timing[0]["finalization"].isoformat().replace(
+        "+00:00",
+        "Z",
+    )
+
+    fixed_cutoff_context = _canonical_context(
+        source_task_id="historical-fixed-cutoff",
+        as_of=cycle_start,
+        component_observed_at={
+            component: cycle_start + timedelta(seconds=2)
+            for component in ("indices", "breadth", "sectors", "concepts")
+        },
+    )
+    valid, reason = validate_market_context_for_slot(
+        fixed_cutoff_context,
+        trade_date=cycle_start.date(),
+        as_of=cycle_start,
+        max_age_seconds=600,
+    )
+    assert valid is False
+    assert reason in {"INVALID_PIT", "DEGRADED_STRUCTURAL"}
+
+    if evidence_case == "post_call":
+        assert result.status == "NO_ACTION"
+        assert result.market_context_admission == "VALID"
+        assert generated[0]["component_timing_status"] == "PIT_VALIDATED"
+        assert result.no_action_outcome is not None
+        assert result.no_action_outcome["durable"] is True
+        stages = {
+            (item["stage"], item["state"])
+            for item in CanonicalCycleRepository(isolated_db).stage_events(result.cycle_id)
+        }
+        assert ("MARKET_REVIEW", "SUCCEEDED") in stages
+        assert ("MARKET_CONTEXT", "SUCCEEDED") in stages
+        assert ("RESEARCH_TRIGGER", "NO_ACTION") in stages
+    else:
+        assert result.status == "FAILED_CLOSED"
+        assert result.market_context_admission == "DEGRADED_STRUCTURAL"
+        assert generated[0]["component_timing_status"] == "PIT_PARTIAL"
+        assert result.canonical_cycle["status"] == "BLOCKED"
+        assert not result.proposal_ids
+        assert all(
+            item["state"] == "NOT_ENTERED"
+            for item in CanonicalCycleRepository(isolated_db).stage_events(result.cycle_id)
+            if item["stage"] == "RESEARCH_TRIGGER"
+        )
 
 
 @pytest.fixture

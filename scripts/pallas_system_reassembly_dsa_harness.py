@@ -48,10 +48,22 @@ def _parse_time(value: object) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _context(*, as_of: datetime = NOW, lineage: str = "fixture", quality: str = "complete") -> dict[str, object]:
+def _context(
+    *,
+    as_of: datetime = NOW,
+    lineage: str = "fixture",
+    quality: str = "complete",
+    component_observed_at: dict[str, datetime] | None = None,
+) -> dict[str, object]:
     iso = as_of.isoformat()
     provenance = {
-        component: {"status": "PIT_VALIDATED", "observed_at": iso, "reference": f"fixture:{component}"}
+        component: {
+            "status": "PIT_VALIDATED",
+            "observed_at": (
+                (component_observed_at or {}).get(component, as_of).isoformat()
+            ),
+            "reference": f"fixture:{component}",
+        }
         for component in ("indices", "breadth", "sectors", "concepts")
     }
     identity = f"{lineage}:{as_of.astimezone(timezone.utc).strftime('%H%M%S')}"
@@ -364,17 +376,74 @@ def _fake_market_review_factory(
     generated: list[str],
     *,
     failure_mode: str | None = None,
+    natural_clock: dict[str, datetime] | None = None,
+    timing_mode: str | None = None,
+    timing_events: list[dict[str, object]] | None = None,
 ):
     def fake_run_market_review(**kwargs):
-        as_of = kwargs.get("context_as_of") or NOW
-        if isinstance(as_of, str):
-            as_of = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
         if failure_mode == "generation":
             raise RuntimeError("fixture MarketContext generation failure")
-        if failure_mode == "pit":
-            as_of += timedelta(hours=1)
         query_id = str(kwargs.get("query_id") or "fixture-market-review")
-        context = _context(as_of=as_of, lineage=hashlib.sha1(query_id.encode()).hexdigest()[:12])
+        explicit_as_of = kwargs.get("context_as_of")
+        if explicit_as_of is not None:
+            as_of = explicit_as_of
+            if isinstance(as_of, str):
+                as_of = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+            context = _context(
+                as_of=as_of,
+                lineage=hashlib.sha1(query_id.encode()).hexdigest()[:12],
+            )
+        elif timing_mode == "post_call_1300":
+            _require(natural_clock is not None, "post-call timing proof lacks a natural clock")
+            _require(
+                kwargs.get("context_as_of") is None,
+                "live MarketReview received a cycle cutoff",
+            )
+            callback_start = natural_clock["now"]
+            finalization = callback_start + timedelta(seconds=5)
+            observations = {
+                component: callback_start + timedelta(seconds=offset)
+                for component, offset in zip(
+                    ("indices", "breadth", "sectors", "concepts"),
+                    (2, 3, 4, 5),
+                )
+            }
+            natural_clock["now"] = callback_start + timedelta(seconds=6)
+            context = _context(
+                as_of=finalization,
+                lineage=hashlib.sha1(query_id.encode()).hexdigest()[:12],
+                component_observed_at=observations,
+            )
+            if timing_events is not None:
+                timing_events.append({
+                    "mode": timing_mode,
+                    "callback_start": callback_start.isoformat(),
+                    "provider_observations": {
+                        component: value.isoformat()
+                        for component, value in observations.items()
+                    },
+                    "market_review_finalization": finalization.isoformat(),
+                    "admission_cutoff": natural_clock["now"].isoformat(),
+                    "context_decision_as_of": context["decision_as_of"],
+                    "context_component_timing_status": context["component_timing_status"],
+                    "cycle_start_is_context_cutoff": False,
+                })
+        else:
+            as_of = (natural_clock or {}).get("now") or NOW
+            if failure_mode == "pit":
+                as_of += timedelta(hours=1)
+            context = _context(
+                as_of=as_of,
+                lineage=hashlib.sha1(query_id.encode()).hexdigest()[:12],
+            )
+            if failure_mode == "pit" and timing_events is not None and natural_clock is not None:
+                timing_events.append({
+                    "mode": "future_evidence_fault",
+                    "callback_start": natural_clock["now"].isoformat(),
+                    "admission_cutoff": natural_clock["now"].isoformat(),
+                    "context_decision_as_of": context["decision_as_of"],
+                    "provider_evidence_late": True,
+                })
         if failure_mode == "persistence":
             generated.append(str(context["as_of"]))
             return SimpleNamespace(
@@ -676,6 +745,7 @@ def _run_natural_day(
     scenario_label: str | None = None,
     market_context_seed: str | None = None,
     market_context_failure: str | None = None,
+    market_context_timing: str | None = None,
 ) -> dict[str, object]:
     """Run one fixed-clock day through real scheduler interval/due decisions."""
 
@@ -703,6 +773,7 @@ def _run_natural_day(
         )
     screening_calls: list[dict[str, object]] = []
     screening_attempts: list[dict[str, object]] = []
+    market_context_events: list[dict[str, object]] = []
     research_completions: list[datetime] = []
     proposal_publications: list[datetime] = []
     publishers: list[_Publisher] = []
@@ -785,6 +856,9 @@ def _run_natural_day(
             db_ref["db"],
             generated_contexts,
             failure_mode=market_context_failure,
+            natural_clock=natural_clock,
+            timing_mode=market_context_timing,
+            timing_events=market_context_events,
         )(**kwargs)
 
     def make_runtime():
@@ -1025,6 +1099,7 @@ def _run_natural_day(
                 "stale_recovery", False
             ),
         },
+        "market_context_events": market_context_events,
         "initial_cycle_evidence": initial_cycle_evidence,
         "canonical_projection": projection,
         "runtime_contract": {
@@ -1225,6 +1300,13 @@ def _run_scenarios(directory: Path) -> dict[str, dict[str, object]]:
             start_at=datetime(2026, 8, 25, 4, 57, tzinfo=timezone.utc),
             scenario_label="afternoon_restart",
         ),
+        "market_context_post_call_1300": _run_natural_day(
+            directory,
+            mode="success",
+            start_at=datetime(2026, 8, 25, 4, 57, tzinfo=timezone.utc),
+            scenario_label="market_context_post_call_1300",
+            market_context_timing="post_call_1300",
+        ),
         "start_phase_mid": _run_natural_day(
             directory, mode="success", start_at=START_MID,
             scenario_label="start_phase_mid",
@@ -1407,6 +1489,34 @@ def main() -> int:
             == "2026-08-25T05:00:00+00:00",
             "12:57 restart did not align to the next legal 13:00 grid slot",
         )
+        post_call = scenarios["market_context_post_call_1300"]
+        post_call_timing = post_call["market_context_events"][0]
+        _require(
+            post_call["status"] in {"SUCCEEDED", "NO_ACTION"}
+            and (post_call["proposal_ids"] or post_call["status"] == "NO_ACTION"),
+            "13:00 natural MarketContext cutoff proof did not reach a legal terminal result",
+        )
+        _require(
+            post_call["initial_cycle_evidence"]["stages"]["MARKET_REVIEW"]["state"] == "SUCCEEDED"
+            and post_call["initial_cycle_evidence"]["stages"]["MARKET_CONTEXT"]["state"] == "SUCCEEDED"
+            and post_call["initial_cycle_evidence"]["stages"]["RESEARCH_TRIGGER"]["state"] in {"SUCCEEDED", "NO_ACTION"},
+            "13:00 natural MarketContext cutoff proof did not enter ResearchTrigger",
+        )
+        _require(
+            post_call_timing["callback_start"] == "2026-08-25T05:00:00+00:00"
+            and post_call_timing["provider_observations"] == {
+                "indices": "2026-08-25T05:00:02+00:00",
+                "breadth": "2026-08-25T05:00:03+00:00",
+                "sectors": "2026-08-25T05:00:04+00:00",
+                "concepts": "2026-08-25T05:00:05+00:00",
+            }
+            and post_call_timing["market_review_finalization"] == "2026-08-25T05:00:05+00:00"
+            and post_call_timing["admission_cutoff"] == "2026-08-25T05:00:06+00:00"
+            and post_call_timing["context_decision_as_of"] == "2026-08-25T05:00:05+00:00"
+            and post_call_timing["context_component_timing_status"] == "PIT_VALIDATED"
+            and post_call_timing["cycle_start_is_context_cutoff"] is False,
+            "13:00 natural MarketContext did not separate cycle start from post-call admission cutoff",
+        )
         for recovery_name in ("transient_recovery", "quality_recovery", "restart_recovery"):
             recovery = scenarios[recovery_name]
             _require(
@@ -1529,6 +1639,12 @@ def main() -> int:
                 f"MarketContext {failure_mode} entered downstream work",
             )
         _require(
+            market_context_faults["pit"]["market_context_events"][0]["provider_evidence_late"] is True
+            and market_context_faults["pit"]["market_context_events"][0]["context_decision_as_of"]
+            > market_context_faults["pit"]["market_context_events"][0]["admission_cutoff"],
+            "future MarketContext evidence was not recorded as later than admission cutoff",
+        )
+        _require(
             all(
                 recovery["natural_runtime"]["screening_attempts"][0]["attempt"] == 1
                 and recovery["natural_runtime"]["screening_attempts"][1]["attempt"] == 2
@@ -1597,6 +1713,7 @@ def main() -> int:
                 "market_context_wiring": {
                     "missing_refresh": scenarios["market_context_missing_refresh"]["initial_cycle_evidence"],
                     "stale_refresh": scenarios["market_context_stale_refresh"]["initial_cycle_evidence"],
+                    "post_call_1300": scenarios["market_context_post_call_1300"],
                     "fault_matrix": market_context_faults,
                 },
                 "screening_fault_matrix": screening_faults, "proposal_transport_fault": _proposal_transport_fault_probe(success["proposals"][0]),

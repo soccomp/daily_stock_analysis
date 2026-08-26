@@ -159,7 +159,6 @@ class ProposalHandoffLoopService:
                 target_date=now.astimezone(timezone.utc).date(),
                 current_query_id=cycle_id,
                 require_query_id_match=False,
-                decision_as_of=now,
                 max_age_seconds=max(60, interval_minutes * 60),
             )
             canonical_context = getattr(produced_context, "canonical_context", None)
@@ -412,6 +411,9 @@ class ProposalHandoffLoopService:
         linkage_repository = MarketReviewLinkageRepository()
         context_admission = "UNVERIFIED"
         context_reason = "MISSING"
+        # Cycle time identifies the scheduled work and its budget.  A live
+        # MarketContext gets its admission cutoff only after its provider call.
+        market_context_admission_as_of = now
         if market_review_context is not None:
             resolved_market_context = dict(market_review_context)
             valid, context_reason = validate_market_context_for_slot(
@@ -437,6 +439,7 @@ class ProposalHandoffLoopService:
                         cycle_id=cycle,
                         interval_minutes=interval,
                     )
+                    market_context_admission_as_of = self._clock()
                 except Exception as exc:
                     logger.warning("scheduler-owned MarketContext producer failed: %s", exc)
                     context_reason = "PERSISTENCE_FAILED"
@@ -445,7 +448,7 @@ class ProposalHandoffLoopService:
                     valid, context_reason = validate_market_context_for_slot(
                         resolved_market_context,
                         trade_date=now.astimezone(timezone.utc).date(),
-                        as_of=now,
+                        as_of=market_context_admission_as_of,
                         max_age_seconds=max(60, interval * 60),
                     )
                     context_admission = context_reason
