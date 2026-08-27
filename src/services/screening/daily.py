@@ -510,15 +510,21 @@ def _persist_dependency_observation(
     """Mirror real market-provider calls into the persistent Pallas ledger."""
     try:
         from src.services.dependency_health import get_dependency_health_store
+        from src.services.screening.config import resolve_snapshot_source_priority
 
         configured = source != "tushare" or _has_tushare_token()
+        source_priority = resolve_snapshot_source_priority()
+        source_rank = {
+            name: index + 1 for index, name in enumerate(source_priority)
+        }
+        priority = source_rank.get(source, 99)
         get_dependency_health_store().record_result(
             source,
             category="RESEARCH_MARKET_DATA",
             configured=configured,
             enabled=True,
-            role="PRIMARY" if source in {"tushare", "tencent"} else "FALLBACK",
-            priority={"tushare": 1, "tencent": 2, "sina": 3, "akshare": 4, "baostock": 5}.get(source, 99),
+            role="PRIMARY" if priority == 1 else "FALLBACK" if priority < 99 else "AUXILIARY",
+            priority=priority,
             success=success,
             reachable=success,
             usable=success and rows > 0,

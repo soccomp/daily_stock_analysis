@@ -1,5 +1,8 @@
 from datetime import datetime, timezone
 
+import pandas as pd
+import pytest
+
 from src.services.dependency_health import DependencyHealthStore
 
 
@@ -248,3 +251,56 @@ def test_legacy_qwen_observation_cannot_make_codex_research_ready(tmp_path):
 
     assert "LLM_RESEARCH" not in snapshot["categories"]
     assert snapshot["readiness"]["DSA_RESEARCH_READINESS"] == "BLOCKED"
+
+
+def test_research_market_data_health_follows_screening_source_contract(monkeypatch, tmp_path):
+    monkeypatch.setenv("SNAPSHOT_SOURCE_PRIORITY", "tushare,sina,efinance")
+    monkeypatch.setenv("TUSHARE_TOKEN", "fixture-token")
+    store = DependencyHealthStore(tmp_path / "screening-contract.json", transition_cooldown_seconds=0)
+    store.record_result(
+        "tushare", category="RESEARCH_MARKET_DATA", role="PRIMARY", priority=1,
+        success=False, reachable=False, usable=False, failure_class_name="TIMEOUT",
+    )
+    store.record_result(
+        "sina", category="RESEARCH_MARKET_DATA", role="FALLBACK", priority=2,
+        success=True, reachable=True, usable=True, records=1,
+    )
+
+    snapshot = store.snapshot()
+    category = snapshot["categories"]["RESEARCH_MARKET_DATA"]
+    assert category["status"] == "HEALTHY"
+    assert category["active_source"] == "sina"
+    assert category["selection_order"] == ["tushare", "sina", "efinance"]
+    assert "volume_ratio" in category["required_snapshot_columns"]
+
+    from src.services.dependency_health import configured_dependency_inventory
+
+    rows = {
+        item["dependency_id"]: item
+        for item in configured_dependency_inventory()
+        if item["category"] == "RESEARCH_MARKET_DATA"
+    }
+    assert rows["tushare"]["role"] == "PRIMARY"
+    assert rows["tushare"]["priority"] == 1
+    assert rows["sina"]["role"] == "FALLBACK"
+    assert rows["sina"]["priority"] == 2
+    assert "efinance" in rows
+
+
+def test_missing_consumed_snapshot_field_fails_closed_without_synthetic_value(monkeypatch):
+    from src.services.screening import snapshot as screening_snapshot
+
+    monkeypatch.setattr(screening_snapshot, "_SOURCE_HEALTH", {})
+    monkeypatch.setattr(screening_snapshot, "_persist_dependency_observation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        screening_snapshot,
+        "fetch_cn_snapshot",
+        lambda _source: pd.DataFrame([{"code": "000001", "name": "Ping An", "price": 10.0}]),
+    )
+
+    with pytest.raises(RuntimeError, match=r"missing required columns volume_ratio") as error:
+        screening_snapshot.fetch_snapshot_with_fallback(
+            ["sina"], required_columns=["volume_ratio"], fallback_snapshot_path=None,
+        )
+
+    assert "volume_ratio" in str(error.value)

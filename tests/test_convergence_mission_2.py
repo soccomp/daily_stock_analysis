@@ -64,7 +64,7 @@ def test_news_is_advisory_after_all_required_research_facts_are_healthy(tmp_path
     store = DependencyHealthStore(tmp_path / "health.json")
     for dependency_id, category in (
         ("codex-luna", "LLM_RESEARCH"),
-        ("research-market", "RESEARCH_MARKET_DATA"),
+        ("sina", "RESEARCH_MARKET_DATA"),
         ("market-context", "MARKET_CONTEXT"),
     ):
         if dependency_id == "codex-luna":
@@ -260,10 +260,10 @@ def test_partial_workload_defers_remaining_candidate_and_persists_deadline(isola
         acknowledgement_id="ack-1", acknowledgement_state="ACCEPTED",
         lifecycle_state="NO_ACTION", deduplicated=False,
     ))
-    times = iter((NOW, NOW, NOW + timedelta(seconds=3301)))
+    times = iter((NOW, NOW, NOW, NOW))
     config = SimpleNamespace(
-        single_brain_m2_enabled=True, single_brain_m2_interval_minutes=60,
-        single_brain_m2_cycle_guard_seconds=300, generation_backend_timeout_seconds=300,
+        single_brain_m2_enabled=True, single_brain_m2_interval_minutes=10,
+        single_brain_m2_cycle_guard_seconds=120, generation_backend_timeout_seconds=300,
         single_brain_m2_snapshot_timeout_seconds=5, single_brain_proposal_timeout_seconds=5,
         single_brain_m2_readiness_gate_enabled=False,
     )
@@ -274,9 +274,9 @@ def test_partial_workload_defers_remaining_candidate_and_persists_deadline(isola
     ).run_cycle(scheduled_for=NOW, lock_acquired_at=NOW)
     assert result.status == "PARTIAL"
     assert result.deferred_count == 1
-    assert [item["status"] for item in result.candidate_outcomes] == ["SUCCEEDED", "DEFERRED_BUDGET"]
-    assert result.canonical_cycle["terminal_reason_code"] == "CYCLE_BUDGET_EXHAUSTED"
-    assert result.canonical_cycle["cycle_deadline"] == "2026-08-24T02:55:00Z"
+    assert [item["status"] for item in result.candidate_outcomes] == ["DEFERRED_BUDGET", "SUCCEEDED"]
+    assert result.canonical_cycle["terminal_reason_code"] == "CANDIDATE_PROCESSING_PARTIAL"
+    assert result.canonical_cycle["cycle_deadline"] == "2026-08-24T02:08:00Z"
     assert result.canonical_cycle["deferred_count"] == 1
 
 

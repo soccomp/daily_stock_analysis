@@ -132,6 +132,11 @@ def _resolve_snapshot_source_priority() -> list[str]:
     return list(DEFAULT_SNAPSHOT_SOURCE_PRIORITY)
 
 
+def resolve_snapshot_source_priority() -> list[str]:
+    """Return the exact source order used by the screening pipeline."""
+    return _resolve_snapshot_source_priority()
+
+
 def _resolve_fallback_snapshot_path(data_dir: Path) -> Path | None:
     for name in ("SCREENING_FALLBACK_SNAPSHOT_PATH", "FALLBACK_SNAPSHOT_PATH"):
         raw = os.getenv(name)

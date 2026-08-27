@@ -693,6 +693,8 @@ def canonical_terminal_for_result(
         return "SKIPPED", "HANDOFF_DISABLED"
     if result_status == "FAILED_CLOSED":
         lowered = " ".join(reasons).lower()
+        if "cycle_budget_overrun" in lowered:
+            return "BLOCKED", "CYCLE_BUDGET_EXHAUSTED"
         if any(token in lowered for token in ("lock", "market review", "market context", "dependency", "required")):
             return "BLOCKED", "REQUIRED_DEPENDENCY_BLOCKED"
         return "FAILED", "CYCLE_FAILED_CLOSED"

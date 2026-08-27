@@ -49,6 +49,15 @@ class CycleBudget:
     def admits_candidate(self, observed_at: datetime) -> bool:
         return self.remaining_seconds(observed_at) >= self.candidate_reserve_seconds
 
+    def admitted_capacity(self, observed_at: datetime) -> int:
+        """Return how many candidates fit without changing the timeout contract."""
+        if self.candidate_reserve_seconds <= 0:
+            return 0
+        return max(
+            0,
+            int(self.remaining_seconds(observed_at) // self.candidate_reserve_seconds),
+        )
+
 
 def build_cycle_budget(
     *, started_at: datetime, config: object, scheduled_for: datetime | None = None

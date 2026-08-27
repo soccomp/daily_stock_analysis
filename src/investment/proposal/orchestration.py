@@ -16,7 +16,7 @@ from src.investment.canonical_cycle import (
     canonical_terminal_for_result,
 )
 from src.investment.m2.identity import analysis_query_id, cycle_id as build_cycle_id, cycle_slot
-from src.investment.m2.orchestration import DSAAnalysisCompletionRunner
+from src.investment.m2.orchestration import DSAAnalysisCompletionRunner, M2ShadowBlocked
 from src.investment.m2.natural_admission import CycleBudget, build_cycle_budget
 from src.investment.m2.screening_candidates import (
     DatabaseScreeningCandidateSource,
@@ -46,6 +46,24 @@ from src.storage import DatabaseManager
 
 
 logger = logging.getLogger(__name__)
+
+
+def _candidate_failure_is_retryable(error: Exception) -> bool:
+    """Keep transient research/provider failures eligible for a natural retry."""
+    text = str(error).upper()
+    if "CURRENT_SESSION_NOT_CLOSED" in text:
+        return True
+    if isinstance(error, M2ShadowBlocked):
+        return any(
+            marker in text
+            for marker in (
+                "AI_SERVICE_UNAVAILABLE",
+                "AI_QUOTA_EXHAUSTED",
+                "RESEARCH_DATA_UNAVAILABLE",
+                "RESEARCH_INCOMPLETE",
+            )
+        )
+    return isinstance(error, (TimeoutError, ConnectionError))
 
 
 class ProposalHandoffBlocked(RuntimeError):
@@ -357,8 +375,6 @@ class ProposalHandoffLoopService:
             result_status=result.status,
             blocked_reasons=result.blocked_reasons,
         )
-        if result.deferred_count:
-            terminal_status, terminal_reason = "PARTIAL", "CYCLE_BUDGET_EXHAUSTED"
         canonical.update_identity_and_counts(
             cycle_id=cycle,
             candidate_count=result.candidate_count,
@@ -657,7 +673,8 @@ class ProposalHandoffLoopService:
                 candidate_discovery_reason=discovery.reason,
                 market_context_admission=context_admission,
             )
-        researched = tuple(f"{scope['symbol']}:{scope['source']}" for scope in scopes)
+        admission_observed_at = self._clock()
+        admitted_capacity = budget.admitted_capacity(admission_observed_at)
         trigger_ids = tuple(
             str((scope.get("research_trigger") or {}).get("research_trigger_id") or "").strip()
             for scope in scopes
@@ -667,15 +684,24 @@ class ProposalHandoffLoopService:
             cycle_id=cycle,
             stage="CANDIDATE_EVALUATION",
             state=(
-                "PARTIAL" if scopes and discovery.status not in {"VALID", "DISABLED"}
+                "PARTIAL" if scopes and (
+                    discovery.status not in {"VALID", "DISABLED"}
+                    or admitted_capacity < len(scopes)
+                )
                 else "SUCCEEDED" if scopes else "NO_ACTION"
             ),
             reason_code=(
+                "CANDIDATES_BOUNDED_TO_NATURAL_CYCLE"
+                if scopes and admitted_capacity < len(scopes)
+                else
                 f"{discovery.status}_HOLDINGS_OR_OVERRIDE_CONTINUED"
                 if scopes and discovery.status not in {"VALID", "DISABLED"}
                 else "CANDIDATE_SELECTION_COMPLETE" if scopes else discovery.status
             ),
             reason_detail=(
+                f"admitted capacity={admitted_capacity}; candidate count={len(scopes)}"
+                if scopes and admitted_capacity < len(scopes)
+                else
                 discovery.reason
                 if scopes and discovery.status not in {"VALID", "DISABLED"}
                 else None if scopes else "no candidate satisfied strategy-evidence threshold"
@@ -696,6 +722,8 @@ class ProposalHandoffLoopService:
             reason_code=(
                 "TRIGGERS_LINKED"
                 if scopes and len(trigger_ids) == len(scopes)
+                else "NO_ELIGIBLE_TRIGGERS"
+                if not scopes and discovery.status == "VALID"
                 else "NO_CANDIDATES"
                 if not scopes
                 else "TRIGGER_LINKAGE_PARTIAL"
@@ -703,7 +731,7 @@ class ProposalHandoffLoopService:
             at=now,
         )
         if not scopes:
-            if discovery.status not in {"NO_FRESH_CANDIDATES", "DISABLED"}:
+            if discovery.status not in {"NO_FRESH_CANDIDATES", "DISABLED", "VALID"}:
                 for stage in ("RESEARCH_BUNDLE", "INVESTMENT_PROPOSAL", "ATHENA_HANDOFF_ACK"):
                     canonical.set_stage(
                         cycle_id=cycle,
@@ -724,10 +752,15 @@ class ProposalHandoffLoopService:
                     candidate_discovery_reason=discovery.reason,
                     market_context_admission=context_admission,
                 )
+            no_action_reason = (
+                "no eligible research trigger for this natural cycle"
+                if discovery.status == "VALID"
+                else "no candidate satisfied strategy-evidence threshold"
+            )
             no_action = MarketReviewOutcomeRepository().persist_no_action(
                 source_task_id=cycle,
                 trade_date=now.astimezone(timezone.utc).date(),
-                reason="no candidate satisfied strategy-evidence threshold",
+                reason=no_action_reason,
                 persisted_at=now,
             )
             linkage = None
@@ -752,7 +785,11 @@ class ProposalHandoffLoopService:
                     cycle_id=cycle,
                     stage=stage,
                     state="NO_ACTION",
-                    reason_code="NO_CANDIDATES",
+                    reason_code=(
+                        "NO_ELIGIBLE_TRIGGERS"
+                        if discovery.status == "VALID"
+                        else "NO_CANDIDATES"
+                    ),
                     reason_detail="durable NO_ACTION outcome recorded",
                     at=now,
                 )
@@ -760,8 +797,7 @@ class ProposalHandoffLoopService:
                 cycle,
                 "NO_ACTION",
                 blocked_reasons=(
-                    "candidate_count=0; outcome=NO_ACTION; "
-                    "reason=no candidate satisfied strategy-evidence threshold",
+                    f"candidate_count=0; outcome=NO_ACTION; reason={no_action_reason}",
                 ),
                 no_action_outcome=no_action,
                 market_review_linkage=linkage,
@@ -771,35 +807,40 @@ class ProposalHandoffLoopService:
                 market_context_admission=context_admission,
             )
         research_trigger_ids: list[str] = []
-        deferred_count = 0
-        for scope in scopes:
+        admitted_scopes = scopes[:admitted_capacity]
+        deferred_scopes = scopes[admitted_capacity:]
+        deferred_count = len(deferred_scopes)
+        researched = tuple(
+            f"{scope['symbol']}:{scope['source']}" for scope in admitted_scopes
+        )
+        for scope in deferred_scopes:
+            symbol = scope["symbol"]
+            deferred_at = admission_observed_at
+            trigger = scope.get("research_trigger")
+            candidate_outcomes.append({
+                "symbol": symbol,
+                "source": scope.get("source"),
+                "status": "DEFERRED_BUDGET",
+                "reason": "candidate deferred to a later natural cycle by the configured budget",
+                "research_trigger_id": (trigger or {}).get("research_trigger_id"),
+                "remaining_seconds": int(budget.remaining_seconds(deferred_at)),
+                "required_seconds": int(budget.candidate_reserve_seconds),
+            })
+            if self._trigger_coordinator is not None and trigger:
+                self._trigger_coordinator.mark_deferred_budget(
+                    trigger=trigger, now=deferred_at
+                )
+            canonical.set_current_work(
+                cycle_id=cycle,
+                stage="CANDIDATE_EVALUATION",
+                symbol_or_scope=f"{symbol}:{scope.get('source') or 'UNKNOWN'}",
+                work_state="DEFERRED",
+                at=deferred_at,
+            )
+        for scope in admitted_scopes:
             symbol = scope["symbol"]
             current_scope = f"{symbol}:{scope.get('source') or 'UNKNOWN'}"
             budget_observed_at = self._clock()
-            if not budget.admits_candidate(budget_observed_at):
-                deferred_count += 1
-                trigger = scope.get("research_trigger")
-                candidate_outcomes.append({
-                    "symbol": symbol,
-                    "source": scope.get("source"),
-                    "status": "DEFERRED_BUDGET",
-                    "reason": "insufficient remaining cycle budget for configured timeout contract",
-                    "research_trigger_id": (trigger or {}).get("research_trigger_id"),
-                    "remaining_seconds": int(budget.remaining_seconds(budget_observed_at)),
-                    "required_seconds": int(budget.candidate_reserve_seconds),
-                })
-                if self._trigger_coordinator is not None and trigger:
-                    self._trigger_coordinator.mark_deferred_budget(
-                        trigger=trigger, now=budget_observed_at
-                    )
-                canonical.set_current_work(
-                    cycle_id=cycle,
-                    stage="CANDIDATE_EVALUATION",
-                    symbol_or_scope=current_scope,
-                    work_state="DEFERRED",
-                    at=budget_observed_at,
-                )
-                continue
             canonical.set_current_work(
                 cycle_id=cycle,
                 stage="CANDIDATE_EVALUATION",
@@ -820,6 +861,12 @@ class ProposalHandoffLoopService:
                     query_id=query_id,
                     current_time=budget_observed_at,
                 )
+                completed_observed_at = self._clock()
+                if completed_observed_at > budget.deadline:
+                    raise M2ShadowBlocked(
+                        f"{symbol}: admitted candidate exceeded cycle budget at "
+                        f"{completed_observed_at.isoformat()} (CYCLE_BUDGET_OVERRUN)"
+                    )
                 # The durable report completion time keeps recovery canonical
                 # without making a long-running analysis expire at handoff.
                 proposal_time = completion.completed_at or now
@@ -878,12 +925,16 @@ class ProposalHandoffLoopService:
                     acknowledgement.deduplicated,
                 )
             except Exception as exc:
-                blocked.append(f"{symbol}: {type(exc).__name__}: {exc}")
+                retryable = _candidate_failure_is_retryable(exc)
+                if not retryable:
+                    blocked.append(f"{symbol}: {type(exc).__name__}: {exc}")
+                else:
+                    deferred_count += 1
                 candidate_outcomes.append(
                     {
                         "symbol": symbol,
                         "source": scope.get("source"),
-                        "status": "FAILED",
+                        "status": "DEFERRED_RETRY" if retryable else "FAILED",
                         "reason": f"{type(exc).__name__}: {exc}",
                         "research_trigger_id": (
                             scope.get("research_trigger") or {}
@@ -894,14 +945,19 @@ class ProposalHandoffLoopService:
                     cycle_id=cycle,
                     stage="CANDIDATE_EVALUATION",
                     symbol_or_scope=current_scope,
-                    work_state="FAILED",
+                    work_state="DEFERRED" if retryable else "FAILED",
                     at=budget_observed_at,
                 )
                 if self._trigger_coordinator is not None and scope.get("research_trigger"):
                     try:
-                        self._trigger_coordinator.mark_failure(
-                            trigger=scope["research_trigger"], now=now
-                        )
+                        if retryable:
+                            self._trigger_coordinator.mark_deferred_budget(
+                                trigger=scope["research_trigger"], now=budget_observed_at
+                            )
+                        else:
+                            self._trigger_coordinator.mark_failure(
+                                trigger=scope["research_trigger"], now=now
+                            )
                     except Exception:
                         logger.exception("PALLAS-004 trigger failure checkpoint failed")
         linkage = None
@@ -939,7 +995,7 @@ class ProposalHandoffLoopService:
             stage="RESEARCH_BUNDLE",
             state=(
                 "SUCCEEDED"
-                if len(research_ids) == len(scopes)
+                if admitted_scopes and len(research_ids) == len(admitted_scopes)
                 else "PARTIAL"
                 if research_ids
                 else "PARTIAL" if deferred_count else "FAILED"
@@ -947,10 +1003,10 @@ class ProposalHandoffLoopService:
             object_ids=research_ids,
             reason_code=(
                 "RESEARCH_BUNDLES_COMPLETE"
-                if len(research_ids) == len(scopes)
+                if admitted_scopes and len(research_ids) == len(admitted_scopes)
                 else "RESEARCH_BUNDLES_PARTIAL"
                 if research_ids
-                else "CYCLE_BUDGET_EXHAUSTED" if deferred_count else "ALL_CANDIDATES_FAILED"
+                else "CANDIDATES_DEFERRED_TO_NATURAL_CYCLE" if deferred_count else "ALL_CANDIDATES_FAILED"
             ),
             at=now,
         )
@@ -959,7 +1015,7 @@ class ProposalHandoffLoopService:
             stage="INVESTMENT_PROPOSAL",
             state=(
                 "SUCCEEDED"
-                if len(proposal_ids) == len(scopes)
+                if admitted_scopes and len(proposal_ids) == len(admitted_scopes)
                 else "PARTIAL"
                 if proposal_ids
                 else "PARTIAL" if deferred_count else "FAILED"
@@ -967,10 +1023,10 @@ class ProposalHandoffLoopService:
             object_ids=proposal_ids,
             reason_code=(
                 "PROPOSALS_COMPLETE"
-                if len(proposal_ids) == len(scopes)
+                if admitted_scopes and len(proposal_ids) == len(admitted_scopes)
                 else "PROPOSALS_PARTIAL"
                 if proposal_ids
-                else "CYCLE_BUDGET_EXHAUSTED" if deferred_count else "ALL_CANDIDATES_FAILED"
+                else "CANDIDATES_DEFERRED_TO_NATURAL_CYCLE" if deferred_count else "ALL_CANDIDATES_FAILED"
             ),
             at=now,
         )
@@ -979,7 +1035,7 @@ class ProposalHandoffLoopService:
             stage="ATHENA_HANDOFF_ACK",
             state=(
                 "SUCCEEDED"
-                if len(acknowledgements) == len(scopes)
+                if admitted_scopes and len(acknowledgements) == len(admitted_scopes)
                 else "PARTIAL"
                 if acknowledgements
                 else "PARTIAL" if deferred_count else "FAILED"
@@ -987,10 +1043,10 @@ class ProposalHandoffLoopService:
             object_ids=tuple(item.acknowledgement_id for item in acknowledgements),
             reason_code=(
                 "ACKS_COMPLETE"
-                if len(acknowledgements) == len(scopes)
+                if admitted_scopes and len(acknowledgements) == len(admitted_scopes)
                 else "ACKS_PARTIAL"
                 if acknowledgements
-                else "CYCLE_BUDGET_EXHAUSTED" if deferred_count else "ALL_CANDIDATES_FAILED"
+                else "CANDIDATES_DEFERRED_TO_NATURAL_CYCLE" if deferred_count else "ALL_CANDIDATES_FAILED"
             ),
             at=now,
         )
@@ -1003,7 +1059,7 @@ class ProposalHandoffLoopService:
             researched_symbols=researched,
             research_trigger_ids=tuple(research_trigger_ids),
             market_review_linkage=linkage,
-            candidate_count=len(scopes),
+            candidate_count=len(admitted_scopes),
             failed_count=len(blocked),
             deferred_count=deferred_count,
             candidate_outcomes=tuple(candidate_outcomes),

@@ -297,14 +297,21 @@ def _persist_dependency_observation(
     """Persist actual snapshot-provider outcomes without exposing credentials."""
     try:
         from src.services.dependency_health import get_dependency_health_store
+        from src.services.screening.config import resolve_snapshot_source_priority
+
+        source_priority = resolve_snapshot_source_priority()
+        source_rank = {
+            name: index + 1 for index, name in enumerate(source_priority)
+        }
+        priority = source_rank.get(source, 99)
 
         get_dependency_health_store().record_result(
             source,
             category="RESEARCH_MARKET_DATA",
             configured=source != "tushare" or bool(os.getenv("TUSHARE_TOKEN", "").strip()),
             enabled=True,
-            role="PRIMARY" if source in {"tushare", "efinance"} else "FALLBACK",
-            priority={"tushare": 1, "efinance": 2, "akshare_em": 3, "sina": 4, "em_datacenter": 5}.get(source, 99),
+            role="PRIMARY" if priority == 1 else "FALLBACK" if priority < 99 else "AUXILIARY",
+            priority=priority,
             success=success,
             reachable=success,
             usable=success and rows > 0,

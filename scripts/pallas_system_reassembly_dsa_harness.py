@@ -208,15 +208,25 @@ class _Runner:
         self,
         *,
         fail: bool = False,
+        failure_message: str = "fixture Luna research timeout",
+        failure_attempts: int = 0,
         completion_events: list[datetime] | None = None,
+        overrun_clock: dict[str, datetime] | None = None,
         **_kwargs,
     ):
         self.fail = fail
+        self.failure_message = failure_message
+        self.failure_attempts = max(0, int(failure_attempts))
         self.completion_events = completion_events if completion_events is not None else []
+        self.overrun_clock = overrun_clock
 
     def complete(self, *, symbol, current_time, **_kwargs):
-        if self.fail:
-            raise TimeoutError("fixture Luna research timeout")
+        if self.fail or self.failure_attempts:
+            if self.failure_attempts:
+                self.failure_attempts -= 1
+            if "CURRENT_SESSION_NOT_CLOSED" in self.failure_message:
+                raise RuntimeError(self.failure_message)
+            raise TimeoutError(self.failure_message)
         from src.analyzer import AnalysisResult
         from src.investment.m2.orchestration import AnalysisCompletion
 
@@ -232,6 +242,8 @@ class _Runner:
             }}},
         )
         self.completion_events.append(current_time)
+        if self.overrun_clock is not None:
+            self.overrun_clock["now"] = current_time + timedelta(seconds=481)
         return AnalysisCompletion(
             result=result,
             context_snapshot={
@@ -294,6 +306,7 @@ class _FixtureScreeningService:
         attempt_events=None,
         screening_calls=None,
         observed_at=NOW,
+        candidate_count=1,
         **_kwargs,
     ):
         self.db = db_manager
@@ -302,6 +315,7 @@ class _FixtureScreeningService:
         self.attempt_events = attempt_events if attempt_events is not None else []
         self.screening_calls = screening_calls if screening_calls is not None else []
         self.observed_at = observed_at
+        self.candidate_count = max(0, int(candidate_count))
 
     def screen(self, *, strategy, market, max_results):
         attempt_number = self.attempt_number
@@ -326,15 +340,31 @@ class _FixtureScreeningService:
             retry_target is not None and attempt_number < retry_target
         ):
             raise OSError("fixture screening producer unavailable")
-        candidates = [] if self.mode == "zero" else [{
-            "code": "600519", "name": "贵州茅台", "rank": 1,
-            "screen_score": 88.0, "score": 88.0,
-            "latest_completed_trade_date": PRIOR_COMPLETED_TRADE_DATE,
-            "decision_cutoff": attempt_at.isoformat(), "completion_status": "CLOSE_CONFIRMED",
-            "completion_basis": "PRIOR_PROVIDER_RETURNED_SESSION",
-            "quantitative_input_reference": "fixture:daily-close:600519:2026-08-24",
-            "strategy_evidence": _pallas008_evidence(decision_cutoff=attempt_at),
-        }]
+        candidate_specs = (
+            ("600519", "贵州茅台"),
+            ("000001", "平安银行"),
+            ("601318", "中国平安"),
+            ("600036", "招商银行"),
+            ("601012", "隆基绿能"),
+            ("600276", "恒瑞医药"),
+        )
+        candidates = [] if self.mode == "zero" else [
+            {
+                "code": symbol, "name": name, "rank": rank,
+                "screen_score": 88.0 - rank, "score": 88.0 - rank,
+                "latest_completed_trade_date": PRIOR_COMPLETED_TRADE_DATE,
+                "decision_cutoff": attempt_at.isoformat(), "completion_status": "CLOSE_CONFIRMED",
+                "completion_basis": "PRIOR_PROVIDER_RETURNED_SESSION",
+                "quantitative_input_reference": f"fixture:daily-close:{symbol}:2026-08-24",
+                "strategy_evidence": _pallas008_evidence(
+                    symbol=symbol, decision_cutoff=attempt_at,
+                ),
+            }
+            for rank, (symbol, name) in enumerate(
+                candidate_specs[: min(self.candidate_count, len(candidate_specs), max_results)],
+                start=1,
+            )
+        ]
         source_errors = []
         if self.mode == "quality_recovery" and attempt_number == 1:
             source_errors = ["fixture provider quality failed"]
@@ -495,7 +525,7 @@ def _market_context_refresh_probe(db, *, config) -> dict[str, object]:
     }
 
 
-def _runtime_config(*, holdings: bool) -> SimpleNamespace:
+def _runtime_config(*, holdings: bool, max_symbols: int = 6) -> SimpleNamespace:
     return SimpleNamespace(
         schedule_enabled=True, schedule_time="23:59", schedule_times=["23:59"],
         single_brain_m2_enabled=True, single_brain_execution_mode="PROPOSAL_HANDOFF",
@@ -504,7 +534,7 @@ def _runtime_config(*, holdings: bool) -> SimpleNamespace:
         single_brain_m2_natural_session_gate_enabled=True, single_brain_m2_screening_enabled=True,
         single_brain_m2_screening_max_candidates=3, single_brain_m2_screening_max_age_hours=72,
         single_brain_m2_screening_strategy="capital_heat", single_brain_m2_screening_market="cn",
-        single_brain_m2_max_symbols=1, single_brain_m2_holdings_limit=1 if holdings else 0,
+        single_brain_m2_max_symbols=max(1, int(max_symbols)), single_brain_m2_holdings_limit=1 if holdings else 0,
         single_brain_m2_symbols=[], single_brain_m2_review_policy_version="pallas-004-research-trigger-v1",
         generation_backend_timeout_seconds=300, single_brain_m2_snapshot_timeout_seconds=5,
         single_brain_proposal_timeout_seconds=5, single_brain_proposal_url="http://fixture.invalid/athena",
@@ -739,6 +769,11 @@ def _run_natural_day(
     *,
     mode: str,
     runner_failure: bool = False,
+    runner_failure_message: str = "fixture Luna research timeout",
+    runner_failure_attempts: int = 0,
+    runner_overrun: bool = False,
+    candidate_count: int = 1,
+    seed_screening_run: bool = False,
     start_at: datetime = START_EARLY,
     dispatches: int = 1,
     restart_between_attempts: bool = False,
@@ -792,7 +827,18 @@ def _run_natural_day(
             "source_errors": ["fixture screening producer unavailable"],
             "warnings": [], "degradation": [],
         })
-    config = _runtime_config(holdings=mode == "holdings_only")
+    config = _runtime_config(
+        holdings=mode == "holdings_only",
+        max_symbols=max(6, candidate_count),
+    )
+    if seed_screening_run:
+        _FixtureScreeningService(
+            config=config,
+            db_manager=db_ref["db"],
+            mode="valid",
+            observed_at=start_at,
+            candidate_count=candidate_count,
+        ).screen(strategy="capital_heat", market="cn", max_results=3)
     timing_contract = _timing_contract(config)
     _require(
         timing_contract["configuration_admissible"] is True,
@@ -823,9 +869,18 @@ def _run_natural_day(
         return publisher
 
     def runner_factory(*args, **kwargs):
+        failure_attempts = runner_failures_remaining["remaining"]
+        runner_failures_remaining["remaining"] = 0
+        overrun_clock = None
+        if runner_overrun and overrun_remaining["remaining"]:
+            overrun_remaining["remaining"] -= 1
+            overrun_clock = natural_clock
         return _Runner(
             fail=runner_failure,
+            failure_message=runner_failure_message,
+            failure_attempts=failure_attempts,
             completion_events=research_completions,
+            overrun_clock=overrun_clock,
             **kwargs,
         )
 
@@ -838,12 +893,15 @@ def _run_natural_day(
             attempt_events=screening_attempts,
             screening_calls=screening_calls,
             observed_at=natural_clock["now"],
+            candidate_count=candidate_count,
             **kwargs,
         )
 
     original_from_config = orchestration_module.ProposalHandoffLoopService.from_config
     created_services: list[object] = []
     natural_clock = {"now": start_at}
+    runner_failures_remaining = {"remaining": max(0, int(runner_failure_attempts))}
+    overrun_remaining = {"remaining": 1 if runner_overrun else 0}
 
     def capture_from_config(cls, current_config):
         service = original_from_config(current_config)
@@ -1006,6 +1064,37 @@ def _run_natural_day(
     projection = CanonicalCycleRepository().scheduler_projection(
         scheduler_task_name="single_brain_proposal_handoff"
     )
+    from src.services.runtime_scheduler import _proposal_handoff_cycle_identity
+
+    cycle_evidence_by_dispatch: list[dict[str, object]] = []
+    for event in dispatch_log:
+        scheduled_text = event.get("scheduled_for")
+        if not scheduled_text:
+            continue
+        scheduled_for = _parse_time(scheduled_text)
+        cycle_id, _, _ = _proposal_handoff_cycle_identity(config, scheduled_for)
+        cycle = CanonicalCycleRepository().get_cycle(cycle_id)
+        if cycle is None:
+            continue
+        cycle_evidence_by_dispatch.append({
+            "scheduled_for": scheduled_for.isoformat(),
+            "cycle": cycle,
+            "stages": {
+                item["stage"]: {
+                    "state": item["state"],
+                    "reason_code": item["reason_code"],
+                    "object_id": item["object_id"],
+                }
+                for item in CanonicalCycleRepository().stage_events(cycle_id)
+            },
+        })
+    post_screening_cycle_evidence = next(
+        (
+            item for item in reversed(cycle_evidence_by_dispatch)
+            if _parse_time(item["scheduled_for"]) >= SCREENING_DUE
+        ),
+        None,
+    )
     try:
         screening_state = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -1015,8 +1104,7 @@ def _run_natural_day(
         ":capital_heat:cn"
     )
     screening_run_state = (screening_state.get("runs") or {}).get(screening_run_key)
-    due_publisher = publishers[-1] if publishers else None
-    proposals = list(due_publisher.proposals) if due_publisher is not None else []
+    proposals = [proposal for publisher in publishers for proposal in publisher.proposals]
     causal_timeline = _causal_timeline(
         dispatch_log=dispatch_log,
         research_completions=research_completions,
@@ -1101,6 +1189,8 @@ def _run_natural_day(
         },
         "market_context_events": market_context_events,
         "initial_cycle_evidence": initial_cycle_evidence,
+        "cycle_evidence_by_dispatch": cycle_evidence_by_dispatch,
+        "post_screening_cycle_evidence": post_screening_cycle_evidence,
         "canonical_projection": projection,
         "runtime_contract": {
             "model": "gpt-5.6-luna", "reasoning_effort": "max",
@@ -1235,6 +1325,131 @@ def _unsafe_budget_probe() -> dict[str, object]:
     }
 
 
+def _provider_contract_probe() -> dict[str, object]:
+    """Exercise the active screening source/field contract without live I/O."""
+
+    import pandas as pd
+
+    from src.services.dependency_health import DependencyHealthStore
+    from src.services.screening import snapshot as screening_snapshot
+
+    bad = pd.DataFrame([{"code": "000001", "name": "平安银行", "price": 10.0}])
+    good = pd.DataFrame([
+        {"code": "000001", "name": "平安银行", "price": 10.0, "volume_ratio": 1.8}
+    ])
+    calls: list[str] = []
+
+    def fetch(source: str):
+        calls.append(source)
+        return bad if source == "tushare" else good.copy()
+
+    with patch.dict(
+        os.environ,
+        {"SNAPSHOT_SOURCE_PRIORITY": "tushare,sina,efinance", "TUSHARE_TOKEN": "fixture-token"},
+    ):
+        with patch.object(screening_snapshot, "_SOURCE_HEALTH", {}), \
+             patch.object(screening_snapshot, "fetch_cn_snapshot", side_effect=fetch), \
+             patch.object(screening_snapshot, "_persist_dependency_observation", lambda *args, **kwargs: None):
+            accepted = screening_snapshot.fetch_snapshot_with_fallback(
+                ["tushare", "sina"],
+                required_columns=["volume_ratio"],
+                fallback_snapshot_path=None,
+                decision_as_of=NOW,
+                clock=lambda: NOW,
+            )
+            calls_before_fail_closed = list(calls)
+
+            with patch.object(
+                screening_snapshot,
+                "fetch_cn_snapshot",
+                return_value=bad,
+            ):
+                try:
+                    screening_snapshot.fetch_snapshot_with_fallback(
+                        ["sina"],
+                        required_columns=["volume_ratio"],
+                        fallback_snapshot_path=None,
+                        decision_as_of=NOW,
+                        clock=lambda: NOW,
+                    )
+                except RuntimeError as exc:
+                    missing_field_error = str(exc)
+                else:
+                    missing_field_error = "unexpectedly accepted missing consumed field"
+
+        with tempfile.TemporaryDirectory(prefix="pallas-provider-contract-") as temporary:
+            store = DependencyHealthStore(
+                Path(temporary) / "health.json", transition_cooldown_seconds=0,
+            )
+            store.record_result(
+                "tushare", category="RESEARCH_MARKET_DATA", configured=True, enabled=True,
+                role="PRIMARY", priority=1, success=False, reachable=False, usable=False,
+                failure_class_name="STALE",
+            )
+            store.record_result(
+                "sina", category="RESEARCH_MARKET_DATA", configured=True, enabled=True,
+                role="FALLBACK", priority=2, success=True, reachable=True, usable=True, records=1,
+            )
+            store.record_result(
+                "efinance", category="RESEARCH_MARKET_DATA", configured=True, enabled=True,
+                role="AUXILIARY", priority=99, success=False, reachable=False, usable=False,
+                failure_class_name="TIMEOUT",
+            )
+            category = store.snapshot()["categories"]["RESEARCH_MARKET_DATA"]
+        with patch.dict(
+            os.environ,
+            {"SNAPSHOT_SOURCE_PRIORITY": "sina,efinance", "TUSHARE_TOKEN": ""},
+        ):
+            with tempfile.TemporaryDirectory(prefix="pallas-provider-inactive-tushare-") as temporary:
+                inactive_store = DependencyHealthStore(
+                    Path(temporary) / "health.json", transition_cooldown_seconds=0,
+                )
+                inactive_store.record_result(
+                    "tushare", category="RESEARCH_MARKET_DATA", configured=True, enabled=True,
+                    role="PRIMARY", priority=1, success=False, reachable=False, usable=False,
+                    failure_class_name="EXPIRED_TOKEN",
+                )
+                inactive_store.record_result(
+                    "sina", category="RESEARCH_MARKET_DATA", configured=True, enabled=True,
+                    role="PRIMARY", priority=1, success=True, reachable=True, usable=True, records=1,
+                )
+                inactive_tushare_category = inactive_store.snapshot()["categories"]["RESEARCH_MARKET_DATA"]
+        with tempfile.TemporaryDirectory(prefix="pallas-provider-unconfigured-") as temporary:
+            unavailable_store = DependencyHealthStore(
+                Path(temporary) / "health.json", transition_cooldown_seconds=0,
+            )
+            unavailable_store.record_result(
+                "sina", category="RESEARCH_MARKET_DATA", configured=False, enabled=False,
+                role="PRIMARY", priority=1, success=False, reachable=False, usable=False,
+                failure_class_name="UNCONFIGURED",
+            )
+            unconfigured_snapshot = unavailable_store.snapshot()
+            unconfigured_category = unconfigured_snapshot["categories"]["RESEARCH_MARKET_DATA"]
+            unconfigured_admission = unconfigured_snapshot["research_admission"]
+    return {
+        "selection_order": category.get("selection_order"),
+        "active_source": category.get("active_source"),
+        "accepted_source": accepted.attrs.get("snapshot_source"),
+        "active_sina_healthy_with_tushare_failure": category.get("status") == "HEALTHY",
+        "inactive_efinance_failure_diagnostic_only": category.get("status") == "HEALTHY",
+        "inactive_tushare_failure_diagnostic_only": (
+            inactive_tushare_category.get("status") == "HEALTHY"
+            and inactive_tushare_category.get("active_source") == "sina"
+            and "tushare" not in inactive_tushare_category.get("selection_order", [])
+        ),
+        "required_source_unconfigured_fail_closed": unconfigured_category.get("status") != "HEALTHY",
+        "required_source_unconfigured_admission_blocked": "RESEARCH_MARKET_DATA_PROVIDER_NOT_CONFIGURED"
+        in unconfigured_admission.get("blocked_reasons", []),
+        "required_snapshot_columns": category.get("required_snapshot_columns"),
+        "fallback_calls": calls_before_fail_closed,
+        "missing_consumed_field": {
+            "status": "FAILED_CLOSED",
+            "error": missing_field_error,
+            "volume_ratio_synthetic": "volume_ratio" in bad.columns,
+        },
+    }
+
+
 def _ambiguous_linkage_probe() -> dict[str, object]:
     from src.analyzer import AnalysisResult
     from src.repositories.market_review_linkage_repo import MarketReviewLinkageRepository
@@ -1267,7 +1482,36 @@ def _run_scenarios(directory: Path) -> dict[str, dict[str, object]]:
         ),
         "zero": _run_natural_day(directory, mode="zero", scenario_label="zero"),
         "holdings_only": _run_natural_day(directory, mode="holdings_only"),
-        "luna_timeout": _run_natural_day(directory, mode="success", runner_failure=True, scenario_label="luna_timeout"),
+        "luna_timeout": _run_natural_day(
+            directory,
+            mode="success",
+            runner_failure=True,
+            seed_screening_run=True,
+            scenario_label="luna_timeout",
+        ),
+        "bounded_candidates": _run_natural_day(
+            directory,
+            mode="success",
+            candidate_count=3,
+            seed_screening_run=True,
+            scenario_label="bounded_candidates",
+        ),
+        "current_session_deferred_recovery": _run_natural_day(
+            directory,
+            mode="success",
+            dispatches=2,
+            runner_failure_attempts=1,
+            runner_failure_message="CURRENT_SESSION_NOT_CLOSED: provider session is still open",
+            seed_screening_run=True,
+            scenario_label="current_session_deferred_recovery",
+        ),
+        "admitted_candidate_overrun": _run_natural_day(
+            directory,
+            mode="success",
+            runner_overrun=True,
+            seed_screening_run=True,
+            scenario_label="admitted_candidate_overrun",
+        ),
         "transient_recovery": _run_natural_day(
             directory, mode="transient_recovery", dispatches=2,
         ),
@@ -1428,6 +1672,24 @@ def main() -> int:
             success["natural_runtime"]["configured_interval_seconds"] == 600,
             "primary harness did not use the configured ten-minute proposal interval",
         )
+        if args.scenario == "system_day":
+            provider_contract = _provider_contract_probe()
+            _require(
+                provider_contract["accepted_source"] == "sina"
+                and provider_contract["fallback_calls"] == ["tushare", "sina"]
+                and provider_contract["active_source"] == "sina"
+                and provider_contract["active_sina_healthy_with_tushare_failure"]
+                and provider_contract["inactive_efinance_failure_diagnostic_only"]
+                and provider_contract["inactive_tushare_failure_diagnostic_only"]
+                and provider_contract["required_source_unconfigured_fail_closed"]
+                and provider_contract["required_source_unconfigured_admission_blocked"]
+                and "volume_ratio" in provider_contract["required_snapshot_columns"]
+                and provider_contract["missing_consumed_field"]["status"] == "FAILED_CLOSED"
+                and provider_contract["missing_consumed_field"]["volume_ratio_synthetic"] is False
+                and "missing required columns volume_ratio"
+                in provider_contract["missing_consumed_field"]["error"],
+                "research market-data health/field contract did not fail closed on the real consumed path",
+            )
         for scenario_name in (
             "market_context_missing_refresh",
             "market_context_stale_refresh",
@@ -1467,6 +1729,53 @@ def main() -> int:
         if "holdings_only" in scenarios:
             _require(scenarios["holdings_only"]["status"] in {"PARTIAL", "COMPLETED"}, "holdings-only path did not continue safely")
             _require(scenarios["holdings_only"]["candidate_discovery_status"] == "DISCOVERY_FAILED", "discovery failure was hidden")
+        if args.scenario == "system_day":
+            bounded = scenarios["bounded_candidates"]["initial_cycle_evidence"]
+            bounded_cycle = bounded["cycle"]
+            _require(
+                bounded_cycle["status"] == "PARTIAL"
+                and bounded_cycle["candidate_count"] == 1
+                and bounded_cycle["deferred_count"] == 2
+                and bounded_cycle["proposal_count"] == 1
+                and bounded["stages"]["CANDIDATE_EVALUATION"]["reason_code"]
+                == "CANDIDATES_BOUNDED_TO_NATURAL_CYCLE"
+                and bounded["stages"]["RESEARCH_BUNDLE"]["state"] == "SUCCEEDED"
+                and bounded["stages"]["INVESTMENT_PROPOSAL"]["state"] == "SUCCEEDED"
+                and bounded["stages"]["ATHENA_HANDOFF_ACK"]["state"] == "SUCCEEDED"
+                and "CYCLE_BUDGET_EXHAUSTED" not in json.dumps(bounded_cycle),
+                "candidate overflow was not bounded to admitted work without false budget exhaustion",
+            )
+            session_initial = scenarios["current_session_deferred_recovery"]["initial_cycle_evidence"]["cycle"]
+            session_recovery = next(
+                item["cycle"]
+                for item in scenarios["current_session_deferred_recovery"]["cycle_evidence_by_dispatch"]
+                if item["cycle"]["status"] == "SUCCEEDED"
+                and item["cycle"]["proposal_count"] == 1
+            )
+            _require(
+                session_initial["status"] == "PARTIAL"
+                and session_initial["candidate_outcomes"][0]["status"] == "DEFERRED_RETRY"
+                and "CURRENT_SESSION_NOT_CLOSED" in session_initial["candidate_outcomes"][0]["reason"]
+                and session_recovery["status"] == "SUCCEEDED"
+                and session_recovery["proposal_count"] == 1,
+                "CURRENT_SESSION_NOT_CLOSED did not defer and recover on a later natural tick",
+            )
+            overrun_cycle = scenarios["admitted_candidate_overrun"]["initial_cycle_evidence"]["cycle"]
+            _require(
+                overrun_cycle["status"] in {"FAILED", "BLOCKED"}
+                and overrun_cycle["terminal_reason_code"] == "CYCLE_BUDGET_EXHAUSTED"
+                and "CYCLE_BUDGET_OVERRUN" in str(overrun_cycle["terminal_reason_detail"])
+                and overrun_cycle["candidate_outcomes"][0]["status"] == "FAILED",
+                "true admitted work overrun did not fail closed with the exact offender",
+            )
+            luna_cycle = scenarios["luna_timeout"]["initial_cycle_evidence"]["cycle"]
+            _require(
+                luna_cycle["status"] == "PARTIAL"
+                and luna_cycle["candidate_outcomes"][0]["status"] == "DEFERRED_RETRY"
+                and "TimeoutError" in luna_cycle["candidate_outcomes"][0]["reason"]
+                and not scenarios["luna_timeout"]["proposal_ids"],
+                "Luna/provider unavailability did not remain bounded and retryable without a proposal",
+            )
         for phase_name in ("start_phase_mid", "start_phase_near_due"):
             _require(
                 scenarios[phase_name]["status"] == "SUCCEEDED"
@@ -1667,10 +1976,13 @@ def main() -> int:
             "screening freshness/quality fault matrix did not fail closed by canonical session contract",
         )
         _require(
-            scenarios["luna_timeout"]["status"] == "FAILED"
+            scenarios["luna_timeout"]["initial_cycle_evidence"]["cycle"]["status"] == "PARTIAL"
             and not scenarios["luna_timeout"]["proposal_ids"]
-            and "TimeoutError" in str(scenarios["luna_timeout"]["canonical_projection"].get("last_error")),
-            "Luna timeout did not terminate the cycle fail-closed",
+            and scenarios["luna_timeout"]["initial_cycle_evidence"]["cycle"]["candidate_outcomes"][0]["status"] == "DEFERRED_RETRY"
+            and "TimeoutError" in str(
+                scenarios["luna_timeout"]["initial_cycle_evidence"]["cycle"]["candidate_outcomes"][0]["reason"]
+            ),
+            "Luna timeout did not remain bounded and retryable without proposal publication",
         )
         unsafe_budget = _unsafe_budget_probe()
         _require(
@@ -1681,7 +1993,7 @@ def main() -> int:
         )
         payload = {
             "repo": "DSA", "harness": "PALLAS_SYSTEM_REASSEMBLY_GOLDEN_PATH",
-            "schema_version": "pallas-system-reassembly-harness-v5", "fixed_clock": NOW.isoformat(),
+            "schema_version": "pallas-system-reassembly-harness-v6", "fixed_clock": NOW.isoformat(),
             "synthetic_trading_day": {
                 "natural_entry": "RuntimeSchedulerService",
                 "scheduler_dispatch_path": "Scheduler._run_background_tasks",
@@ -1720,6 +2032,12 @@ def main() -> int:
                 "calendar_fault": _calendar_fault_probe(), "unsafe_budget": unsafe_budget,
                 "ambiguous_linkage": _ambiguous_linkage_probe(),
                 "p008_strategy_evidence": success["proposals"][0].get("strategy_evidence"), "luna_timeout": scenarios.get("luna_timeout"),
+                "provider_contract": provider_contract if args.scenario == "system_day" else None,
+                "cycle_admission_contract": {
+                    "bounded_candidates": scenarios.get("bounded_candidates"),
+                    "current_session_deferred_recovery": scenarios.get("current_session_deferred_recovery"),
+                    "admitted_candidate_overrun": scenarios.get("admitted_candidate_overrun"),
+                } if args.scenario == "system_day" else None,
             },
             "runtime_contract": {"model": "gpt-5.6-luna", "reasoning_effort": "max", "fallback_used": False, "invocation": "DETERMINISTIC_STUB_ONLY"},
             "safety": {

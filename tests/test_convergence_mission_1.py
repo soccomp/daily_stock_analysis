@@ -396,7 +396,10 @@ def test_one_success_one_timeout_is_persisted_as_partial_with_candidate_outcomes
     assert result.status == "PARTIAL"
     assert result.canonical_cycle["status"] == "PARTIAL"
     assert result.canonical_cycle["candidate_count"] == 2
-    assert {item["status"] for item in result.candidate_outcomes} == {"SUCCEEDED", "FAILED"}
+    assert {item["status"] for item in result.candidate_outcomes} == {
+        "SUCCEEDED",
+        "DEFERRED_RETRY",
+    }
     assert result.canonical_cycle["proposal_ids"] == ["proposal-000001"]
 
 

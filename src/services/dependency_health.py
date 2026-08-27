@@ -136,9 +136,34 @@ def _status_for_observation(
     return HEALTHY
 
 
-def _category_status(items: Iterable[Mapping[str, Any]]) -> str:
+def _category_status(
+    items: Iterable[Mapping[str, Any]],
+    *,
+    selection_order: Iterable[str] | None = None,
+) -> str:
     rows = list(items)
     if not rows:
+        return UNKNOWN
+    if selection_order is not None:
+        order = tuple(dict.fromkeys(str(item).strip() for item in selection_order if str(item).strip()))
+        selected = [
+            row for row in rows
+            if str(row.get("dependency_id") or "") in order
+            and bool(row.get("configured"))
+            and bool(row.get("enabled"))
+        ]
+        if not selected:
+            return UNKNOWN
+        rows = sorted(selected, key=lambda row: order.index(str(row.get("dependency_id"))))
+        statuses = {str(row.get("status") or UNKNOWN) for row in rows}
+        if HEALTHY in statuses:
+            return HEALTHY
+        if DEGRADED in statuses:
+            return DEGRADED
+        if STALE in statuses:
+            return STALE
+        if FAILED in statuses:
+            return FAILED
         return UNKNOWN
     statuses = {str(row.get("status") or UNKNOWN) for row in rows}
     active = statuses - {DISABLED}
@@ -250,6 +275,14 @@ def evaluate_dsa_research_admission(snapshot: Mapping[str, Any]) -> Dict[str, An
         market_rows = [
             item for item in configured_dependency_inventory()
             if item.get("category") == "RESEARCH_MARKET_DATA"
+        ]
+    market_selection_order, _ = _screening_market_data_contract()
+    if not market_selection_order:
+        market_rows = []
+    else:
+        market_rows = [
+            item for item in market_rows
+            if str(item.get("dependency_id") or "") in market_selection_order
         ]
     if not any(bool(item.get("configured")) and bool(item.get("enabled")) for item in market_rows):
         blocked.append("RESEARCH_MARKET_DATA_PROVIDER_NOT_CONFIGURED")
@@ -591,9 +624,15 @@ class DependencyHealthStore:
                 # dormant/local provider to make Codex/Luna research ready.
                 continue
             grouped.setdefault(str(row.get("category") or "UNKNOWN"), []).append(row)
+        market_selection_order, market_required_columns = _screening_market_data_contract()
         categories: Dict[str, Any] = {}
         for category, rows in grouped.items():
-            statuses = _category_status(rows)
+            selection_order = (
+                market_selection_order
+                if category == "RESEARCH_MARKET_DATA"
+                else None
+            )
+            statuses = _category_status(rows, selection_order=selection_order)
 
             def _freshness_expiry(row: Mapping[str, Any]) -> Optional[str]:
                 llm_expiry = (row.get("generation") or {}).get("freshness_expires_at")
@@ -611,9 +650,17 @@ class DependencyHealthStore:
                 if row.get("data_timestamp") or row.get("last_success_at") or row.get("last_attempt_at")
             ]
             fresh_until = [expiry for row in rows if (expiry := _freshness_expiry(row))]
+            reason_rows = (
+                rows
+                if selection_order is None
+                else [
+                    row for row in rows
+                    if str(row.get("dependency_id") or "") in selection_order
+                ]
+            )
             reason = next((
                 f"{row.get('dependency_id')}:{row.get('status')}"
-                for row in rows if row.get("status") not in {HEALTHY, DISABLED}
+                for row in reason_rows if row.get("status") not in {HEALTHY, DISABLED}
             ), None)
             categories[category] = {
                 "key": category,
@@ -630,6 +677,33 @@ class DependencyHealthStore:
                 "source": "dsa_dependency_health_store",
                 "dependency_ids": [row.get("dependency_id") for row in rows],
                 "critical": category in CRITICAL_CATEGORIES,
+                **(
+                    {
+                        "selection_contract": "screening.Config.snapshot_source_priority",
+                        "selection_order": list(selection_order),
+                        "active_source": next(
+                            (
+                                row.get("dependency_id")
+                                for row in sorted(
+                                    rows,
+                                    key=lambda item: list(selection_order).index(
+                                        str(item.get("dependency_id"))
+                                    )
+                                    if str(item.get("dependency_id")) in selection_order
+                                    else 999,
+                                )
+                                if str(row.get("dependency_id")) in selection_order
+                                and bool(row.get("configured"))
+                                and bool(row.get("enabled"))
+                                and row.get("status") == HEALTHY
+                            ),
+                            None,
+                        ),
+                        "required_snapshot_columns": market_required_columns,
+                    }
+                    if selection_order is not None
+                    else {}
+                ),
                 "reasons": [
                     f"{row.get('dependency_id')}:{row.get('status')}"
                     for row in rows
@@ -701,6 +775,39 @@ def _env_configured(name: str) -> bool:
     return bool(os.getenv(name, "").strip())
 
 
+def _screening_market_data_contract() -> tuple[list[str], list[str]]:
+    """Read source order and consumed snapshot fields from screening config."""
+    try:
+        from src.services.screening.config import (
+            Config as ScreeningConfig,
+            resolve_snapshot_source_priority,
+        )
+
+        sources = list(resolve_snapshot_source_priority())
+        config = ScreeningConfig.from_env()
+        strategy_name = os.getenv(
+            "DSA_SINGLE_BRAIN_M2_SCREENING_STRATEGY", "capital_heat"
+        ).strip() or "capital_heat"
+        from src.services.screening.filter import requires_daily_features, without_daily_filters
+        from src.services.screening.pipeline import _required_snapshot_columns
+        from src.services.screening.strategy import load_all_strategies
+
+        strategy = load_all_strategies(config.strategies_dir).get(strategy_name)
+        if strategy is None:
+            return sources, []
+        filters = strategy.screening.hard_filters
+        if requires_daily_features(filters):
+            filters = without_daily_filters(filters)
+        return sources, _required_snapshot_columns(filters)
+    except Exception:
+        try:
+            from src.services.screening.config import resolve_snapshot_source_priority
+
+            return list(resolve_snapshot_source_priority()), []
+        except Exception:
+            return [], []
+
+
 def configured_dependency_inventory() -> list[Dict[str, Any]]:
     """Return the non-secret runtime inventory used by the monitor/API."""
     try:
@@ -710,6 +817,14 @@ def configured_dependency_inventory() -> list[Dict[str, Any]]:
     except Exception:
         pass
     searx_urls = [item.strip() for item in os.getenv("SEARXNG_BASE_URLS", "").split(",") if item.strip()]
+    snapshot_sources, required_snapshot_columns = _screening_market_data_contract()
+    snapshot_endpoints = {
+        "tushare": "https://api.tushare.pro",
+        "sina": "https://finance.sina.com.cn",
+        "efinance": "https://www.efinance.com.cn",
+        "akshare_em": "https://akshare.akfamily.xyz",
+        "em_datacenter": "https://datacenter.eastmoney.com",
+    }
     inventory: list[Dict[str, Any]] = [
         {
             "dependency_id": "codex-luna",
@@ -733,12 +848,21 @@ def configured_dependency_inventory() -> list[Dict[str, Any]]:
         {"dependency_id": "serpapi", "category": "NEWS_SEARCH", "configured": _env_configured("SERPAPI_API_KEYS"), "enabled": _env_configured("SERPAPI_API_KEYS"), "role": "AUXILIARY", "priority": 99, "endpoint": "https://serpapi.com"},
         {"dependency_id": "minimax-search", "category": "NEWS_SEARCH", "configured": _env_configured("MINIMAX_API_KEYS"), "enabled": _env_configured("MINIMAX_API_KEYS"), "role": "AUXILIARY", "priority": 99, "endpoint": "https://api.minimax.chat"},
         {"dependency_id": "anspire", "category": "NEWS_SEARCH", "configured": _env_configured("ANSPIRE_API_KEYS"), "enabled": _env_configured("ANSPIRE_API_KEYS"), "role": "AUXILIARY", "priority": 99, "endpoint": "https://api.anspire.cn"},
-        {"dependency_id": "tushare", "category": "RESEARCH_MARKET_DATA", "configured": _env_configured("TUSHARE_TOKEN"), "enabled": _env_configured("TUSHARE_TOKEN"), "role": "PRIMARY", "priority": 1, "endpoint": "https://api.tushare.pro"},
+        *[
+            {
+                "dependency_id": source,
+                "category": "RESEARCH_MARKET_DATA",
+                "configured": source != "tushare" or _env_configured("TUSHARE_TOKEN"),
+                "enabled": source != "tushare" or _env_configured("TUSHARE_TOKEN"),
+                "role": "PRIMARY" if index == 0 else "FALLBACK",
+                "priority": index + 1,
+                "endpoint": snapshot_endpoints.get(source),
+                "selection_contract": "screening.Config.snapshot_source_priority",
+                "required_snapshot_columns": required_snapshot_columns,
+            }
+            for index, source in enumerate(snapshot_sources)
+        ],
         {"dependency_id": "tickflow", "category": "RESEARCH_MARKET_DATA", "configured": _env_configured("TICKFLOW_API_KEY"), "enabled": _env_configured("TICKFLOW_API_KEY"), "role": "AUXILIARY", "priority": 99},
-        {"dependency_id": "efinance", "category": "RESEARCH_MARKET_DATA", "configured": True, "enabled": True, "role": "FALLBACK", "priority": 2, "endpoint": "https://www.efinance.com.cn"},
-        {"dependency_id": "sina", "category": "RESEARCH_MARKET_DATA", "configured": True, "enabled": True, "role": "FALLBACK", "priority": 3, "endpoint": "https://finance.sina.com.cn"},
-        {"dependency_id": "eastmoney", "category": "RESEARCH_MARKET_DATA", "configured": True, "enabled": True, "role": "FALLBACK", "priority": 4, "endpoint": "https://datacenter.eastmoney.com"},
-        {"dependency_id": "akshare", "category": "RESEARCH_MARKET_DATA", "configured": True, "enabled": True, "role": "FALLBACK", "priority": 3, "endpoint": "https://akshare.akfamily.xyz"},
     ]
     return inventory
 
