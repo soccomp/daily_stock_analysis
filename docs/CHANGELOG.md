@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-- [修复] 隔离 Pallas deterministic qualification 的 fixture dependency-health，禁止写入 production truth store。
+- [修复] 隔离 Pallas deterministic qualification harness 与直接 MarketContext wiring tests 的 fixture dependency-health，禁止写入 production truth store。
 
 - [改进] Athena Issue #42 Mission-3 implementation 新增只读 Owner operability 投影与 DSA canonical readiness/cycle facts，并复用自然 scheduler 的 admission gate 投影当前 legal work window；保持 DSA `dsa_execution_authority=false`、`simulation_only=true`、`LIVE_TRADING=false`，不启动自然周期、不触发 provider 或执行动作。
 - [改进] Athena Issue #41 新增 DSA-owned canonical research readiness、A 股自然交易时段 fail-closed admission、scheduler due-time 有界 cycle budget 与可公平重试的 `DEFERRED_BUDGET` terminal evidence；不新增执行权限、并发、catch-up 或外部探测。

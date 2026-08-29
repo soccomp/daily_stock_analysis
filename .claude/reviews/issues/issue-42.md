@@ -7,6 +7,7 @@
 ## Corrective scope
 
 - Route the existing dependency-health repository to the harness temporary directory before the natural scheduler scenarios start.
+- Route direct MarketContext wiring tests to their per-test temporary dependency-health path as well as their temporary database.
 - Keep the production scheduler, MarketContext service, canonical cycle repository, and business authority model unchanged.
 - Emit the isolated store path in harness evidence so qualification can prove that fixture state did not enter the production truth path.
 

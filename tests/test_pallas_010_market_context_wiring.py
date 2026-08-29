@@ -315,6 +315,10 @@ def test_scheduler_owned_live_market_context_uses_post_call_admission_cutoff_and
 @pytest.fixture
 def isolated_db(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "market-context-wiring.db"))
+    monkeypatch.setenv(
+        "DSA_DEPENDENCY_HEALTH_PATH",
+        str(tmp_path / "market-context-wiring-dependency-health.json"),
+    )
     Config.reset_instance()
     DatabaseManager.reset_instance()
     db = DatabaseManager.get_instance()
