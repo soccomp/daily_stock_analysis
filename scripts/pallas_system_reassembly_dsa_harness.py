@@ -1412,6 +1412,12 @@ def main() -> int:
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="pallas-dsa-system-day-") as temporary:
         directory = Path(temporary)
+        dependency_health_path = directory / "dependency-health.json"
+        os.environ["DSA_DEPENDENCY_HEALTH_PATH"] = str(dependency_health_path)
+        _require(
+            dependency_health_path.parent == directory,
+            "qualification dependency health must remain inside the temporary harness root",
+        )
         scenarios = _run_scenarios(directory) if args.scenario == "system_day" else {args.scenario: _run_natural_day(directory, mode=args.scenario)}
         market_context_faults = (
             _market_context_fault_matrix(directory)
@@ -1735,6 +1741,8 @@ def main() -> int:
                 "real_luna": False,
                 "real_worker": False,
                 "orders_submitted": False,
+                "dependency_health_store": "TEMPORARY_HARNESS_ONLY",
+                "dependency_health_path": str(dependency_health_path),
             },
         }
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str))

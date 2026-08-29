@@ -328,13 +328,20 @@ def test_api_market_review_context_links_to_the_real_proposal_cycle(tmp_path, mo
                     "concepts": {
                         "top": [],
                         "bottom": [],
-                        "data_status": "available_empty",
+                        "data_status": "available",
                     },
                     "data_quality": {
                         "indices": "available",
                         "breadth": "available",
                         "sectors": "available",
-                        "concepts": "available_empty",
+                        "concepts": "available",
+                    },
+                    "component_provenance": {
+                        component: {
+                            "observed_at": now.isoformat(),
+                            "reference": f"test:{component}",
+                        }
+                        for component in ("indices", "breadth", "sectors", "concepts")
                     },
                     "news": [],
                 },
@@ -385,7 +392,7 @@ def test_api_market_review_context_links_to_the_real_proposal_cycle(tmp_path, mo
         )
         result = service.run_cycle(scheduled_for=now, market_review_context=context)
 
-        assert result.status == "NO_ACTION"
+        assert result.status == "NO_ACTION", result.blocked_reasons
         assert result.no_action_outcome["source_task_id"] == result.cycle_id
         assert result.market_review_linkage["market_review_task_id"] == task_id
         assert result.market_review_linkage["market_context_id"] == context["context_id"]

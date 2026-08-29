@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] 隔离 Pallas deterministic qualification 的 fixture dependency-health，禁止写入 production truth store。
+
 - [改进] Athena Issue #42 Mission-3 implementation 新增只读 Owner operability 投影与 DSA canonical readiness/cycle facts，并复用自然 scheduler 的 admission gate 投影当前 legal work window；保持 DSA `dsa_execution_authority=false`、`simulation_only=true`、`LIVE_TRADING=false`，不启动自然周期、不触发 provider 或执行动作。
 - [改进] Athena Issue #41 新增 DSA-owned canonical research readiness、A 股自然交易时段 fail-closed admission、scheduler due-time 有界 cycle budget 与可公平重试的 `DEFERRED_BUDGET` terminal evidence；不新增执行权限、并发、catch-up 或外部探测。
 - [修复] PALLAS-009 收敛 Market Review 的结构化上下文、数据降级、任务阶段/heartbeat/stale 语义与历史 scorecard 兼容读取；同步关闭公共 SearXNG 默认发现、修复允许的通知/分片/移动端触摸滚动兼容问题，并保持 DSA 无执行权限。

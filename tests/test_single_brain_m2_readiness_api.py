@@ -183,6 +183,7 @@ def test_readiness_projects_actual_single_m2_scheduler_authority(monkeypatch):
         "enabled": True,
         "mode": "M2_SHADOW_ONLY",
         "authority_count": 1,
+        "thread_alive": True,
         "interval_seconds": 3600,
         "next_run_at": "2026-08-09T03:00:00",
     }
