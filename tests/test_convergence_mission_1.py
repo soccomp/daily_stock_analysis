@@ -340,6 +340,54 @@ def test_same_day_market_reviews_select_one_explicit_context_at_cycle_cutoff(iso
     assert resolved["context_id"] == "context-late"
 
 
+def test_latest_structurally_degraded_context_does_not_mask_fresh_valid_context(isolated_db):
+    early = _market_context("review-early", "context-early", NOW)
+    degraded = _market_context(
+        "review-degraded",
+        "context-degraded",
+        NOW.replace(minute=30),
+    )
+    degraded.update(
+        {
+            "source_completeness": {
+                "requested": ["indices", "breadth", "sectors", "concepts"],
+                "available": [],
+                "missing": ["indices"],
+                "failed": [],
+                "status": "degraded",
+            },
+            "component_timing_status": "PIT_VALIDATED",
+            "component_provenance": {
+                component: {"status": "PIT_VALIDATED"}
+                for component in ("indices", "breadth", "sectors", "concepts")
+            },
+            "decision_as_of": degraded["as_of"],
+        }
+    )
+    with isolated_db.session_scope() as session:
+        for index, context in enumerate((early, degraded)):
+            session.add(
+                AnalysisHistory(
+                    query_id=f"review-{index}",
+                    code="market_review",
+                    report_type="market_review",
+                    context_snapshot=json.dumps(
+                        {"market_review_payload": {"market_context": context}}
+                    ),
+                    created_at=(NOW + timedelta(minutes=index * 30)).replace(tzinfo=None),
+                )
+            )
+
+    resolved, reason = MarketReviewLinkageRepository(isolated_db).resolve_market_context(
+        trade_date=NOW.date(),
+        as_of=NOW.replace(minute=45),
+        max_age_seconds=3600,
+    )
+    assert reason == "VALID"
+    assert resolved["market_review_id"] == "review-early"
+    assert resolved["context_id"] == "context-early"
+
+
 def test_one_success_one_timeout_is_persisted_as_partial_with_candidate_outcomes(
     isolated_db, monkeypatch
 ):

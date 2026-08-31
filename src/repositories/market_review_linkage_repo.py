@@ -287,19 +287,42 @@ class MarketReviewLinkageRepository:
                 )
         if not candidates:
             return None, "MISSING"
-        candidates.sort(key=lambda item: (item[0], item[1], item[2]))
-        latest_as_of = candidates[-1][0]
-        latest = [item for item in candidates if item[0] == latest_as_of]
-        if len({item[2] for item in latest}) != 1:
-            return None, "AMBIGUOUS"
-        context = dict(latest[-1][3])
-        if as_of is not None and max_age_seconds is not None:
+        candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        if as_of is None or max_age_seconds is None:
+            latest_as_of = candidates[0][0]
+            latest = [item for item in candidates if item[0] == latest_as_of]
+            if len({item[2] for item in latest}) != 1:
+                return None, "AMBIGUOUS"
+            return dict(latest[0][3]), "VALID"
+
+        # A newer history row can contain a malformed or structurally degraded
+        # canonical context (for example, a candidate-level review whose
+        # component cutoff predates the provider observations).  Do not let
+        # that row mask an older context that is still inside the explicit
+        # freshness window and passes the admission contract.
+        latest_invalid_reason = "INVALID"
+        first_group = True
+        index = 0
+        while index < len(candidates):
+            candidate_as_of = candidates[index][0]
+            group = []
+            while index < len(candidates) and candidates[index][0] == candidate_as_of:
+                group.append(candidates[index])
+                index += 1
+            if len({item[2] for item in group}) != 1:
+                return None, "AMBIGUOUS"
+            context = dict(group[0][3])
             valid, reason = validate_market_context_for_slot(
                 context,
                 trade_date=trade_date,
                 as_of=as_of,
                 max_age_seconds=max_age_seconds,
             )
-            if not valid:
-                return None, reason
-        return context, "VALID"
+            if valid:
+                return context, "VALID"
+            if first_group:
+                latest_invalid_reason = reason
+                first_group = False
+            # Continue to the next older candidate only when the newest one
+            # failed validation; the same freshness and PIT checks apply to it.
+        return None, latest_invalid_reason
