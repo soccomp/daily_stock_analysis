@@ -166,8 +166,10 @@ def _parse_smoke_timeout(value: Optional[float], *, backend_id: str) -> int:
     )
     if value is None:
         return spec.default
-    if isinstance(value, float) and not value.is_integer():
-        raise _numeric_config_error(backend_id=backend_id, spec=spec, value=value, reason="invalid_integer")
+    if isinstance(value, float):
+        if not value.is_integer():
+            raise _numeric_config_error(backend_id=backend_id, spec=spec, value=value, reason="invalid_integer")
+        value = int(value)
     error = _validate_int_config_value(backend_id=backend_id, value=value, spec=spec)
     if error is not None:
         raise error
