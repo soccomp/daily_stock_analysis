@@ -2912,7 +2912,7 @@ class ScreeningOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(pipeline_config.daily_fetch_max_workers, 1)
         self.assertEqual(
             pipeline_config.snapshot_source_priority,
-            ["sina", "efinance", "akshare_em", "em_datacenter"],
+            ["em_datacenter", "sina", "efinance", "akshare_em"],
         )
         self.assertEqual(pipeline_config.data_dir, screening_service.DSA_SCREENING_DATA_DIR)
         self.assertEqual(
@@ -3607,7 +3607,7 @@ class ScreeningOpportunitiesApiTestCase(unittest.TestCase):
         with patch.dict(screening_service.os.environ, {"SNAPSHOT_SOURCE_PRIORITY": ""}, clear=False):
             env = screening_service._build_screening_runtime_env(config)
 
-        self.assertEqual(env["SNAPSHOT_SOURCE_PRIORITY"], "tushare,sina,efinance,akshare_em,em_datacenter")
+        self.assertEqual(env["SNAPSHOT_SOURCE_PRIORITY"], "tushare,em_datacenter,sina,efinance,akshare_em")
 
     def test_screening_runtime_env_preserves_responses_api_surface(self) -> None:
         config = Config(

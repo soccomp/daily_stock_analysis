@@ -21,8 +21,11 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _PACKAGE_DIR = Path(__file__).resolve().parent
 DEFAULT_POST_ANALYZERS = ["scorecard"]
 DEFAULT_LLM_MODEL = "gemini/gemini-2.5-flash"
-DEFAULT_SNAPSHOT_SOURCE_PRIORITY = ["sina", "efinance", "akshare_em", "em_datacenter"]
-TUSHARE_FIRST_SOURCE_PRIORITY = ["tushare", "sina", "efinance", "akshare_em", "em_datacenter"]
+# EastMoney datacenter is the first complete no-token source. Sina does not
+# expose ``volume_ratio`` and therefore cannot satisfy the screening contract
+# on its own; wrapper-based EastMoney sources remain later fallbacks.
+DEFAULT_SNAPSHOT_SOURCE_PRIORITY = ["em_datacenter", "sina", "efinance", "akshare_em"]
+TUSHARE_FIRST_SOURCE_PRIORITY = ["tushare", "em_datacenter", "sina", "efinance", "akshare_em"]
 _ENV_FILE_CACHE: dict[Path, tuple[tuple[int, int], dict[str, str]]] = {}
 _APPLIED_ENV_FILE_VALUES: dict[str, str] = {}
 
