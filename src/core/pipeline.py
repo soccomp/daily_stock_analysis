@@ -249,6 +249,7 @@ class StockAnalysisPipeline:
         investment_canary_transport: Optional["AthenaCanaryTransport"] = None,
         investment_scorecard_service: Optional["DecisionScorecardService"] = None,
         investment_runtime_paths_disabled: bool = False,
+        decision_mode: str = "ai",
     ):
         """
         初始化调度器
@@ -282,13 +283,21 @@ class StockAnalysisPipeline:
         self._investment_canary_transport = investment_canary_transport
         self._investment_scorecard_service = investment_scorecard_service
         self._investment_runtime_paths_disabled = bool(investment_runtime_paths_disabled)
+        normalized_decision_mode = str(decision_mode or "ai").strip().lower()
+        if normalized_decision_mode not in {"ai", "rules"}:
+            raise ValueError("decision_mode must be 'ai' or 'rules'")
+        self.decision_mode = normalized_decision_mode
         
         # 初始化各模块
         self.db = get_db()
         self.fetcher_manager = DataFetcherManager()
         # 不再单独创建 akshare_fetcher，统一使用 fetcher_manager 获取增强数据
         self.trend_analyzer = StockTrendAnalyzer()  # 技术分析器
-        self.analyzer = GeminiAnalyzer(config=self.config, skills=self.analysis_skills)
+        self.analyzer = (
+            None
+            if self.decision_mode == "rules"
+            else GeminiAnalyzer(config=self.config, skills=self.analysis_skills)
+        )
         self.notifier = NotificationService(source_message=source_message)
         self.market_structure_service = MarketStructureService(fetcher_manager=self.fetcher_manager)
         self.market_hotspot_service: Optional[MarketHotspotService] = None
@@ -305,18 +314,21 @@ class StockAnalysisPipeline:
         
         # 初始化搜索服务（可选，初始化失败不应阻断主分析流程）
         try:
-            self.search_service = SearchService(
-                bocha_keys=self.config.bocha_api_keys,
-                tavily_keys=self.config.tavily_api_keys,
-                anspire_keys=self.config.anspire_api_keys,
-                brave_keys=self.config.brave_api_keys,
-                serpapi_keys=self.config.serpapi_keys,
-                minimax_keys=self.config.minimax_api_keys,
-                searxng_base_urls=self.config.searxng_base_urls,
-                searxng_public_instances_enabled=self.config.searxng_public_instances_enabled,
-                news_max_age_days=self.config.news_max_age_days,
-                news_strategy_profile=getattr(self.config, "news_strategy_profile", "short"),
-            )
+            if self.decision_mode == "rules":
+                self.search_service = None
+            else:
+                self.search_service = SearchService(
+                    bocha_keys=self.config.bocha_api_keys,
+                    tavily_keys=self.config.tavily_api_keys,
+                    anspire_keys=self.config.anspire_api_keys,
+                    brave_keys=self.config.brave_api_keys,
+                    serpapi_keys=self.config.serpapi_keys,
+                    minimax_keys=self.config.minimax_api_keys,
+                    searxng_base_urls=self.config.searxng_base_urls,
+                    searxng_public_instances_enabled=self.config.searxng_public_instances_enabled,
+                    news_max_age_days=self.config.news_max_age_days,
+                    news_strategy_profile=getattr(self.config, "news_strategy_profile", "short"),
+                )
         except Exception as exc:
             logger.warning("搜索服务初始化失败，将以无搜索模式运行: %s", exc, exc_info=True)
             self.search_service = None
@@ -539,12 +551,13 @@ class StockAnalysisPipeline:
             # config.is_agent_available() so that users who only configured an
             # API Key for the traditional analysis path are not silently
             # switched to Agent mode (which is slower and more expensive).
-            use_agent = getattr(self.config, 'agent_mode', False)
-            if not use_agent:
+            rule_mode = getattr(self, "decision_mode", "ai") == "rules"
+            use_agent = False if rule_mode else getattr(self.config, 'agent_mode', False)
+            if not rule_mode and not use_agent:
                 if self.analysis_skills:
                     use_agent = True
                     logger.info(f"{stock_name}({code}) Auto-enabled agent mode due to request skills: {self.analysis_skills}")
-            if not use_agent:
+            if not rule_mode and not use_agent:
                 # Auto-enable agent mode when specific skills are configured (e.g., scheduled task with strategy)
                 configured_skills = getattr(self.config, 'agent_skills', [])
                 if configured_skills and configured_skills != ['all']:
@@ -643,7 +656,9 @@ class StockAnalysisPipeline:
             )
             news_result_count: Optional[int] = None
             self._emit_progress(46, f"{stock_name}：正在检索新闻与舆情")
-            if self.search_service is not None and self.search_service.is_available:
+            if rule_mode:
+                logger.info(f"{stock_name}({code}) 规则决策模式跳过实时新闻搜索；新闻不参与核心动作")
+            elif self.search_service is not None and self.search_service.is_available:
                 logger.info(f"{stock_name}({code}) 开始多维度情报搜索...")
 
                 # 使用多维度搜索（最多5次搜索）
@@ -778,50 +793,65 @@ class StockAnalysisPipeline:
                     f"{stock_name}：LLM 正在生成分析结果（已接收 {chars_received} 字符）",
                 )
 
-            self._emit_progress(64, f"{stock_name}：正在请求 LLM 生成报告")
-            llm_started_at = time.monotonic()
-            llm_provider, llm_model = generation_backend_observability_identity(self.config)
-            try:
-                record_llm_run_started(
-                    provider=llm_provider,
-                    model=llm_model,
-                    call_type="analysis",
+            if rule_mode:
+                from src.investment.rule_decision import build_rule_analysis_result
+
+                self._emit_progress(64, f"{stock_name}：正在执行确定性规则决策")
+                result = build_rule_analysis_result(
+                    code=code,
+                    name=stock_name,
+                    trend_result=trend_result,
+                    enhanced_context=enhanced_context,
+                    decision_context=portfolio_context,
+                    fundamental_context=fundamental_context,
+                    market_structure_context=market_structure_context,
+                    report_language=report_language,
                 )
-                result = self.analyzer.analyze(
-                    enhanced_context,
-                    news_context=news_context,
-                    progress_callback=self._emit_progress,
-                    stream_progress_callback=_on_llm_stream,
-                    analysis_context_pack_summary=analysis_context_pack_summary,
-                )
-                llm_duration_ms = int((time.monotonic() - llm_started_at) * 1000)
-                record_llm_run(
-                    success=bool(result and getattr(result, "success", True)),
-                    model=getattr(result, "model_used", None) if result else None,
-                    call_type="analysis",
-                    duration_ms=llm_duration_ms,
-                    error_type=(
-                        None
-                        if result and getattr(result, "success", True)
-                        else "AnalysisResultError"
-                    ),
-                    error_message=(
-                        getattr(result, "error_message", None)
-                        if result and not getattr(result, "success", True)
-                        else ("LLM returned empty result" if result is None else None)
-                    ),
-                )
-            except Exception as exc:
-                record_llm_run(
-                    success=False,
-                    provider=llm_provider,
-                    model=llm_model,
-                    call_type="analysis",
-                    duration_ms=int((time.monotonic() - llm_started_at) * 1000),
-                    error_type=type(exc).__name__,
-                    error_message=exc,
-                )
-                raise
+            else:
+                self._emit_progress(64, f"{stock_name}：正在请求 LLM 生成报告")
+                llm_started_at = time.monotonic()
+                llm_provider, llm_model = generation_backend_observability_identity(self.config)
+                try:
+                    record_llm_run_started(
+                        provider=llm_provider,
+                        model=llm_model,
+                        call_type="analysis",
+                    )
+                    result = self.analyzer.analyze(
+                        enhanced_context,
+                        news_context=news_context,
+                        progress_callback=self._emit_progress,
+                        stream_progress_callback=_on_llm_stream,
+                        analysis_context_pack_summary=analysis_context_pack_summary,
+                    )
+                    llm_duration_ms = int((time.monotonic() - llm_started_at) * 1000)
+                    record_llm_run(
+                        success=bool(result and getattr(result, "success", True)),
+                        model=getattr(result, "model_used", None) if result else None,
+                        call_type="analysis",
+                        duration_ms=llm_duration_ms,
+                        error_type=(
+                            None
+                            if result and getattr(result, "success", True)
+                            else "AnalysisResultError"
+                        ),
+                        error_message=(
+                            getattr(result, "error_message", None)
+                            if result and not getattr(result, "success", True)
+                            else ("LLM returned empty result" if result is None else None)
+                        ),
+                    )
+                except Exception as exc:
+                    record_llm_run(
+                        success=False,
+                        provider=llm_provider,
+                        model=llm_model,
+                        call_type="analysis",
+                        duration_ms=int((time.monotonic() - llm_started_at) * 1000),
+                        error_type=type(exc).__name__,
+                        error_message=exc,
+                    )
+                    raise
 
             # Step 7.5: 填充分析时的价格信息到 result
             if result:
@@ -839,7 +869,13 @@ class StockAnalysisPipeline:
             if result:
                 fill_price_position_if_needed(result, trend_result, realtime_quote)
                 action_source_advice = getattr(result, "operation_advice", None)
-                stabilize_decision_with_structure(result, trend_result, fundamental_context)
+                # Rules mode is the action authority for the lightweight
+                # simulation profile.  The legacy capital-flow/AI-era
+                # stabilizer is intentionally not allowed to turn a valid
+                # deterministic BUY back into HOLD when optional structure
+                # data is unavailable.
+                if not rule_mode:
+                    stabilize_decision_with_structure(result, trend_result, fundamental_context)
                 adjustments = apply_phase_decision_guardrails(
                     result,
                     market_phase_summary=market_phase_summary,
@@ -849,12 +885,14 @@ class StockAnalysisPipeline:
                 )
                 if adjustments:
                     logger.info("[phase_decision_guardrail] Applied adjustments for %s: %s", code, adjustments)
-                market_context_adjustments = apply_daily_market_context_guardrail(
-                    result,
-                    daily_market_context=enhanced_context.get("daily_market_context"),
-                    report_language=getattr(result, "report_language", None)
-                    or getattr(self.config, "report_language", "zh"),
-                )
+                market_context_adjustments = []
+                if not rule_mode:
+                    market_context_adjustments = apply_daily_market_context_guardrail(
+                        result,
+                        daily_market_context=enhanced_context.get("daily_market_context"),
+                        report_language=getattr(result, "report_language", None)
+                        or getattr(self.config, "report_language", "zh"),
+                    )
                 if market_context_adjustments:
                     logger.info(
                         "[daily_market_context_guardrail] Applied adjustments for %s: %s",

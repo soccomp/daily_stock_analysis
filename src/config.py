@@ -888,6 +888,20 @@ class Config:
     tickflow_priority: int = 2
     tickflow_batch_daily_enabled: bool = True
     tickflow_batch_size: int = 100
+    # Windows GoldMiner read-only market-data gateway.  The SSH mode discovers
+    # the short-lived client session token remotely and never stores it here.
+    goldminer_market_enabled: bool = False
+    goldminer_market_base_url: Optional[str] = None
+    goldminer_market_auth_token: Optional[str] = None
+    goldminer_market_ssh_host: Optional[str] = None
+    goldminer_market_ssh_user: str = "Administrator"
+    goldminer_market_ssh_key: Optional[str] = None
+    goldminer_market_ssh_port: int = 22
+    goldminer_market_remote_base_url: str = "http://127.0.0.1:7051"
+    goldminer_market_timeout_seconds: float = 8.0
+    goldminer_market_priority: int = 0
+    goldminer_market_quote_cache_seconds: float = 2.0
+    goldminer_market_batch_size: int = 50
     finnhub_api_key: Optional[str] = None
     alphavantage_api_key: Optional[str] = None
     longbridge_app_key: Optional[str] = None
@@ -1852,6 +1866,49 @@ class Config:
             tickflow_priority=parse_env_int(os.getenv('TICKFLOW_PRIORITY'), 2, field_name='TICKFLOW_PRIORITY', minimum=0),
             tickflow_batch_daily_enabled=parse_env_bool(os.getenv('TICKFLOW_BATCH_DAILY_ENABLED'), default=True),
             tickflow_batch_size=parse_env_int(os.getenv('TICKFLOW_BATCH_SIZE'), 100, field_name='TICKFLOW_BATCH_SIZE', minimum=1),
+            goldminer_market_enabled=parse_env_bool(
+                os.getenv('GOLDMINER_MARKET_ENABLED'),
+                default=False,
+            ),
+            goldminer_market_base_url=(os.getenv('GOLDMINER_MARKET_BASE_URL') or '').strip() or None,
+            goldminer_market_auth_token=(os.getenv('GOLDMINER_MARKET_AUTH_TOKEN') or '').strip() or None,
+            goldminer_market_ssh_host=(os.getenv('GOLDMINER_MARKET_SSH_HOST') or '').strip() or None,
+            goldminer_market_ssh_user=(os.getenv('GOLDMINER_MARKET_SSH_USER') or 'Administrator').strip(),
+            goldminer_market_ssh_key=(os.getenv('GOLDMINER_MARKET_SSH_KEY') or '').strip() or None,
+            goldminer_market_ssh_port=parse_env_int(
+                os.getenv('GOLDMINER_MARKET_SSH_PORT'),
+                22,
+                field_name='GOLDMINER_MARKET_SSH_PORT',
+                minimum=1,
+                maximum=65535,
+            ),
+            goldminer_market_remote_base_url=(
+                os.getenv('GOLDMINER_MARKET_REMOTE_BASE_URL') or 'http://127.0.0.1:7051'
+            ).strip().rstrip('/'),
+            goldminer_market_timeout_seconds=parse_env_float(
+                os.getenv('GOLDMINER_MARKET_TIMEOUT_SECONDS'),
+                8.0,
+                field_name='GOLDMINER_MARKET_TIMEOUT_SECONDS',
+                minimum=0.1,
+            ),
+            goldminer_market_priority=parse_env_int(
+                os.getenv('GOLDMINER_MARKET_PRIORITY'),
+                0,
+                field_name='GOLDMINER_MARKET_PRIORITY',
+                minimum=0,
+            ),
+            goldminer_market_quote_cache_seconds=parse_env_float(
+                os.getenv('GOLDMINER_MARKET_QUOTE_CACHE_SECONDS'),
+                2.0,
+                field_name='GOLDMINER_MARKET_QUOTE_CACHE_SECONDS',
+                minimum=0.0,
+            ),
+            goldminer_market_batch_size=parse_env_int(
+                os.getenv('GOLDMINER_MARKET_BATCH_SIZE'),
+                50,
+                field_name='GOLDMINER_MARKET_BATCH_SIZE',
+                minimum=1,
+            ),
             finnhub_api_key=os.getenv('FINNHUB_API_KEY') or None,
             alphavantage_api_key=os.getenv('ALPHAVANTAGE_API_KEY') or None,
             longbridge_app_key=os.getenv('LONGBRIDGE_APP_KEY') or None,
@@ -3140,11 +3197,10 @@ class Config:
     @classmethod
     def _resolve_realtime_source_priority(cls) -> str:
         """
-        Resolve realtime source priority with automatic tushare injection.
+        Resolve realtime source priority with automatic provider injection.
 
-        When TUSHARE_TOKEN is configured but REALTIME_SOURCE_PRIORITY is not
-        explicitly set, automatically prepend 'tushare' to the default priority
-        so that the paid data source is utilized for realtime quotes as well.
+        When an explicitly enabled optional provider is configured but
+        REALTIME_SOURCE_PRIORITY is not set, prepend it to the default chain.
         """
         explicit = os.getenv('REALTIME_SOURCE_PRIORITY')
         default_priority = 'tencent,akshare_sina,efinance,akshare_em'
@@ -3153,19 +3209,16 @@ class Config:
             # User explicitly set priority, respect it
             return explicit
 
-        tushare_token = os.getenv('TUSHARE_TOKEN', '').strip()
-        if tushare_token:
-            # Token configured but no explicit priority override
-            # Prepend tushare so the paid source is tried first
-            import logging
-            logger = logging.getLogger(__name__)
-            resolved = f'tushare,{default_priority}'
-            logger.info(
-                f"TUSHARE_TOKEN detected, auto-injecting tushare into realtime priority: {resolved}"
-            )
-            return resolved
-
-        return default_priority
+        prefixes = []
+        if parse_env_bool(os.getenv('GOLDMINER_MARKET_ENABLED'), default=False):
+            prefixes.append('goldminer')
+        if os.getenv('TUSHARE_TOKEN', '').strip():
+            prefixes.append('tushare')
+        if not prefixes:
+            return default_priority
+        resolved = ','.join([*prefixes, default_priority])
+        logger.info("Optional market providers configured, auto-injecting realtime priority: %s", resolved)
+        return resolved
 
     @classmethod
     def reset_instance(cls) -> None:

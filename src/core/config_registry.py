@@ -930,6 +930,32 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "validation": {"min": 1, "max": 500},
         "display_order": 19,
     },
+    "GOLDMINER_MARKET_ENABLED": {
+        "title": "Windows GoldMiner Market Data",
+        "description": "Enable the read-only Windows GoldMiner market-data adapter. Configure its SSH transport in the environment; failures fall back to existing providers.",
+        "category": "data_source",
+        "data_type": "boolean",
+        "ui_control": "switch",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "false",
+        "options": [],
+        "validation": {},
+        "display_order": 19,
+        "help_key": "settings.data_source.goldminer_market",
+        "examples": [
+            "GOLDMINER_MARKET_ENABLED=false",
+            "GOLDMINER_MARKET_ENABLED=true",
+        ],
+        "docs": [
+            {
+                "label": "完整指南：数据源配置",
+                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#数据源配置",
+            },
+        ],
+        "warning_codes": [],
+    },
     "STOCK_INDEX_REMOTE_UPDATE_ENABLED": {
         "title": "Remote Stock Index Updates",
         "description": "Automatically refresh the local stock autocomplete index from the built-in GitHub main source.",
@@ -995,7 +1021,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     },
     "REALTIME_SOURCE_PRIORITY": {
         "title": "Realtime Source Priority",
-        "description": "Comma-separated priority for realtime quote providers.",
+        "description": "Comma-separated priority for realtime quote providers. When GoldMiner is enabled and this is unset, goldminer is automatically prepended.",
         "category": "data_source",
         "data_type": "string",
         "ui_control": "text",

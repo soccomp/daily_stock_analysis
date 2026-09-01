@@ -393,6 +393,112 @@ def test_scheduler_owned_market_context_refreshes_in_cycle_and_reaches_durable_n
     assert ("ATHENA_HANDOFF_ACK", "NO_ACTION") in stages
 
 
+def test_rules_proposal_path_does_not_block_on_missing_market_context(
+    isolated_db,
+):
+    """Rules-first simulation can produce a durable outcome without a slow review."""
+
+    provider_calls: list[object] = []
+
+    class RuleRunner:
+        decision_mode = "rules"
+
+        def complete(self, **_kwargs):  # pragma: no cover - no candidates are selected
+            raise AssertionError("the empty candidate path must not analyze a symbol")
+
+    class EmptyCoordinator:
+        def plan(self, **_kwargs):
+            return []
+
+    def unexpected_provider(**_kwargs):
+        provider_calls.append(object())
+        raise AssertionError("rules mode must not generate market review")
+
+    service = ProposalHandoffLoopService(
+        config=_config(),
+        analysis_runner=RuleRunner(),
+        publisher=SimpleNamespace(),
+        snapshot_source=SimpleNamespace(capture_snapshot=lambda: object()),
+        trigger_coordinator=EmptyCoordinator(),
+        market_context_provider=unexpected_provider,
+        clock=lambda: NOW,
+    )
+
+    result = service.run_cycle(
+        scheduled_for=NOW,
+        lock_acquired_at=NOW,
+        require_market_review_context=True,
+    )
+
+    assert result.status == "NO_ACTION"
+    assert result.market_context_admission == "OPTIONAL_RULES_MODE"
+    assert provider_calls == []
+    assert result.no_action_outcome is not None
+    stages = {
+        (item["stage"], item["state"], item["reason_code"])
+        for item in CanonicalCycleRepository(isolated_db).stage_events(result.cycle_id)
+    }
+    assert ("MARKET_CONTEXT", "NOT_ENTERED", "MARKET_CONTEXT_OPTIONAL_RULES_MODE") in stages
+    assert ("ATHENA_HANDOFF_ACK", "NO_ACTION", "NO_CANDIDATES") in stages
+
+
+def test_rules_proposal_path_does_not_use_llm_readiness_gate(
+    isolated_db,
+    monkeypatch,
+):
+    """A valid optional context must not reintroduce the AI dependency gate."""
+
+    monkeypatch.setattr(
+        "src.services.dependency_health.evaluate_dsa_research_admission",
+        lambda _snapshot: {
+            "can_attempt": False,
+            "blocked_reasons": ["LLM_RESEARCH:STALE"],
+        },
+    )
+
+    class RuleRunner:
+        decision_mode = "rules"
+
+        def complete(self, **_kwargs):  # pragma: no cover - no candidates are selected
+            raise AssertionError("the empty candidate path must not analyze a symbol")
+
+    class EmptyCoordinator:
+        def plan(self, **_kwargs):
+            return []
+
+    def unexpected_provider(**_kwargs):
+        raise AssertionError("rules mode must not generate market review")
+
+    context = {
+        "source_task_id": "review",
+        "market_review_id": "review",
+        "context_id": "context",
+        "trade_date": NOW.date().isoformat(),
+        "as_of": NOW.isoformat(),
+        "provenance": {"source_task_id": "review"},
+    }
+    service = ProposalHandoffLoopService(
+        config=_config(),
+        analysis_runner=RuleRunner(),
+        publisher=SimpleNamespace(),
+        snapshot_source=SimpleNamespace(capture_snapshot=lambda: object()),
+        trigger_coordinator=EmptyCoordinator(),
+        market_context_provider=unexpected_provider,
+        clock=lambda: NOW,
+    )
+
+    result = service.run_cycle(
+        scheduled_for=NOW,
+        market_review_context=context,
+        lock_acquired_at=NOW,
+        require_market_review_context=True,
+    )
+
+    assert result.status == "NO_ACTION"
+    assert result.market_context_admission == "LEGACY_UNVERIFIED"
+    assert result.no_action_outcome is not None
+
+
 @pytest.mark.parametrize("failure_mode", ["generation", "persistence", "pit"])
 def test_scheduler_owned_market_context_faults_block_before_research(
     isolated_db,

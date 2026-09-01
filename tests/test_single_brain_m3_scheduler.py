@@ -78,7 +78,7 @@ def test_screening_is_a_separate_responsibility_under_the_same_scheduler_authori
     assert tasks[0]["interval_seconds"] == 3600
     assert tasks[0]["daily_due_time"] == "09:30"
     assert tasks[1]["interval_seconds"] == 30
-    assert tasks[1]["daily_due_time"] == "14:45"
+    assert tasks[1]["daily_due_time"] == "15:05"
     assert _restricted_single_brain_scheduler_mode(tasks) == SCHEDULER_MODE_PROPOSAL_HANDOFF_ONLY
 
 
@@ -92,10 +92,15 @@ def test_registered_scheduler_mode_change_fails_closed_until_reconciled():
 
     with patch(
         "src.investment.m2.orchestration.M2ShadowLoopService.from_config"
-    ) as factory:
+    ) as factory, patch(
+        "src.services.runtime_scheduler._persist_proposal_handoff_terminal"
+    ) as persist_terminal:
         task["task"]()
 
     factory.assert_not_called()
+    persist_terminal.assert_called_once()
+    assert persist_terminal.call_args.kwargs["status"] == "SKIPPED"
+    assert persist_terminal.call_args.kwargs["reason_code"] == "SCHEDULER_MODE_CHANGED"
 
 
 @pytest.mark.parametrize(

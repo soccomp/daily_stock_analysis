@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from src.analyzer import AnalysisResult
 from src.core.trading_calendar import get_market_for_stock
@@ -25,6 +26,12 @@ from src.investment.contracts.investment_proposal import InvestmentProposal
 from src.investment.contracts.portfolio_snapshot import PortfolioSnapshot
 from src.investment.contracts.research_bundle import ModelProvenance, ResearchBundle
 from src.investment.contracts.research_trigger import ResearchTrigger
+from src.investment.contracts.strategy_evidence import (
+    PALLAS_008_RANKING_METHOD,
+    PALLAS_008_STRATEGY_ID,
+    build_pallas008_strategy_evidence,
+)
+from src.investment.rule_decision import SIMULATION_RELAXED_RULES_PROFILE
 from src.investment.research.adapter import ResearchBundleAdapter
 from src.investment.shadow_wiring import InvestmentShadowWiringService, ShadowWiringRejected
 from src.schemas.decision_action import normalize_decision_action
@@ -74,6 +81,68 @@ def _structured_position_target(result: AnalysisResult) -> Decimal | None:
     if len(matches) != 1 or not Decimal("0") < matches[0] <= Decimal("1"):
         return None
     return matches[0].quantize(Decimal("0.000001"), rounding=ROUND_DOWN)
+
+
+def _simulation_relaxed_strategy_evidence(
+    result: AnalysisResult,
+    *,
+    trigger: ResearchTrigger | None,
+    now: datetime,
+    source_report_id: int,
+) -> dict[str, Any] | None:
+    """Project the rule score into the existing P008 contract for simulation.
+
+    The projection is intentionally narrow: it is emitted only for the
+    simulation-relaxed BUY profile when an upstream screening trigger did not
+    already carry P008 evidence.  Athena still applies its normal score/rank
+    policy to the resulting proposal.
+    """
+
+    dashboard = getattr(result, "dashboard", None)
+    rule_decision = dashboard.get("rule_decision") if isinstance(dashboard, Mapping) else None
+    if not isinstance(rule_decision, Mapping):
+        return None
+    if rule_decision.get("profile") != SIMULATION_RELAXED_RULES_PROFILE:
+        return None
+    calibration = dashboard.get("decision_score_calibration")
+    raw_score = (
+        calibration.get("score")
+        if isinstance(calibration, Mapping)
+        else getattr(result, "sentiment_score", None)
+    )
+    try:
+        score = (Decimal(str(raw_score)) / Decimal("100")).quantize(
+            Decimal("0.000001"), rounding=ROUND_DOWN
+        )
+    except (ArithmeticError, TypeError, ValueError):
+        return None
+    if not score.is_finite() or not Decimal("0") <= score <= Decimal("1"):
+        return None
+    cutoff = trigger.effective_at if trigger is not None else now
+    if cutoff.tzinfo is None or cutoff.utcoffset() is None:
+        return None
+    return build_pallas008_strategy_evidence(
+        strategy_id=PALLAS_008_STRATEGY_ID,
+        strategy_version="1.0",
+        ranking_method=PALLAS_008_RANKING_METHOD,
+        ranking_score=score,
+        discovery_rank=1,
+        ranking_components={
+            "momentum_20": score,
+            "momentum_60": score,
+            "trend_strength": score,
+            "liquidity_ratio": Decimal("0.500000"),
+            "market_strength": Decimal("0.000000"),
+        },
+        market_strength_raw=Decimal("0.000000"),
+        latest_completed_trade_date=cutoff.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat(),
+        decision_cutoff=cutoff,
+        completion_status="CLOSE_CONFIRMED",
+        completion_basis="RULES_SIMULATION_RELAXED_TREND_SCORE",
+        quantitative_input_reference=f"dsa-analysis-history:{source_report_id}",
+        intraday_prefilter_observed_at=None,
+        intraday_prefilter_reference=None,
+    )
 
 
 @dataclass(frozen=True)
@@ -141,6 +210,22 @@ class InvestmentProposalBuilder:
                 authoritative_snapshot=authoritative_snapshot,
             )
 
+        trigger = (
+            research_trigger
+            if isinstance(research_trigger, ResearchTrigger)
+            else ResearchTrigger.model_validate_json(json.dumps(research_trigger))
+            if research_trigger is not None
+            else None
+        )
+        strategy_evidence = trigger.strategy_evidence if trigger is not None else None
+        if strategy_evidence is None and action == "BUY":
+            strategy_evidence = _simulation_relaxed_strategy_evidence(
+                result,
+                trigger=trigger,
+                now=now,
+                source_report_id=source_report_id,
+            )
+
         entry_floor = entry_limit = stop_price = target_price = None
         expected_return = Decimal("0")
         if action == "BUY":
@@ -172,27 +257,13 @@ class InvestmentProposalBuilder:
                         snapshot=authoritative_snapshot,
                         now=now,
                     ))
-                trigger_has_strategy_evidence = (
-                    isinstance(research_trigger, ResearchTrigger)
-                    and research_trigger.strategy_evidence is not None
-                ) or (
-                    isinstance(research_trigger, dict)
-                    and research_trigger.get("strategy_evidence") is not None
-                )
-                if trigger_has_strategy_evidence and action in {"BUY", "REDUCE", "SELL"}:
+                if strategy_evidence is not None and action in {"BUY", "REDUCE", "SELL"}:
                     evidence_items.append(price_plan_evidence(
                         context_snapshot=context_snapshot,
                         source_report_id=source_report_id,
                         now=now,
                     ))
                 data_evidence = tuple(evidence_items)
-        trigger = (
-            research_trigger
-            if isinstance(research_trigger, ResearchTrigger)
-            else ResearchTrigger.model_validate_json(json.dumps(research_trigger))
-            if research_trigger is not None
-            else None
-        )
         research = ResearchBundleAdapter.from_dsa_views(
             research_id=f"research-{identity_hash[:32]}",
             trace_id=cycle,
@@ -206,7 +277,7 @@ class InvestmentProposalBuilder:
             candidate_provenance=candidate_provenance,
             supersedes_id=trigger.supersedes_trigger_id if trigger is not None else None,
             research_trigger=trigger,
-            strategy_evidence=trigger.strategy_evidence if trigger is not None else None,
+            strategy_evidence=strategy_evidence,
             data_evidence=data_evidence,
             market_regime=InvestmentShadowWiringService._text(
                 getattr(result, "trend_prediction", None), "No separate market-regime view."

@@ -11,8 +11,8 @@ import src.investment.screening_scheduler as sched_mod
 from src.investment.screening_scheduler import DailyScreeningScheduler
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
-TRADING_DAY = datetime(2026, 8, 18, 14, 50, 0, tzinfo=CN_TZ)  # Tuesday
-RETRY_DAY = datetime(2026, 8, 18, 14, 45, 0, tzinfo=CN_TZ)
+TRADING_DAY = datetime(2026, 8, 18, 15, 10, 0, tzinfo=CN_TZ)  # Tuesday, after close
+RETRY_DAY = datetime(2026, 8, 18, 15, 5, 0, tzinfo=CN_TZ)
 
 
 class _FakeDB:
@@ -185,6 +185,43 @@ def test_empty_run_id_is_not_reported_as_completed(tmp_path, monkeypatch):
     assert locked["status"] == "SCREENING_FAILED_FOR_DAY"
 
 
+def test_deterministic_llm_rank_fallback_is_accepted(tmp_path, monkeypatch):
+    monkeypatch.setattr(sched_mod, "is_market_open", lambda m, d: True)
+
+    def run_screen(**_kwargs):
+        return {
+            "run_id": "run-deterministic-fallback",
+            "candidate_count": 1,
+            "warnings": ["LLM ranking failed: fell back to screen_score"],
+            "source_errors": [],
+        }
+
+    scheduler = _scheduler(tmp_path, run_screen=run_screen, now=TRADING_DAY)
+    result = scheduler.tick()
+
+    assert result["status"] == "COMPLETED"
+    assert result["run_id"] == "run-deterministic-fallback"
+
+
+def test_unclassified_screening_warning_remains_fatal(tmp_path, monkeypatch):
+    monkeypatch.setattr(sched_mod, "is_market_open", lambda m, d: True)
+    clock = {"now": RETRY_DAY}
+
+    def run_screen(**_kwargs):
+        return {
+            "run_id": "run-unknown-warning",
+            "candidate_count": 1,
+            "warnings": ["snapshot provider returned partial data"],
+            "source_errors": [],
+        }
+
+    scheduler = _scheduler(tmp_path, run_screen=run_screen, now=lambda: clock["now"])
+    results = _run_all_natural_attempts(scheduler, clock)
+
+    assert results[-1]["status"] == "FAILED"
+    assert results[-1]["failure_kind"] == "DISCOVERY_QUALITY_FAILED"
+
+
 def test_all_retries_exhausted_fails_soft(tmp_path, monkeypatch):
     monkeypatch.setattr(sched_mod, "is_market_open", lambda m, d: True)
     calls = []
@@ -292,7 +329,7 @@ def test_before_schedule_time_does_not_run(tmp_path, monkeypatch):
     assert calls == []
 
 
-def test_after_session_cutoff_does_not_catch_up_screening(tmp_path, monkeypatch):
+def test_post_close_schedule_catches_up_screening(tmp_path, monkeypatch):
     monkeypatch.setattr(sched_mod, "is_market_open", lambda m, d: True)
     calls = []
 
@@ -300,8 +337,47 @@ def test_after_session_cutoff_does_not_catch_up_screening(tmp_path, monkeypatch)
         calls.append(kwargs)
         return {"run_id": "late"}
 
-    late = TRADING_DAY.replace(hour=15, minute=1)
+    late = TRADING_DAY.replace(hour=15, minute=6)
     s = _scheduler(tmp_path, run_screen=run_screen, now=late)
+    result = s.tick()
+
+    assert result["status"] == "COMPLETED"
+    assert result["run_id"] == "late"
+    assert len(calls) == 1
+
+
+def test_pre_close_is_still_rejected_even_when_scheduler_is_polled(tmp_path, monkeypatch):
+    monkeypatch.setattr(sched_mod, "is_market_open", lambda m, d: True)
+    calls = []
+
+    def run_screen(**kwargs):
+        calls.append(kwargs)
+        return {"run_id": "too-early"}
+
+    before_close = TRADING_DAY.replace(hour=14, minute=59)
+    s = _scheduler(tmp_path, run_screen=run_screen, now=before_close)
+    result = s.tick()
+
+    assert result["status"] == "BEFORE_SCHEDULE_TIME"
+    assert calls == []
+
+
+def test_explicit_pre_close_schedule_keeps_cutoff_guard(tmp_path, monkeypatch):
+    monkeypatch.setattr(sched_mod, "is_market_open", lambda m, d: True)
+    calls = []
+
+    def run_screen(**kwargs):
+        calls.append(kwargs)
+        return {"run_id": "pre-close"}
+
+    late = TRADING_DAY.replace(hour=15, minute=1)
+    s = DailyScreeningScheduler(
+        state_path=tmp_path / "scheduler_state.json",
+        run_screen=run_screen,
+        now=lambda: late,
+        schedule_time=time(14, 45),
+        db_manager=_FakeDB(),
+    )
     result = s.tick()
 
     assert result["status"] == "AFTER_SESSION_CUTOFF"

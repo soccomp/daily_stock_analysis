@@ -29,6 +29,7 @@ from src.investment.m2.policy import CanonicalRiskPolicyLoader
 from src.investment.m2.repository import M2InputConflictError, M2OperationalRepository
 from src.investment.m2.research_trigger import ResearchTriggerCoordinator
 from src.investment.m2.runtime_diagnostics import analysis_failure_marker
+from src.investment.rule_decision import RULE_MODEL_ID
 from src.investment.m2.screening_candidates import (
     DatabaseScreeningCandidateSource,
     ScreeningCandidateSource,
@@ -96,12 +97,23 @@ class DSAAnalysisCompletionRunner:
         db_manager: DatabaseManager | None = None,
         pipeline_factory: Callable[..., Any] | None = None,
         query_source: str = "single_brain_m2_shadow",
+        decision_mode: str = "ai",
     ) -> None:
         self._config = config
         self._db = db_manager or DatabaseManager.get_instance()
         self._history = HistoryService(db_manager=self._db)
         self._pipeline_factory = pipeline_factory or self._default_pipeline_factory
         self._query_source = query_source
+        normalized_mode = str(decision_mode or "ai").strip().lower()
+        if normalized_mode not in {"ai", "rules"}:
+            raise ValueError("decision_mode must be 'ai' or 'rules'")
+        self._decision_mode = normalized_mode
+
+    @property
+    def decision_mode(self) -> str:
+        """Expose the action authority without making callers inspect private state."""
+
+        return self._decision_mode
 
     def complete(
         self,
@@ -110,6 +122,7 @@ class DSAAnalysisCompletionRunner:
         symbol: str,
         query_id: str,
         current_time: datetime,
+        decision_context: Mapping[str, Any] | None = None,
     ) -> AnalysisCompletion:
         existing = self._db.get_analysis_history(
             code=symbol,
@@ -127,6 +140,11 @@ class DSAAnalysisCompletionRunner:
             query_source=self._query_source,
             save_context_snapshot=True,
             investment_runtime_paths_disabled=True,
+            decision_mode=self._decision_mode,
+            portfolio_context=(
+                dict(decision_context) if isinstance(decision_context, Mapping) else None
+            ),
+            daily_market_context_allow_generate=self._decision_mode != "rules",
         )
         result = pipeline.process_single_stock(
             symbol,
@@ -161,6 +179,10 @@ class DSAAnalysisCompletionRunner:
         result = self._history._rebuild_analysis_result(raw_result, record)
         if not isinstance(result, AnalysisResult) or not result.success:
             raise M2ShadowBlocked("persisted DSA analysis result cannot be reconstructed")
+        if self._decision_mode == "rules" and result.model_used != RULE_MODEL_ID:
+            raise M2ShadowBlocked(
+                "persisted proposal decision was not produced by the rule authority"
+            )
         context = parse_json_field(record.context_snapshot)
         if not isinstance(context, dict):
             raise M2ShadowBlocked("persisted DSA analysis lacks a context snapshot")

@@ -420,6 +420,12 @@ daily_stock_analysis/
 | `TICKFLOW_KLINE_ADJUST` | TickFlow 日 K 复权模式：`none`、`forward`、`backward`、`forward_additive`、`backward_additive`。 | `none` | 可选 |
 | `TICKFLOW_BATCH_DAILY_ENABLED` | 是否启用 TickFlow 批量日 K 预取；权限不足会短期缓存失败状态，并继续走常规回退。 | `true` | 可选 |
 | `TICKFLOW_BATCH_SIZE` | TickFlow 日 K 与实时行情批量请求的单批最大标的数。 | `100` | 可选 |
+| `GOLDMINER_MARKET_ENABLED` | 启用 Windows 掘金（GoldMiner）只读行情适配器；启用后未显式设置 `REALTIME_SOURCE_PRIORITY` 时自动优先使用。 | `false` | 可选 |
+| `GOLDMINER_MARKET_SSH_HOST` | Windows 主机地址；SSH 模式下由远端 GoldMiner 客户端本地网关提供行情。 | - | SSH 模式必填 |
+| `GOLDMINER_MARKET_SSH_USER` / `GOLDMINER_MARKET_SSH_KEY` / `GOLDMINER_MARKET_SSH_PORT` | SSH 登录用户、私钥路径和端口。私钥只从本机文件读取，不写入仓库。 | `Administrator` / - / `22` | SSH 模式必填 |
+| `GOLDMINER_MARKET_REMOTE_BASE_URL` | Windows 端 GoldMiner 历史行情网关地址。 | `http://127.0.0.1:7051` | 可选 |
+| `GOLDMINER_MARKET_BASE_URL` / `GOLDMINER_MARKET_AUTH_TOKEN` | GoldMiner 与 Pallas 同机时使用的直接 HTTP 地址和会话凭证；凭证按敏感配置处理。 | - | 同机模式可选 |
+| `GOLDMINER_MARKET_TIMEOUT_SECONDS` / `GOLDMINER_MARKET_BATCH_SIZE` | 单次请求超时和多标的批量请求大小。 | `8` / `50` | 可选 |
 | `LONGBRIDGE_OAUTH_CLIENT_ID` | Longbridge OAuth client_id；留空且无 Legacy Access Token 时会兼容使用 `LONGBRIDGE_APP_KEY` | - | 可选 |
 | `LONGBRIDGE_OAUTH_TOKEN_CACHE_B64` | OAuth token 缓存文件的 base64 内容，供 GitHub Actions / Docker 等 headless 环境使用 | - | 可选 |
 | `LONGBRIDGE_APP_KEY` | Longbridge Legacy App Key；无 `LONGBRIDGE_ACCESS_TOKEN` 时也可作为 OAuth client_id 兼容别名 | - | 可选 |
@@ -430,7 +436,7 @@ daily_stock_analysis/
 | `ENABLE_REALTIME_TECHNICAL_INDICATORS` | 盘中实时技术面：启用时用实时价计算 MA5/MA10/MA20 与多头排列（Issue #234）；关闭则用昨日收盘 | `true` | 可选 |
 | `ENABLE_CHIP_DISTRIBUTION` | 启用筹码分布分析（该接口不稳定，云端部署建议关闭）。GitHub Actions 用户需在 Repository Variables 中设置 `ENABLE_CHIP_DISTRIBUTION=true` 方可启用；workflow 默认关闭。 | `true` | 可选 |
 | `ENABLE_EASTMONEY_PATCH` | 东财接口补丁：东财接口频繁失败（如 RemoteDisconnected、连接被关闭）时建议设为 `true`，注入 NID 令牌与随机 User-Agent 以降低被限流概率 | `false` | 可选 |
-| `REALTIME_SOURCE_PRIORITY` | 实时行情源优先级，逗号分隔，例如 `tencent,akshare_sina,efinance,akshare_em`；需要显式加入 `tickflow` 才会使用 TickFlow 实时行情。 | 见 `.env.example` | 可选 |
+| `REALTIME_SOURCE_PRIORITY` | 实时行情源优先级，逗号分隔，例如 `goldminer,tencent,akshare_sina,efinance,akshare_em`；显式设置后会覆盖自动注入。 | 见 `.env.example` | 可选 |
 | `ENABLE_FUNDAMENTAL_PIPELINE` | 基本面聚合总开关；关闭时仅返回 `not_supported` 块，不改变原分析链路 | `true` | 可选 |
 | `FUNDAMENTAL_STAGE_TIMEOUT_SECONDS` | 基本面阶段总时延预算（秒） | `8.0` | 可选 |
 | `FUNDAMENTAL_FETCH_TIMEOUT_SECONDS` | 单能力源调用超时（秒）；市场结构行业/概念排行也复用该预算 | `8.0` | 可选 |
@@ -449,6 +455,20 @@ daily_stock_analysis/
 > - TickFlow 日 K 默认 `TICKFLOW_KLINE_ADJUST=none`；日线 `volume` 从手统一转为股，`amount` 保持元口径。
 > - TickFlow 日 K 区间请求会显式传入 `start_time` / `end_time` / `count`；官方 quickstart 明确说明时间范围查询仍受 `count` 限制。若返回非空但行数打满 `count` 且首个返回交易日晚于请求起始交易日，系统会判定为疑似截断，不写入缓存并让 manager 继续回退。
 > - 批量分析时，`prefetch_daily_klines()` 会在逐股 `get_daily_data()` 之前预热进程内缓存，不改变对外调用路径。
+> - 配置 `GOLDMINER_MARKET_ENABLED=true` 和 SSH 参数后，GoldMiner 通过 Windows 客户端的只读历史 bars 接口提供 A 股股票、ETF 和指数的分钟/日线行情；SSH 模式下会在 Windows 端临时读取客户端会话凭证，Pallas 只接收脱敏后的行情 JSON。数据源失败会沿用现有 manager fallback，不会调用下单或账户接口。
+
+### Pallas 规则决策主路径
+
+`PROPOSAL_HANDOFF` 模式现在以现有结构化规则作为唯一动作权威，AI 不再参与买卖方向判断：
+
+- 为保持模拟盘主链路轻量，规则提案路径不再等待或主动生成大盘复盘。已有且通过校验的市场上下文仍会被复用；缺失、过期或慢生成时仅记录 `MARKET_CONTEXT_OPTIONAL_RULES_MODE`，继续执行规则分析与 Athena 仿真提案。大盘复盘、行业/概念排行和新闻保留为可选增强，不再成为规则提案的硬依赖；需要严格市场上下文的其他调用方仍遵守原有准入契约。
+- 在需要生成大盘复盘时，上下文直接使用指数、涨跌家数、板块和概念等结构化数据生成确定性模板，不等待 AI 复盘或新闻搜索。
+- 个股先使用既有持仓优先与量化筛选结果确定研究范围，再由 `StockTrendAnalyzer` 的均线、趋势、量价、MACD、RSI、支撑和压力数据计算 0–100 分。
+- 动作沿用统一分数档位：60–100 为买入/持仓加仓候选，40–59 为观望或持有，20–39 仅对已有持仓给出减仓建议，0–19 仅对已有持仓给出卖出建议。空仓不会产生减仓或卖出建议。
+- 买入必须同时具备趋势买点确认、当前价格、下方支撑和上方压力；任何关键数据缺失都会降级为 `HOLD/WATCH`，不会调用 AI 补猜。
+- 每份结果记录规则版本、输入分数、最终动作、降级原因和 `ai_used_for_action=false`。常规 AI 分析仍可用于生成辅助说明，但它位于提案主路径之外，不能覆盖已持久化规则动作。
+
+该变化不扩大权限：DSA 只生成 advisory proposal，最终仓位、风控、mandate 和模拟执行仍由 Athena 负责；真实交易授权保持关闭。生产启用应在候选版本完成回归后按正常发布流程切换，回滚方式是恢复上一发布版本，不要通过重放或补单验证。
 > - TickFlow 能力按套餐权限分层：有限权限套餐仍可使用主指数查询；支持 `CN_Equity_A` 标的池查询的套餐才会启用 TickFlow 市场统计。
 > - TickFlow 可通过申万一级行业标的池与全 A 股行情生成行业涨跌排行，并优先参与市场结构行业主线 fallback；概念题材排行仍由现有 AkShare / Tushare / Efinance 链路提供。
 > - TickFlow 官方 quickstart 提供了 `quotes.get(universes=["CN_Equity_A"])` 用法，但不同 API Key 不一定拥有对应权限；批量日 K、深度和财务等能力也按权限 fail-open。

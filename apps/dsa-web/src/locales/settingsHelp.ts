@@ -306,6 +306,14 @@ const settingsHelpZhCN: SettingsHelpMap = {
     impact: ['影响部分 A 股基础数据、股票列表和相关增强数据获取。'],
     notes: ['不要把 token 提交到仓库或公开日志。'],
   },
+  'settings.data_source.goldminer_market': {
+    title: 'Windows 掘金行情',
+    summary: '启用通过 Windows 掘金客户端获取的只读 A 股行情。',
+    usage: '设为 true 后配置 GOLDMINER_MARKET_SSH_HOST、GOLDMINER_MARKET_SSH_KEY 等环境变量；未显式设置实时行情优先级时会自动优先使用该源。',
+    valueNotes: ['SSH 模式只在 Windows 端读取当前客户端会话凭证，Pallas 不保存或回传凭证。', '数据源失败时继续沿用现有行情源回退链。'],
+    impact: ['影响 A 股股票、ETF、指数的分钟/日线行情和实时价格来源。'],
+    notes: ['该适配器只调用行情接口，不调用账户、订单或交易接口。'],
+  },
   'settings.data_source.TICKFLOW_API_KEY': {
     title: 'TickFlow API Key',
     summary: '用于启用 TickFlow A 股日 K、实时行情、股票列表/名称与大盘复盘增强数据。',
@@ -1541,6 +1549,14 @@ const settingsHelpEnUS: SettingsHelpMap = {
     valueNotes: ['Available APIs depend on your Tushare permission level.'],
     impact: ['Affects some A-share base data, stock lists, and enrichment data.'],
     notes: ['Do not commit the token or print it in public logs.'],
+  },
+  'settings.data_source.goldminer_market': {
+    title: 'Windows GoldMiner Market Data',
+    summary: 'Enables read-only A-share market data through the Windows GoldMiner client.',
+    usage: 'Set true and configure GOLDMINER_MARKET_SSH_HOST, GOLDMINER_MARKET_SSH_KEY, and related environment variables. When realtime priority is unset, GoldMiner is tried first.',
+    valueNotes: ['SSH mode discovers the current client session credential on Windows; Pallas does not store or return it.', 'Provider failures continue through the existing market-data fallback chain.'],
+    impact: ['Affects the source of minute/daily bars and realtime prices for A-share stocks, ETFs, and indices.'],
+    notes: ['This adapter only calls market-data endpoints; it does not call account, order, or trading endpoints.'],
   },
   'settings.data_source.TICKFLOW_API_KEY': {
     title: 'TickFlow API Key',

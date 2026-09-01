@@ -6,7 +6,11 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from src.investment.m2.orchestration import AnalysisCompletion
-from src.investment.m2.screening_candidates import DatabaseScreeningCandidateSource
+from src.investment.m2.screening_candidates import (
+    DISCOVERY_QUALITY_FAILED,
+    DatabaseScreeningCandidateSource,
+    ScreeningDiscoveryResult,
+)
 from src.investment.proposal.orchestration import ProposalHandoffLoopService
 from tests.test_investment_proposal_issue_9 import NOW, _ack, _result
 from tests.test_m2_screening_candidates import _snapshot_many
@@ -121,3 +125,74 @@ def test_canonical_proposal_handoff_preserves_screening_lineage():
         assert provenance.screening_rank in {1, 2, 3}
         assert provenance.screening_score is not None
         assert provenance.screening_selected_at == screening_selected_at
+
+
+def test_invalid_screening_does_not_block_due_holding_review():
+    class ScreeningSource:
+        def latest_result(self, **_kwargs):
+            return ScreeningDiscoveryResult(
+                DISCOVERY_QUALITY_FAILED,
+                reason="LLM ranking fallback was not persisted as a valid artifact",
+            )
+
+    config = SimpleNamespace(
+        single_brain_m2_enabled=True,
+        single_brain_m2_interval_minutes=60,
+        single_brain_m2_symbols=(),
+        single_brain_m2_max_symbols=1,
+        single_brain_m2_holdings_limit=1,
+        single_brain_m2_screening_enabled=True,
+        single_brain_m2_screening_max_candidates=3,
+        single_brain_m2_screening_max_age_hours=72,
+    )
+    runner = _Runner()
+    publisher = _Publisher()
+    service = ProposalHandoffLoopService(
+        config=config,
+        analysis_runner=runner,
+        publisher=publisher,
+        snapshot_source=_SnapshotSource(("600519",)),
+        screening_candidate_source=ScreeningSource(),
+        clock=lambda: NOW,
+    )
+
+    result = service.run_cycle(scheduled_for=NOW)
+
+    assert result.status == "PARTIAL"
+    assert result.researched_symbols == ("600519:HOLDING",)
+    assert len(publisher.proposals) == 1
+    assert result.candidate_discovery_status == DISCOVERY_QUALITY_FAILED
+
+
+def test_invalid_screening_with_no_due_work_records_no_action_not_failure():
+    class ScreeningSource:
+        def latest_result(self, **_kwargs):
+            return ScreeningDiscoveryResult(
+                DISCOVERY_QUALITY_FAILED,
+                reason="screening artifact is not a completed close",
+            )
+
+    config = SimpleNamespace(
+        single_brain_m2_enabled=True,
+        single_brain_m2_interval_minutes=60,
+        single_brain_m2_symbols=(),
+        single_brain_m2_max_symbols=1,
+        single_brain_m2_holdings_limit=1,
+        single_brain_m2_screening_enabled=True,
+        single_brain_m2_screening_max_candidates=3,
+        single_brain_m2_screening_max_age_hours=72,
+    )
+    service = ProposalHandoffLoopService(
+        config=config,
+        analysis_runner=_Runner(),
+        publisher=_Publisher(),
+        snapshot_source=_SnapshotSource(()),
+        screening_candidate_source=ScreeningSource(),
+        clock=lambda: NOW,
+    )
+
+    result = service.run_cycle(scheduled_for=NOW)
+
+    assert result.status == "NO_ACTION"
+    assert result.candidate_discovery_status == DISCOVERY_QUALITY_FAILED
+    assert result.no_action_outcome is not None

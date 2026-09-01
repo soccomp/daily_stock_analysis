@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] Pallas 调度器不再让同一小时已终结的 canonical cycle 被延迟回调改写，并以锁释放时刻完成异常周期，避免 `terminal cycle stage was reused` 与 `lock release precedes cycle end` 堵塞后续自然轮次。
+
+- [改进] Pallas `PROPOSAL_HANDOFF` 改为规则决策主路径：复用既有结构化大盘数据、趋势评分和统一动作档位生成可审计 `BUY/HOLD/REDUCE/SELL` 建议，缺少价格计划时安全降级；AI 与新闻搜索退出核心动作链，仅保留提案链外的可选解释能力，Athena 模拟执行权限边界不变。
+
+- [新功能] 新增可选 `GoldMinerFetcher`，通过 Windows 掘金客户端只读历史 bars 接口接入 A 股股票、ETF 和指数的分钟/日线行情，支持 SSH 远端会话凭证发现、批量预取、实时元数据和现有数据源降级。
+
 - [修复] 隔离 Pallas deterministic qualification harness 与直接 MarketContext wiring tests 的 fixture dependency-health，禁止写入 production truth store。
 
 - [改进] Athena Issue #42 Mission-3 implementation 新增只读 Owner operability 投影与 DSA canonical readiness/cycle facts，并复用自然 scheduler 的 admission gate 投影当前 legal work window；保持 DSA `dsa_execution_authority=false`、`simulation_only=true`、`LIVE_TRADING=false`，不启动自然周期、不触发 provider 或执行动作。

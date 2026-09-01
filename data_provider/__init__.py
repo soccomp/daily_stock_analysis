@@ -10,6 +10,10 @@
 3. 防封禁流控策略
 
 数据源优先级（动态调整）：
+【配置了 GOLDMINER_MARKET_ENABLED 且 SSH/HTTP 传输可用时】
+1. GoldMinerFetcher (Priority 0) - Windows 掘金客户端只读行情
+2. 其余数据源按下方优先级继续回退
+
 【配置了 TUSHARE_TOKEN 时】
 1. TushareFetcher (Priority 0) - 🔥 最高优先级（动态提升）
 2. EfinanceFetcher (Priority 0) - 同优先级
@@ -43,6 +47,7 @@ from .yfinance_fetcher import YfinanceFetcher
 from .longbridge_fetcher import LongbridgeFetcher
 from .finnhub_fetcher import FinnhubFetcher
 from .alphavantage_fetcher import AlphaVantageFetcher
+from .goldminer_fetcher import GoldMinerFetcher
 from .us_index_mapping import is_us_index_code, is_us_stock_code, get_us_index_yf_symbol, US_INDEX_MAPPING
 
 __all__ = [
@@ -58,6 +63,7 @@ __all__ = [
     'LongbridgeFetcher',
     'FinnhubFetcher',
     'AlphaVantageFetcher',
+    'GoldMinerFetcher',
     'is_us_index_code',
     'is_us_stock_code',
     'is_hk_stock_code',

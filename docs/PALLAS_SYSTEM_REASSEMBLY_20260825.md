@@ -28,6 +28,13 @@ and persistence are explicit.  `FUTURE_DATED`, `STALE`,
 conflicts fail closed.  Luna narrative failure leaves persisted structured
 market data usable and is represented as structured-fallback metadata.
 
+The lightweight rules-first simulation path does not proactively generate a
+market review and does not block a cycle when that optional context is absent;
+it records `MARKET_CONTEXT_OPTIONAL_RULES_MODE` and continues with deterministic
+DSA rules.  A context that is explicitly supplied is still validated by the
+contract, and callers that require strict MarketContext admission retain the
+fail-closed behavior above.
+
 Screening discovery consumes the existing durable `screening_runs` producer
 and distinguishes `VALID`, `NO_FRESH_CANDIDATES`, `DISCOVERY_MISSING`,
 `DISCOVERY_STALE`, `DISCOVERY_FAILED`, `DISCOVERY_QUALITY_FAILED`, and

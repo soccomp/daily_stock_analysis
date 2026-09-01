@@ -293,6 +293,43 @@ def test_dsa_consumes_an_athena_authoritative_snapshot_as_a_read_only_wire_fact(
     assert consumed.position_for(symbol="600519", market="CN").quantity == 300
 
 
+def test_position_lookup_matches_exchange_qualified_cn_symbols_without_rewriting_wire_data() -> None:
+    sh_position = Position(
+        symbol="SHSE.600519",
+        market="CN",
+        quantity=300,
+        available_quantity=300,
+        avg_cost=Decimal("90.00"),
+        last_price=Decimal("100.00"),
+        market_value=Decimal("30000.00"),
+        unrealized_pnl=Decimal("3000.00"),
+        price_as_of=NOW,
+        price_source="ATHENA_SIM_RUNTIME",
+    )
+    sz_position = Position(
+        symbol="SZSE.000001",
+        market="CN",
+        quantity=100,
+        available_quantity=100,
+        avg_cost=Decimal("10.00"),
+        last_price=Decimal("11.00"),
+        market_value=Decimal("1100.00"),
+        unrealized_pnl=Decimal("100.00"),
+        price_as_of=NOW,
+        price_source="ATHENA_SIM_RUNTIME",
+    )
+    snapshot = _snapshot(positions=(sh_position, sz_position))
+
+    assert snapshot.positions[0].symbol == "SHSE.600519"
+    assert snapshot.position_for(symbol="600519", market="CN").quantity == 300
+    assert snapshot.position_for(symbol="SH.600519", market="cn").quantity == 300
+    assert snapshot.position_for(symbol="600519.SH", market="CN").quantity == 300
+    assert snapshot.position_for(symbol="SH600519", market="CN").quantity == 300
+    assert snapshot.position_for(symbol="000001", market="CN").quantity == 100
+    assert snapshot.position_for(symbol="SZ.000001", market="CN").quantity == 100
+    assert snapshot.position_for(symbol="000001.SZ", market="CN").quantity == 100
+
+
 def test_binary_float_is_not_a_canonical_decimal_input() -> None:
     with pytest.raises(ValidationError, match="Decimal or decimal string"):
         ExpectedReturnRange(minimum=0.1, maximum=Decimal("0.2"))
@@ -409,6 +446,27 @@ def test_brain_produces_final_add_200_with_exact_lineage() -> None:
     assert decision.risk_policy_id == policy.policy_id
     assert decision.risk_policy_version == policy.policy_version
     assert decision.trace_id == research.trace_id
+
+
+def test_brain_treats_exchange_qualified_position_as_existing_for_add() -> None:
+    position = Position(
+        symbol="SHSE.600519",
+        market="CN",
+        quantity=300,
+        available_quantity=300,
+        avg_cost=Decimal("90.00"),
+        last_price=Decimal("100.00"),
+        market_value=Decimal("30000.00"),
+        unrealized_pnl=Decimal("3000.00"),
+        price_as_of=NOW,
+        price_source="ATHENA_SIM_RUNTIME",
+    )
+
+    decision = _decision(snapshot=_snapshot(positions=(position,)))
+
+    assert decision.action == "ADD"
+    assert decision.current_quantity == 300
+    assert decision.delta_quantity == 200
 
 
 def test_brain_decision_is_reproducible_for_identical_inputs() -> None:

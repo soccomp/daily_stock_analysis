@@ -10,6 +10,32 @@ from typing_extensions import Self
 from .base import CanonicalContract, CanonicalDecimal, DataQuality, FrozenValue, StrictTrue
 
 
+_CN_EXCHANGE_PREFIXES = ("SHSE", "SZSE", "BJSE", "SH", "SZ", "SS", "BJ")
+_CN_EXCHANGE_SUFFIXES = {"SH", "SZ", "SS", "BJ"}
+
+
+def _comparison_symbol(symbol: str, market: str) -> str:
+    """Return a stable lookup key without changing the wire representation."""
+
+    value = str(symbol or "").strip().upper()
+    if str(market or "").strip().upper() != "CN":
+        return value
+
+    if "." in value:
+        base, suffix = value.rsplit(".", 1)
+        if suffix in _CN_EXCHANGE_SUFFIXES and base.isdigit():
+            return base
+        if base in _CN_EXCHANGE_PREFIXES and suffix.isdigit():
+            return suffix
+
+    for prefix in _CN_EXCHANGE_PREFIXES:
+        if value.startswith(prefix):
+            base = value[len(prefix) :]
+            if base.isdigit():
+                return base
+    return value
+
+
 class Position(FrozenValue):
     symbol: StrictStr = Field(min_length=1, max_length=64)
     market: StrictStr = Field(min_length=1, max_length=32)
@@ -115,11 +141,14 @@ class PortfolioSnapshot(CanonicalContract):
         return self
 
     def position_for(self, *, symbol: str, market: str) -> Position | None:
+        requested_market = str(market or "").strip().upper()
+        requested_symbol = _comparison_symbol(symbol, requested_market)
         return next(
             (
                 position
                 for position in self.positions
-                if position.symbol == symbol and position.market == market
+                if str(position.market or "").strip().upper() == requested_market
+                and _comparison_symbol(position.symbol, requested_market) == requested_symbol
             ),
             None,
         )

@@ -162,6 +162,8 @@ Go to your forked repo → `Settings` → `Secrets and variables` → `Actions` 
 | `TUSHARE_TOKEN` | [Tushare Pro](https://tushare.pro/weborder/#/login?reg=834638) Token | Optional |
 | `TUSHARE_HTTP_URL` | Tushare Pro HTTP endpoint; when unset/empty defaults to the official `http://api.tushare.pro`. Set to a `http://` or `https://` URL only when routing through a corporate proxy, cross-border network, or a self-hosted mirror | Optional |
 | `TICKFLOW_API_KEY` | [TickFlow](https://tickflow.org) API key for optional A-share daily K-lines, realtime quotes, stock list/name lookup, and CN market review enhancement; permission or entitlement failures fall back to existing providers | Optional |
+| `GOLDMINER_MARKET_ENABLED` | Enable the read-only Windows GoldMiner market-data adapter. Configure its SSH transport with the variables below; when realtime priority is unset, GoldMiner is tried first. | Optional |
+| `GOLDMINER_MARKET_SSH_HOST` / `GOLDMINER_MARKET_SSH_KEY` | Windows host and local SSH private-key path used to reach the GoldMiner client gateway. The session credential is discovered remotely and is not stored in Pallas. | Required when enabled |
 
 > **GitHub Actions:** The bundled `00-daily-analysis.yml` maps `TUSHARE_TOKEN`, `TICKFLOW_API_KEY` / `TICKFLOW_*`, and the documented `LONGBRIDGE_*` variables into the job environment. Store `TICKFLOW_API_KEY` in **Secrets**; non-sensitive TickFlow priority, adjustment, and batch switches can live in **Variables** or **Secrets**. Longbridge OAuth still requires a client id plus `LONGBRIDGE_OAUTH_TOKEN_CACHE_B64` for headless Actions runs, while the legacy `LONGBRIDGE_APP_KEY` / `LONGBRIDGE_APP_SECRET` / `LONGBRIDGE_ACCESS_TOKEN` triplet remains supported.
 
@@ -361,11 +363,16 @@ For the notification baseline, diagnostics, and deployment notes, see [Notificat
 | `TICKFLOW_KLINE_ADJUST` | TickFlow daily K-line adjustment mode: `none`, `forward`, `backward`, `forward_additive`, or `backward_additive`. | `none` | Optional |
 | `TICKFLOW_BATCH_DAILY_ENABLED` | Enable TickFlow batch daily K-line prefetch when the current plan supports it; permission failures are negative-cached and fall back to per-stock providers. | `true` | Optional |
 | `TICKFLOW_BATCH_SIZE` | Maximum symbols per TickFlow batch request for daily K-lines and realtime quotes. | `100` | Optional |
+| `GOLDMINER_MARKET_ENABLED` | Enable read-only Windows GoldMiner bars for A-share stocks, ETFs, and indices. Provider failures fall back to existing sources. | `false` | Optional |
+| `GOLDMINER_MARKET_SSH_HOST` / `GOLDMINER_MARKET_SSH_USER` / `GOLDMINER_MARKET_SSH_KEY` / `GOLDMINER_MARKET_SSH_PORT` | SSH transport to the Windows host running GoldMiner; the private key is read locally and never committed. | - / `Administrator` / - / `22` | Required when enabled |
+| `GOLDMINER_MARKET_REMOTE_BASE_URL` | GoldMiner local HTTP gateway on Windows. | `http://127.0.0.1:7051` | Optional |
+| `GOLDMINER_MARKET_BASE_URL` / `GOLDMINER_MARKET_AUTH_TOKEN` | Direct HTTP transport when Pallas runs on the same host as GoldMiner; treat the bearer token as a secret. | - | Optional |
+| `GOLDMINER_MARKET_TIMEOUT_SECONDS` / `GOLDMINER_MARKET_BATCH_SIZE` | Request timeout and maximum symbols per batch request. | `8` / `50` | Optional |
 | `ENABLE_REALTIME_QUOTE` | Enable real-time quotes (if disabled, uses historical closing prices for analysis) | `true` | Optional |
 | `ENABLE_REALTIME_TECHNICAL_INDICATORS` | Intraday real-time technicals: Calculate MA5/MA10/MA20 and bull trends using real-time prices when enabled (Issue #234); uses yesterday's close if disabled. | `true` | Optional |
 | `ENABLE_CHIP_DISTRIBUTION` | Enable chip distribution analysis (this API is unstable, recommended to disable for cloud deployment). GitHub Actions users must set `ENABLE_CHIP_DISTRIBUTION=true` in Repository Variables to enable; disabled by default in workflows. | `true` | Optional |
 | `ENABLE_EASTMONEY_PATCH` | Eastmoney API patch: Recommended to set to `true` when Eastmoney APIs fail frequently (e.g., RemoteDisconnected, connection closed). Injects NID tokens and random User-Agents to reduce rate limiting probability. | `false` | Optional |
-| `REALTIME_SOURCE_PRIORITY` | Real-time quote source priority (comma-separated), e.g., `tencent,akshare_sina,efinance,akshare_em`; add `tickflow` explicitly to use TickFlow realtime quotes | See .env.example | Optional |
+| `REALTIME_SOURCE_PRIORITY` | Real-time quote source priority (comma-separated), e.g., `goldminer,tencent,akshare_sina,efinance,akshare_em`; an explicit value overrides automatic GoldMiner/Tushare injection. | See .env.example | Optional |
 | `ENABLE_FUNDAMENTAL_PIPELINE` | Master switch for fundamental aggregation; when disabled, returns `not_supported` block only, without altering the original analysis pipeline. | `true` | Optional |
 | `FUNDAMENTAL_STAGE_TIMEOUT_SECONDS` | Total latency budget for the fundamental stage (seconds) | `8.0` | Optional |
 | `FUNDAMENTAL_FETCH_TIMEOUT_SECONDS` | Timeout for a single capability source call; market-structure industry/concept rankings share this budget | `8.0` | Optional |
@@ -374,6 +381,20 @@ For the notification baseline, diagnostics, and deployment notes, see [Notificat
 | `FUNDAMENTAL_CACHE_MAX_ENTRIES` | Maximum entries for fundamental cache (evicted by time within TTL) | `256` | Optional |
 
 > **Behavior Notes:**
+> - When `GOLDMINER_MARKET_ENABLED=true` and the SSH variables are configured, Pallas reads the Windows GoldMiner client's authenticated, read-only bars gateway for A-share stocks, ETFs, and indices. The short-lived session credential is discovered and used on Windows only; it is not returned to Pallas or written to logs. Any transport or freshness failure falls back through the existing provider chain. No account, order, or trading endpoint is called.
+
+### Pallas rules-first decision path
+
+`PROPOSAL_HANDOFF` now treats the existing structured rules as the only action authority. AI is no longer an input to buy or sell direction:
+
+- To keep the simulation proposal path lightweight, rules-first handoff no longer waits for or proactively generates a market review. A present, validated context is still reused; when it is missing, stale, or slow to generate, the cycle records `MARKET_CONTEXT_OPTIONAL_RULES_MODE` and continues with deterministic rules and the Athena simulation proposal. Market review, sector/concept rankings, and news remain optional enhancements rather than hard dependencies for rules proposals; callers that explicitly require strict MarketContext admission keep the existing contract.
+- When a market review is requested, the canonical context is produced from structured index, breadth, sector, and concept data using the deterministic template. It does not wait for AI narrative generation or news search.
+- Holdings-first selection and quantitative screening still define the research scope. `StockTrendAnalyzer` then computes a 0–100 score from moving averages, trend, price/volume, MACD, RSI, support, and resistance.
+- The shared score bands remain authoritative: 60–100 is a buy or add candidate, 40–59 is watch/hold, 20–39 is reduce for an existing position only, and 0–19 is sell for an existing position only. A non-held symbol never creates reduce or sell advice.
+- A buy also requires a confirmed trend entry, current price, support below the entry, and resistance above it. Missing required evidence fails closed to `HOLD/WATCH`; AI is never used to guess a missing input.
+- Every result records the rule version, input score, final action, downgrade reason, and `ai_used_for_action=false`. The ordinary AI analysis surfaces remain available for optional explanation outside the proposal authority path and cannot overwrite the persisted rule action.
+
+Authority is unchanged: DSA produces advisory proposals only. Athena continues to own final allocation, risk, mandate construction, and simulation execution, while live trading authorization remains off. Activate a qualified candidate through the normal release process; rollback means restoring the previous release, not replaying a cycle or submitting compensating orders.
 > - **A-shares**: Returns aggregated capabilities by `valuation/growth/earnings/institution/capital_flow/dragon_tiger/boards`.
 > - **ETFs**: Returns available items, marks missing capabilities as `not_supported`, and does not affect the original flow overall.
 > - **US/HK stocks**: Returns `valuation/growth/earnings/belong_boards` (sourced from `info.sector`/`info.industry`) via the yfinance adapter; `institution/capital_flow/dragon_tiger/boards` stay `not_supported` because no offshore data feed exists today. Falls back to a full `not_supported` block if yfinance is unavailable or returns empty payloads. Still fail-open.
@@ -418,6 +439,7 @@ For the notification baseline, diagnostics, and deployment notes, see [Notificat
 
 > Behavior notes:
 > - When `TICKFLOW_API_KEY` is configured, TickFlow is instantiated as an optional A-share daily K-line data source and CN market-review enhancer. `TICKFLOW_PRIORITY` only affects the daily K-line/general provider fallback chain. Realtime quote priority is controlled separately by `REALTIME_SOURCE_PRIORITY`; TickFlow realtime quotes are used only when that list explicitly includes `tickflow`, and any source listed before `tickflow` is tried first.
+> - GoldMiner is an optional market-data source. If `REALTIME_SOURCE_PRIORITY` is unset, enabling it prepends `goldminer`; setting the priority explicitly remains authoritative.
 > - TickFlow daily K-lines default to `TICKFLOW_KLINE_ADJUST=none`; daily `volume` is converted from lots to shares, while `amount` remains in yuan.
 > - TickFlow daily K-line range requests pass explicit `start_time` / `end_time` / `count`. Because the official quickstart documents that time-range queries are still limited by `count`, non-empty count-capped responses whose first returned trading date is later than the requested start trading date are rejected before normalization or cache writes, allowing manager fallback to continue.
 > - Batch analysis can warm the per-process TickFlow daily K-line cache through `prefetch_daily_klines()` before per-stock `get_daily_data()` calls. Only validated frames are cached; batch permission failures are negative-cached and degrade to single-stock requests or existing providers.

@@ -30,10 +30,10 @@ from src.core.trading_calendar import is_market_open
 logger = logging.getLogger(__name__)
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
-# The producer must become due while the canonical proposal loop is still in
-# the legal XSHG session. The screening pipeline uses the latest completed
-# prior-session bar when the current session is not closed.
-SCHEDULE_TIME = time(14, 45)
+# The producer must run after the official XSHG close.  Running before 15:00
+# stamps the current session's incomplete data into the artifact, which the
+# proposal consumer correctly rejects as ``CURRENT_SESSION_NOT_CLOSED``.
+SCHEDULE_TIME = time(15, 5)
 SESSION_CUTOFF_TIME = time(15, 0)
 DEFAULT_STRATEGY = "capital_heat"
 DEFAULT_MARKET = "cn"
@@ -88,20 +88,27 @@ class DailyScreeningScheduler:
         if not is_market_open(self._market, today):
             return {"status": "NON_TRADING_DAY", "run_key": run_key, "date": today.isoformat()}
 
-        if now.time() >= self._session_cutoff_time:
+        if now.time() < self._schedule_time:
+            return {
+                "status": "BEFORE_SCHEDULE_TIME",
+                "run_key": run_key,
+                "scheduled_for": self._schedule_time.isoformat(),
+            }
+
+        # Keep the old fail-closed behaviour for a caller that explicitly
+        # configures a pre-close schedule, while allowing the production
+        # 15:05 post-close schedule to run normally.  This makes the temporal
+        # contract explicit without introducing a second scheduler path.
+        if (
+            self._schedule_time <= self._session_cutoff_time
+            and now.time() >= self._session_cutoff_time
+        ):
             return {
                 "status": "AFTER_SESSION_CUTOFF",
                 "run_key": run_key,
                 "date": today.isoformat(),
                 "cutoff_time": self._session_cutoff_time.isoformat(),
                 "zero_work": True,
-            }
-
-        if now.time() < self._schedule_time:
-            return {
-                "status": "BEFORE_SCHEDULE_TIME",
-                "run_key": run_key,
-                "scheduled_for": self._schedule_time.isoformat(),
             }
 
         state = self._load_state()
@@ -328,14 +335,14 @@ def _inline_quality_failure(payload: Any) -> str | None:
 
     if not isinstance(payload, dict):
         return "screening producer response is not an object"
-    for key in ("source_errors", "warnings"):
-        values = payload.get(key) or []
-        if values:
-            return f"screening {key} are present"
-    for value in payload.get("degradation") or ():
-        text = str(value).lower()
-        if any(token in text for token in ("failed", "fallback", "error", "unknown", "stale")):
-            return "screening quality is degraded: " + str(value)
+    # Keep the producer and consumer on the same quality contract.  A failed
+    # LLM ranker is explicitly allowed when the deterministic ``screen_score``
+    # fallback produced the candidates; data-source errors remain fatal.
+    from src.investment.m2.screening_candidates import screening_quality_failure
+
+    quality_failure = screening_quality_failure(payload)
+    if quality_failure:
+        return quality_failure
     metadata = any(
         payload.get(key) is not None
         for key in ("latest_completed_trade_date", "decision_cutoff", "completion_status")

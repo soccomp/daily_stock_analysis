@@ -7,7 +7,10 @@ from decimal import Decimal
 
 from src.config import Config
 from src.investment.contracts.portfolio_snapshot import PortfolioSnapshot
-from src.investment.m2.screening_candidates import DatabaseScreeningCandidateSource
+from src.investment.m2.screening_candidates import (
+    DatabaseScreeningCandidateSource,
+    screening_quality_failure,
+)
 from src.investment.m2.selection import select_m2_research_objects
 
 from tests.test_investment_shadow_wiring_p1a import Position, _snapshot
@@ -261,3 +264,23 @@ def test_source_caps_and_dedups():
     src = DatabaseScreeningCandidateSource(db)
     out = src.latest(max_candidates=2, max_age=timedelta(hours=72))
     assert [c.symbol for c in out] == ["300274", "600362"]
+
+
+def test_quality_gate_accepts_explicit_deterministic_rank_fallback():
+    assert screening_quality_failure({
+        "source_errors": [],
+        "warnings": [
+            "DSA provider context applied 3 of 3 candidates",
+            "LLM ranking failed: fell back to screen_score",
+        ],
+        "degradation": [],
+    }) is None
+
+
+def test_quality_gate_rejects_unclassified_provider_degradation():
+    reason = screening_quality_failure({
+        "source_errors": [],
+        "warnings": [],
+        "degradation": ["snapshot source fallback: provider unavailable"],
+    })
+    assert reason == "screening quality is degraded: snapshot source fallback: provider unavailable"

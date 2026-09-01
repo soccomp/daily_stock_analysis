@@ -121,6 +121,15 @@ class ProposalHandoffLoopService:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._trigger_coordinator = trigger_coordinator
         self._market_context_provider = market_context_provider
+        runner_mode = getattr(
+            analysis_runner,
+            "decision_mode",
+            getattr(analysis_runner, "_decision_mode", "ai"),
+        )
+        self._rules_only_mode = (
+            str(runner_mode or "ai").strip().lower()
+            == "rules"
+        )
 
     @classmethod
     def from_config(cls, config: Config) -> "ProposalHandoffLoopService":
@@ -141,10 +150,13 @@ class ProposalHandoffLoopService:
             if bool(getattr(config, "single_brain_m2_screening_enabled", False))
             else None
         )
-        from src.core.market_review_runtime import build_market_review_runtime
+        from src.notification import NotificationService
         from src.services.daily_market_context import DailyMarketContextService
 
-        notifier, analyzer, search_service = build_market_review_runtime(config)
+        # The canonical market context is built from structured provider data.
+        # AI prose and news search are optional presentation features and must
+        # never block the proposal decision path.
+        notifier = NotificationService()
         context_service = DailyMarketContextService(db)
 
         def produce_market_context(*, now: datetime, cycle_id: str, interval_minutes: int):
@@ -152,8 +164,8 @@ class ProposalHandoffLoopService:
                 region=str(getattr(config, "market_review_region", "cn") or "cn").split(",")[0],
                 config=config,
                 notifier=notifier,
-                analyzer=analyzer,
-                search_service=search_service,
+                analyzer=None,
+                search_service=None,
                 allow_generate=True,
                 persist_market_review_history=True,
                 target_date=now.astimezone(timezone.utc).date(),
@@ -169,13 +181,16 @@ class ProposalHandoffLoopService:
                 )
             return dict(canonical_context)
 
+        analysis_runner = DSAAnalysisCompletionRunner(
+            config=config,
+            db_manager=db,
+            query_source="single_brain_proposal_handoff",
+            decision_mode="rules",
+        )
+
         return cls(
             config=config,
-            analysis_runner=DSAAnalysisCompletionRunner(
-                config=config,
-                db_manager=db,
-                query_source="single_brain_proposal_handoff",
-            ),
+            analysis_runner=analysis_runner,
             publisher=CanonicalHttpInvestmentProposalPublisher(
                 url=url,
                 timeout_seconds=float(getattr(config, "single_brain_proposal_timeout_seconds", 5.0)),
@@ -191,7 +206,14 @@ class ProposalHandoffLoopService:
                 db,
                 screening_candidate_source=screening_candidate_source,
             ),
-            market_context_provider=produce_market_context,
+            # Rules are the proposal authority.  A missing/slow narrative
+            # market review must not hold the simulation proposal path.
+            market_context_provider=(
+                None
+                if str(getattr(analysis_runner, "decision_mode", "ai") or "ai").strip().lower()
+                == "rules"
+                else produce_market_context
+            ),
         )
 
     def run_cycle(
@@ -341,7 +363,9 @@ class ProposalHandoffLoopService:
                     cycle=cycle,
                     interval=interval,
                     canonical=canonical,
-                    require_market_review_context=require_market_review_context,
+                    require_market_review_context=(
+                        bool(require_market_review_context) and not self._rules_only_mode
+                    ),
                     budget=budget,
                 )
         except Exception as exc:
@@ -432,7 +456,11 @@ class ProposalHandoffLoopService:
                 max_age_seconds=max(60, interval * 60),
             )
             context_admission = context_reason if resolved_market_context is not None else "UNAVAILABLE"
-            if resolved_market_context is None and self._market_context_provider is not None:
+            if (
+                resolved_market_context is None
+                and self._market_context_provider is not None
+                and not self._rules_only_mode
+            ):
                 try:
                     resolved_market_context = self._market_context_provider(
                         now=now,
@@ -504,13 +532,24 @@ class ProposalHandoffLoopService:
                     market_context_admission=context_reason,
                 )
         if resolved_market_context is None:
+            if self._rules_only_mode:
+                context_admission = "OPTIONAL_RULES_MODE"
             for stage in ("MARKET_REVIEW", "MARKET_CONTEXT"):
                 canonical.set_stage(
                     cycle_id=cycle,
                     stage=stage,
                     state="NOT_ENTERED",
-                    reason_code=f"MARKET_CONTEXT_{context_reason or 'MISSING'}",
-                    reason_detail="no admissible causal MarketContext was available at the cycle cutoff",
+                    reason_code=(
+                        "MARKET_CONTEXT_OPTIONAL_RULES_MODE"
+                        if self._rules_only_mode
+                        else f"MARKET_CONTEXT_{context_reason or 'MISSING'}"
+                    ),
+                    reason_detail=(
+                        "deterministic rules path does not require the optional market review; "
+                        f"observed={context_reason or 'MISSING'}"
+                        if self._rules_only_mode
+                        else "no admissible causal MarketContext was available at the cycle cutoff"
+                    ),
                     at=now,
                 )
             if require_market_review_context:
@@ -555,7 +594,10 @@ class ProposalHandoffLoopService:
                 max_age_seconds=max(60, interval * 60),
                 metadata={"reference": resolved_market_context.get("context_id")},
             )
-            if bool(getattr(self._config, "single_brain_m2_readiness_gate_enabled", False)):
+            if (
+                bool(getattr(self._config, "single_brain_m2_readiness_gate_enabled", False))
+                and not self._rules_only_mode
+            ):
                 health_snapshot = health_store.snapshot()
                 admission = evaluate_dsa_research_admission(health_snapshot)
                 if not admission.get("can_attempt"):
@@ -703,31 +745,18 @@ class ProposalHandoffLoopService:
             at=now,
         )
         if not scopes:
-            if discovery.status not in {"NO_FRESH_CANDIDATES", "DISABLED"}:
-                for stage in ("RESEARCH_BUNDLE", "INVESTMENT_PROPOSAL", "ATHENA_HANDOFF_ACK"):
-                    canonical.set_stage(
-                        cycle_id=cycle,
-                        stage=stage,
-                        state="NOT_ENTERED",
-                        reason_code=discovery.status,
-                        reason_detail=discovery.reason,
-                        at=now,
-                    )
-                return ProposalHandoffRunResult(
-                    cycle,
-                    "FAILED_CLOSED",
-                    blocked_reasons=(
-                        f"screening discovery did not prove a fresh result: {discovery.status}; "
-                        f"{discovery.reason}"
-                    ,),
-                    candidate_discovery_status=discovery.status,
-                    candidate_discovery_reason=discovery.reason,
-                    market_context_admission=context_admission,
-                )
+            screening_degraded = discovery.status not in {
+                "NO_FRESH_CANDIDATES", "DISABLED",
+            }
             no_action = MarketReviewOutcomeRepository().persist_no_action(
                 source_task_id=cycle,
                 trade_date=now.astimezone(timezone.utc).date(),
-                reason="no candidate satisfied strategy-evidence threshold",
+                reason=(
+                    "no due holding or manual candidate; screening discovery "
+                    f"was {discovery.status}: {discovery.reason}"
+                    if screening_degraded
+                    else "no candidate satisfied strategy-evidence threshold"
+                ),
                 persisted_at=now,
             )
             linkage = None
@@ -752,8 +781,16 @@ class ProposalHandoffLoopService:
                     cycle_id=cycle,
                     stage=stage,
                     state="NO_ACTION",
-                    reason_code="NO_CANDIDATES",
-                    reason_detail="durable NO_ACTION outcome recorded",
+                    reason_code=(
+                        "SCREENING_DEGRADED_NO_DUE_HOLDINGS"
+                        if screening_degraded
+                        else "NO_CANDIDATES"
+                    ),
+                    reason_detail=(
+                        f"durable NO_ACTION outcome recorded; screening={discovery.status}"
+                        if screening_degraded
+                        else "durable NO_ACTION outcome recorded"
+                    ),
                     at=now,
                 )
             return ProposalHandoffRunResult(
@@ -761,7 +798,12 @@ class ProposalHandoffLoopService:
                 "NO_ACTION",
                 blocked_reasons=(
                     "candidate_count=0; outcome=NO_ACTION; "
-                    "reason=no candidate satisfied strategy-evidence threshold",
+                    + (
+                        "reason=no due holding or manual candidate; "
+                        f"screening discovery={discovery.status}"
+                        if screening_degraded
+                        else "reason=no candidate satisfied strategy-evidence threshold"
+                    )
                 ),
                 no_action_outcome=no_action,
                 market_review_linkage=linkage,
@@ -819,6 +861,10 @@ class ProposalHandoffLoopService:
                     symbol=symbol,
                     query_id=query_id,
                     current_time=budget_observed_at,
+                    decision_context=_rule_decision_context(
+                        scope=scope,
+                        snapshot=authoritative_snapshot,
+                    ),
                 )
                 # The durable report completion time keeps recovery canonical
                 # without making a long-running analysis expire at handoff.
@@ -1080,3 +1126,41 @@ def _candidate_provenance(scope: dict[str, object]) -> CandidateProvenance:
     if source in {"MATERIAL_EVENT", "DEFENSIVE_RISK"}:
         return CandidateProvenance(candidate_source="EXTERNAL_EVENT")
     raise ProposalHandoffBlocked(f"unsupported research candidate source: {source or 'missing'}")
+
+
+def _rule_decision_context(
+    *,
+    scope: Mapping[str, object],
+    snapshot: object,
+) -> dict[str, object]:
+    """Project only the portfolio facts needed by the deterministic rule engine."""
+
+    symbol = str(scope.get("symbol") or "").strip()
+    position = (
+        snapshot.position_for(symbol=symbol, market="CN")
+        if hasattr(snapshot, "position_for")
+        else None
+    )
+    has_position = bool(position is not None and position.quantity > 0)
+    current_weight = None
+    position_avg_cost = None
+    equity = getattr(snapshot, "equity", Decimal("0"))
+    if has_position and equity > 0:
+        current_weight = position.market_value / equity
+        position_avg_cost = getattr(position, "avg_cost", None)
+    context: dict[str, object] = {
+        "candidate_source": str(scope.get("source") or "UNKNOWN"),
+        "has_position": has_position,
+        "current_weight": current_weight,
+        "position_avg_cost": position_avg_cost,
+        # The canonical proposal-handoff path is simulation-only today.  Use
+        # the deliberately lightweight rules profile so optional AI-era
+        # evidence cannot suppress every simulated action.
+        "simulation_relaxed": True,
+    }
+    trigger = scope.get("research_trigger")
+    if isinstance(trigger, Mapping):
+        evidence = trigger.get("strategy_evidence")
+        if evidence is not None:
+            context["strategy_evidence"] = evidence
+    return context

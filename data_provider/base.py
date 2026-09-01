@@ -616,6 +616,7 @@ class DataFetcherManager:
     """
 
     _DAILY_MARKET_FETCHER_SUPPORT = {
+        "GoldMinerFetcher": {"cn"},
         "EfinanceFetcher": {"cn"},
         "TencentFetcher": {"cn"},
         "AkshareFetcher": {"cn", "hk"},
@@ -1144,6 +1145,8 @@ class DataFetcherManager:
         初始化默认数据源列表
 
         优先级动态调整逻辑：
+        - 如果配置了 GoldMiner SSH/HTTP 传输：实例化 GoldMinerFetcher，并置于
+          同优先级数据源之前，作为 A 股只读行情首选
         - 如果配置了 TUSHARE_TOKEN：实例化 TushareFetcher，并按其内部逻辑提升优先级
         - 如果配置了 Longbridge OAuth 或 Legacy 凭据：实例化 LongbridgeFetcher 作为美股/港股兜底
         - 未配置的可选数据源不实例化，避免在批量拉取时反复探测无效源
@@ -1165,6 +1168,7 @@ class DataFetcherManager:
         from .baostock_fetcher import BaostockFetcher
         from .yfinance_fetcher import YfinanceFetcher
         from .longbridge_fetcher import LongbridgeFetcher
+        from .goldminer_fetcher import GoldMinerFetcher
         config = get_config()
         # 创建所有数据源实例（优先级在各 Fetcher 的 __init__ 中确定）
         efinance = EfinanceFetcher()
@@ -1174,6 +1178,12 @@ class DataFetcherManager:
         baostock = BaostockFetcher()
         yfinance = YfinanceFetcher()
         optional_fetchers: List[BaseFetcher] = []
+        goldminer: Optional[BaseFetcher] = None
+
+        if GoldMinerFetcher.is_configured(config):
+            goldminer = GoldMinerFetcher.from_config(config)
+        else:
+            logger.debug("[数据源初始化] 跳过未配置的 GoldMinerFetcher")
 
         tushare_token = (getattr(config, "tushare_token", None) or "").strip()
         if tushare_token:
@@ -1218,6 +1228,7 @@ class DataFetcherManager:
         self._ensure_concurrency_guards()
         with self._fetchers_lock:
             self._fetchers = [
+                *([goldminer] if goldminer is not None else []),
                 efinance,
                 akshare,
                 pytdx,
@@ -1539,7 +1550,7 @@ class DataFetcherManager:
         # efinance/akshare_em/tushare 通过一次调用填充全市场缓存；
         # tickflow 通过 symbols 批量接口预取当前自选股缓存。
         priority = config.realtime_source_priority.lower()
-        prefetch_sources = ['efinance', 'akshare_em', 'tushare', 'tickflow']
+        prefetch_sources = ['goldminer', 'efinance', 'akshare_em', 'tushare', 'tickflow']
         
         # 如果优先级中前两个都不是可预取数据源，跳过预取
         # 因为新浪/腾讯是单股票查询，不需要预取
@@ -1576,7 +1587,28 @@ class DataFetcherManager:
             stock_codes[0],
         )
         
-        # TickFlow 使用 symbols 批量接口；其他可预取源通过首次查询触发自身缓存。
+        # GoldMiner/TickFlow 使用 symbols 批量接口；其他可预取源通过首次查询触发自身缓存。
+        if prefetch_source == "goldminer":
+            fetcher = self._get_fetcher_by_name("GoldMinerFetcher", capability="realtime_quote")
+            if fetcher is None or not hasattr(fetcher, "prefetch_realtime_quotes"):
+                logger.info(
+                    "[prefetch] component=realtime_prefetch action=skip reason=goldminer_unavailable"
+                )
+                return 0
+            try:
+                return int(
+                    self._call_fetcher_method(
+                        fetcher,
+                        "prefetch_realtime_quotes",
+                        stock_codes,
+                        batch_size=getattr(config, "goldminer_market_batch_size", 50),
+                    )
+                    or 0
+                )
+            except Exception as exc:
+                logger.warning("[GoldMinerFetcher] realtime prefetch failed: %s", exc)
+                return 0
+
         if prefetch_source == "tickflow":
             fetcher = self._get_fetcher_by_name("TickFlowFetcher", capability="realtime_quote")
             if fetcher is None or not hasattr(fetcher, "prefetch_realtime_quotes"):
@@ -1686,6 +1718,7 @@ class DataFetcherManager:
             "AlphaVantageFetcher": "alphavantage",
             "EfinanceFetcher": "efinance",
             "TushareFetcher": "tushare",
+            "GoldMinerFetcher": "goldminer",
         }
         return mapping.get(fetcher_name, fetcher_name.replace("Fetcher", "").lower())
 
@@ -1895,6 +1928,16 @@ class DataFetcherManager:
 
                 elif source == "tickflow":
                     fetcher = self._get_fetcher_by_name("TickFlowFetcher", capability="realtime_quote")
+                    if fetcher is not None and hasattr(fetcher, 'get_realtime_quote'):
+                        record_provider_run_started(
+                            data_type="realtime_quote",
+                            provider=fetcher.name,
+                            operation="get_realtime_quote",
+                        )
+                        quote = self._call_fetcher_method(fetcher, 'get_realtime_quote', raw_stock_code or stock_code)
+
+                elif source == "goldminer":
+                    fetcher = self._get_fetcher_by_name("GoldMinerFetcher", capability="realtime_quote")
                     if fetcher is not None and hasattr(fetcher, 'get_realtime_quote'):
                         record_provider_run_started(
                             data_type="realtime_quote",

@@ -454,16 +454,58 @@ def _parse_timestamp(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _screening_quality_failure(payload: dict[str, Any]) -> str | None:
-    for key in ("source_errors", "warnings"):
-        values = payload.get(key) or []
-        if values:
-            return f"screening {key} are present"
-    for value in payload.get("degradation") or ():
+def _is_nonfatal_quality_warning(value: Any) -> bool:
+    """Return whether a warning is informational or an accepted fallback."""
+
+    text = str(value or "").strip().lower()
+    return (
+        "llm ranking failed" in text and "fell back to screen_score" in text
+    ) or "dsa provider context applied" in text
+
+
+def _quality_values(value: Any) -> tuple[Any, ...]:
+    """Normalize list-like producer fields without iterating a scalar string."""
+
+    if value is None or value == "":
+        return ()
+    if isinstance(value, (list, tuple, set)):
+        return tuple(value)
+    return (value,)
+
+
+def screening_quality_failure(payload: dict[str, Any]) -> str | None:
+    """Classify producer quality without rejecting the deterministic fallback.
+
+    Provider/source errors remain fatal.  The ranking LLM is optional for the
+    lightweight rules path, so its explicit fallback to ``screen_score`` is a
+    usable, auditable result rather than a discovery failure.
+    """
+
+    source_errors = payload.get("source_errors") or []
+    if source_errors:
+        return "screening source_errors are present"
+
+    warnings = [
+        value
+        for value in _quality_values(payload.get("warnings"))
+        if not _is_nonfatal_quality_warning(value)
+    ]
+    if warnings:
+        return "screening warnings are present"
+
+    for value in _quality_values(payload.get("degradation")):
         text = str(value).lower()
+        if _is_nonfatal_quality_warning(value):
+            continue
         if any(token in text for token in ("failed", "fallback", "error", "unknown", "stale")):
             return "screening quality is degraded: " + str(value)
     return None
+
+
+def _screening_quality_failure(payload: dict[str, Any]) -> str | None:
+    """Backward-compatible private alias used by older callers/tests."""
+
+    return screening_quality_failure(payload)
 
 
 def _latest_completed_session(

@@ -272,6 +272,60 @@ def test_lock_unavailable_is_durable_skipped_without_entering_investment_work(is
     assert next(item for item in stages if item["stage"] == "LOCK")["state"] == "BLOCKED"
 
 
+def test_late_scheduler_callback_does_not_rewrite_terminal_cycle(isolated_db):
+    config = _config()
+    _persist_proposal_handoff_terminal(
+        config,
+        observed_at=NOW,
+        status="SKIPPED",
+        reason_code="GLOBAL_ANALYSIS_LOCK_UNAVAILABLE",
+        reason_detail="another natural run owns the lock",
+    )
+
+    _persist_proposal_handoff_terminal(
+        config,
+        observed_at=NOW + timedelta(minutes=1),
+        scheduled_for=NOW,
+        status="FAILED",
+        reason_code="HANDOFF_CONSTRUCTION_FAILED",
+        reason_detail="late callback must not replace the first terminal fact",
+        lock_acquired_at=NOW,
+        lock_released_at=NOW + timedelta(minutes=1),
+    )
+
+    projection = CanonicalCycleRepository(isolated_db).scheduler_projection(
+        scheduler_task_name="single_brain_proposal_handoff"
+    )
+    assert projection["last_terminal_status"] == "SKIPPED"
+    assert projection["last_terminal_reason"]["code"] == "GLOBAL_ANALYSIS_LOCK_UNAVAILABLE"
+
+
+def test_failure_persisted_after_unlock_ends_at_release_time(isolated_db):
+    config = _config()
+    released_at = NOW + timedelta(seconds=5)
+
+    _persist_proposal_handoff_terminal(
+        config,
+        observed_at=released_at,
+        scheduled_for=NOW,
+        status="FAILED",
+        reason_code="HANDOFF_CONSTRUCTION_FAILED",
+        reason_detail="construction failed after lock acquisition",
+        lock_acquired_at=NOW,
+        lock_released_at=released_at,
+    )
+
+    projection = CanonicalCycleRepository(isolated_db).scheduler_projection(
+        scheduler_task_name="single_brain_proposal_handoff"
+    )
+    assert projection["last_terminal_status"] == "FAILED"
+    cycle = CanonicalCycleRepository(isolated_db).get_cycle(
+        projection["last_terminal_cycle_id"]
+    )
+    assert cycle["ended_at"] == "2026-08-24T02:00:05Z"
+    assert cycle["lock_released_at"] == "2026-08-24T02:00:05Z"
+
+
 def test_scheduler_status_reads_last_terminal_cycle_from_canonical_ledger(isolated_db):
     repository = CanonicalCycleRepository(isolated_db)
     cycle_id = "m2-cycle-mission-1-status"

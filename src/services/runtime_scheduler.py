@@ -106,6 +106,18 @@ def _persist_proposal_handoff_terminal(
     )
     repository = CanonicalCycleRepository()
     existing = repository.get_cycle(cycle_id)
+    if existing is not None and existing.get("status") in {
+        "SUCCEEDED",
+        "PARTIAL",
+        "FAILED",
+        "SKIPPED",
+        "BLOCKED",
+        "NO_ACTION",
+    }:
+        # A cycle slot has one immutable terminal meaning.  Late scheduler
+        # callbacks (for example, failure handling after the lock is released)
+        # must not rewrite its stage facts with a different outcome.
+        return
     if existing is None:
         repository.start_cycle(
             cycle_id=cycle_id,
@@ -171,6 +183,7 @@ def _persist_proposal_handoff_terminal(
         status=status,
         terminal_reason_code=reason_code,
         terminal_reason_detail=reason_detail,
+        ended_at=lock_released_at,
         lock_released_at=lock_released_at,
     )
 
@@ -423,8 +436,9 @@ def build_single_brain_m2_background_tasks(
     }
     if execution_mode == "PROPOSAL_HANDOFF":
         # Anchor proposal cadence to the existing A-share morning session grid.
-        # Screening has its own task below, so its 14:45 producer due time can
-        # never phase-lock or suppress the ordinary proposal/NO_ACTION loop.
+        # Screening has its own post-close task below, so its 15:05 producer due
+        # time can never phase-lock or suppress the ordinary proposal/NO_ACTION
+        # loop.
         task_definition.update({
             "daily_due_time": PROPOSAL_SESSION_GRID_ANCHOR,
             "daily_due_timezone": "Asia/Shanghai",
