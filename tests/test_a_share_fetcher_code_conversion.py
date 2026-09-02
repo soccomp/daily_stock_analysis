@@ -115,8 +115,10 @@ class TestNormalizeStockCode(unittest.TestCase):
     def test_normalize_prefixed_dot_code(self) -> None:
         self.assertEqual(normalize_stock_code("SH.600519"), "600519")
         self.assertEqual(normalize_stock_code("sh.600519"), "600519")
+        self.assertEqual(normalize_stock_code("SHSE.600519"), "600519")
         self.assertEqual(normalize_stock_code("SZ.000001"), "000001")
         self.assertEqual(normalize_stock_code("sz.000001"), "000001")
+        self.assertEqual(normalize_stock_code("SZSE.000001"), "000001")
         self.assertEqual(normalize_stock_code("SS600519"), "600519")
         self.assertEqual(normalize_stock_code("SS.600519"), "600519")
         self.assertEqual(normalize_stock_code("600519.SS"), "600519")

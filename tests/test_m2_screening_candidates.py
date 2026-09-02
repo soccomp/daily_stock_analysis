@@ -104,6 +104,17 @@ def test_screening_candidates_are_injected_with_source_lineage():
     assert scope[0]["symbol"] == "600519"
 
 
+def test_exchange_qualified_portfolio_symbols_are_selected_as_cn_holdings():
+    """GM/Tushare SHSE/SZSE wire symbols must not disappear from the scope."""
+    snapshot = _snapshot_many("SHSE.600533", "SZSE.000977")
+    config = _config(symbols=(), max_symbols=2, holdings_limit=2)
+
+    scope = select_m2_research_objects(config=config, snapshot=snapshot)
+
+    assert [item["symbol"] for item in scope] == ["600533", "000977"]
+    assert all(item["source"] == "HOLDING" for item in scope)
+
+
 def test_screening_candidate_that_is_also_holding_is_deduped():
     snapshot = _snapshot()  # holds 600519
     config = _config(symbols=(), max_symbols=10, holdings_limit=10)

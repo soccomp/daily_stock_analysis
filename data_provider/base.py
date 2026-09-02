@@ -75,7 +75,9 @@ def normalize_stock_code(stock_code: str) -> str:
     - '600519'      -> '600519'   (already clean)
     - 'SH600519'    -> '600519'   (strip SH prefix)
     - 'SH.600519'   -> '600519'   (strip SH. prefix)
+    - 'SHSE.600519' -> '600519'   (strip GM/Tushare exchange-qualified prefix)
     - 'SZ000001'    -> '000001'   (strip SZ prefix)
+    - 'SZSE.000001' -> '000001'   (strip GM/Tushare exchange-qualified prefix)
     - 'SS600519'    -> '600519'   (strip legacy Yahoo Shanghai prefix)
     - 'SZ.000001'   -> '000001'   (strip SZ. prefix)
     - 'BJ920748'    -> '920748'   (strip BJ prefix, BSE)
@@ -103,6 +105,14 @@ def normalize_stock_code(stock_code: str) -> str:
         candidate = upper[2:]
         if candidate.isdigit() and 1 <= len(candidate) <= 5:
             return f"HK{candidate.zfill(5)}"
+
+    # Strip long exchange-qualified prefixes used by 掘金/GM and Tushare
+    # (e.g. SHSE.600519/SZSE.000001). PortfolioSnapshot keeps the wire
+    # representation, while research/selection needs the canonical bare code.
+    if upper.startswith(('SHSE.', 'SZSE.')):
+        candidate = code[5:]
+        if candidate.isdigit() and len(candidate) in (5, 6):
+            return candidate
 
     # Strip SH/SZ/SS prefix (e.g. SH600519 -> 600519, SS600519 -> 600519)
     if upper.startswith(('SH', 'SZ', 'SS')) and not upper.startswith(('SH.', 'SZ.', 'SS.')):
